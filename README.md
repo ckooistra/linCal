@@ -55,9 +55,11 @@ Linux (developed on Ubuntu 24.04; target desktop KDE Plasma). Windows and macOS 
 - Tauri's Linux system libraries:
 
   ```sh
-  sudo apt install pkg-config libwebkit2gtk-4.1-dev libssl-dev \
+  sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev libssl-dev \
     libayatana-appindicator3-dev librsvg2-dev libxdo-dev file
   ```
+
+  `build-essential` provides the C compiler used for Tauri's native parts and for the SQLite that is bundled into the app (no system SQLite is needed).
 
 - Optional, for headless screenshots and benchmarks: `xvfb xauth imagemagick`
 
