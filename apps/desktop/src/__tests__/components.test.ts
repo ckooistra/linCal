@@ -17,7 +17,7 @@ function calendarsStore() {
 const noop = () => {};
 
 describe("Sidebar", () => {
-  it("lists calendars by account and toggles visibility", async () => {
+  it("hides demo calendars by default and toggles visibility", async () => {
     const calendars = calendarsStore();
     render(Sidebar, {
       calendars,
@@ -32,10 +32,12 @@ describe("Sidebar", () => {
       onfailnext: noop,
     });
     const work = screen.getByLabelText("Work") as HTMLInputElement;
-    expect(work.checked).toBe(true);
-    await fireEvent.click(work);
-    expect(calendars.isVisible("cal-work")).toBe(false);
+    // Simulated (demo) calendars start unchecked; clicking shows them.
     expect(work.checked).toBe(false);
+    await fireEvent.click(work);
+    expect(calendars.isVisible("cal-work")).toBe(true);
+    expect(work.checked).toBe(true);
+    expect(calendars.choices()).toEqual({ "cal-work": true });
     expect(screen.getAllByTitle("Read-only")).toHaveLength(2);
   });
 });

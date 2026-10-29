@@ -13,10 +13,11 @@
   import PerfPanel from "./components/PerfPanel.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import Toasts from "./components/Toasts.svelte";
+  import TitleBar from "./components/TitleBar.svelte";
   import Toolbar from "./components/Toolbar.svelte";
   import { runBenchmarks, type BenchHarness } from "./bench/runner";
   import type { Backend } from "./services/backend";
-  import { getBenchConfig, submitBenchReport } from "./services/bridge";
+  import { getBenchConfig, setWindowTheme, submitBenchReport, windowControls } from "./services/bridge";
   import { measureInteraction, nextPaint, observeLongTasks } from "./services/perf";
   import { resolveShortcut } from "./services/shortcuts";
   import { parseThemePreference, resolveTheme, watchSystemDark, type ThemePreference } from "./services/theme";
@@ -162,9 +163,25 @@
   function toggleCalendar(id: string): void {
     calendars.toggle(id);
     clearTimeout(hiddenTimer);
-    clearTimeout(statusTimer);
-    hiddenTimer = setTimeout(() => void backend.saveSetting("hiddenCalendars", [...calendars.hidden]), 300);
+    hiddenTimer = setTimeout(() => void backend.saveSetting("calendarVisibility", calendars.choices()), 300);
   }
+
+  /** Saved visibility choices, migrating the older "hidden list" setting. */
+  function savedVisibility(): Record<string, boolean> {
+    const saved = initialSettings.calendarVisibility;
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      return Object.fromEntries(
+        Object.entries(saved as Record<string, unknown>).filter(
+          (e): e is [string, boolean] => typeof e[1] === "boolean",
+        ),
+      );
+    }
+    const legacy = initialSettings.hiddenCalendars;
+    return Array.isArray(legacy)
+      ? Object.fromEntries(legacy.filter((id): id is string => typeof id === "string").map((id) => [id, false]))
+      : {};
+  }
+  calendars.setChoices(savedVisibility());
 
   // --- view -----------------------------------------------------------------
   let controller: CalendarViewController | null = null;
@@ -200,6 +217,25 @@
   $effect(() => {
     document.documentElement.dataset.theme = theme;
   });
+  // The window frame follows the chosen theme; "System" leaves it to the
+  // desktop (forcing it would also change what "system" detects).
+  $effect(() => {
+    const frame = themePreference === "system" ? null : theme;
+    setWindowTheme(frame).catch(() => {});
+  });
+
+  // The app draws its own (themed) title bar unless the user prefers the
+  // desktop's native frame.
+  let systemTitleBar = $state(initialSettings.systemTitleBar === true);
+  const customTitleBar = $derived(backend.kind === "desktop" && !systemTitleBar);
+  $effect(() => {
+    windowControls.setNativeFrame(systemTitleBar).catch(() => {});
+  });
+
+  function setSystemTitleBar(on: boolean) {
+    systemTitleBar = on;
+    void backend.saveSetting("systemTitleBar", on);
+  }
 
   function setThemePreference(preference: ThemePreference) {
     themePreference = preference;
@@ -348,10 +384,7 @@
       unlisten?.();
     });
     refreshStatuses();
-    const hidden = initialSettings.hiddenCalendars;
-    void reloadCalendars().then(() => {
-      if (Array.isArray(hidden)) for (const id of hidden) if (typeof id === "string") calendars.setVisible(id, false);
-    });
+    void reloadCalendars();
     void startBenchIfRequested();
   });
 
@@ -376,6 +409,8 @@
     anchor: parseIsoDate(BENCH_ANCHOR),
     async loadDataset(size) {
       await switchDataset(size, BENCH_ANCHOR);
+      // Benchmarks measure the demo data, which is hidden by default.
+      calendars.setChoices(Object.fromEntries(calendars.calendars.map((c) => [c.id, true])));
       await tick();
       await untilVisibleLoaded();
     },
@@ -457,12 +492,18 @@
   );
 </script>
 
+<div class="window" class:framed={customTitleBar}>
+{#if customTitleBar}
+  <TitleBar title="Universal Calendar" />
+{/if}
 <div class="app">
   <Sidebar
     {calendars}
     {datasetSize}
     {latencyMs}
     {themePreference}
+    systemTitleBar={backend.kind === "desktop" ? systemTitleBar : undefined}
+    onsystemtitlebar={setSystemTitleBar}
     simulationControls={backend.mock !== null}
     onaddaccount={backend.kind === "desktop" ? () => (addingAccount = true) : undefined}
     onremoveaccount={(id) => (removing = { id, name: calendars.accounts.find((a) => a.id === id)?.name ?? id })}
@@ -511,6 +552,7 @@
     <footer class="status" role="status">{statusLine}</footer>
   </main>
 </div>
+</div>
 
 {#if editor}
   {#key editor.key}
@@ -555,10 +597,20 @@
 <Toasts {notifications} />
 
 <style>
+  .window {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  /* Without the native frame, draw a thin edge so the window stands out. */
+  .window.framed {
+    border: 1px solid var(--uc-border);
+  }
   .app {
     display: grid;
     grid-template-columns: 15rem 1fr;
-    height: 100vh;
+    flex: 1;
+    min-height: 0;
   }
   main {
     display: flex;

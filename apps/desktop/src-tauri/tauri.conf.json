@@ -17,7 +17,9 @@
         "width": 1280,
         "height": 820,
         "minWidth": 640,
-        "minHeight": 480
+        "minHeight": 480,
+        "theme": "Dark",
+        "decorations": false
       }
     ],
     "security": {
@@ -27,7 +29,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage"],
+    "targets": [
+      "deb",
+      "appimage"
+    ],
     "category": "Productivity",
     "shortDescription": "Local-first desktop calendar",
     "license": "GPL-3.0-or-later",

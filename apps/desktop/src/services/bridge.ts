@@ -79,6 +79,46 @@ export async function loadSimulatedDataset(size: number, timeZone: string, ancho
   await invoke("load_simulated_dataset", { size, timeZone, anchor: anchor ?? null });
 }
 
+/**
+ * Sets the window frame's theme (title bar). `null` follows the desktop.
+ * No-op in the browser preview.
+ */
+export async function setWindowTheme(theme: "light" | "dark" | null): Promise<void> {
+  if (!isTauri()) return;
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  await getCurrentWindow().setTheme(theme);
+}
+
+/** Window-frame controls for the app's own title bar (desktop only). */
+export const windowControls = {
+  async minimize(): Promise<void> {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().minimize();
+  },
+  async toggleMaximize(): Promise<void> {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().toggleMaximize();
+  },
+  async close(): Promise<void> {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().close();
+  },
+  /** Native frame on (system title bar) or off (the app's own). */
+  async setNativeFrame(native: boolean): Promise<void> {
+    if (!isTauri()) return;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().setDecorations(native);
+  },
+  /** Calls `listener(isMaximized)` now and after every resize. */
+  async onResize(listener: (maximized: boolean) => void): Promise<() => void> {
+    if (!isTauri()) return () => {};
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const win = getCurrentWindow();
+    listener(await win.isMaximized());
+    return win.onResized(async () => listener(await win.isMaximized()));
+  },
+};
+
 /** Connects a CalDAV account; resolves to its id. The password goes to the system keyring. */
 export async function addCaldavAccount(serverUrl: string, username: string, password: string): Promise<string> {
   return invoke<string>("add_caldav_account", { serverUrl, username, password });

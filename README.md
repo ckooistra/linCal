@@ -45,7 +45,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - Optimistic updates. A failed save is rolled back with a visible message.
 - Visible-range loading with adjacent-month prefetch and cancellation of obsolete loads.
 - Debounced search over loaded events.
-- Light and dark themes that follow the system preference.
+- Dark theme by default, with Light and System options. The app draws its own title bar in the same theme. Settings → *Use system title bar* switches back to the desktop's native frame.
 - Keyboard shortcuts:
 
   | Key | Action |
@@ -60,7 +60,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 
   Shortcuts don't fire while you're typing in a field.
 - Deterministic data generator (100 / 1,000 / 5,000 events, written in Rust), a scripted UI benchmark that runs in the real WebKitGTK window, and a storage benchmark. See [docs/performance.md](docs/performance.md).
-- On first run the app seeds 1,000 simulated events in three demo accounts. **Choosing a dataset in the sidebar replaces the simulated events only**; CalDAV accounts are not touched.
+- On first run the app seeds 1,000 simulated events in three demo accounts. Their calendars are **hidden by default**; tick one in the sidebar to show it. Visibility choices are remembered per calendar. **Choosing a dataset in the sidebar replaces the simulated events only**; CalDAV accounts are not touched.
 
 ## Supported platforms
 

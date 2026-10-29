@@ -8,6 +8,9 @@
     datasetSize: number;
     latencyMs: number;
     themePreference: ThemePreference;
+    /** Present in the desktop app: native window frame instead of the app's title bar. */
+    systemTitleBar?: boolean | undefined;
+    onsystemtitlebar?: (on: boolean) => void;
     /** Show latency/failure injection (in-memory preview only). */
     simulationControls?: boolean;
     ontogglecalendar: (id: string) => void;
@@ -27,6 +30,8 @@
     datasetSize,
     latencyMs,
     themePreference,
+    systemTitleBar,
+    onsystemtitlebar,
     simulationControls = true,
     ontogglecalendar,
     oncolor,
@@ -130,6 +135,12 @@
         <option value="dark">Dark</option>
       </select>
     </label>
+    {#if onsystemtitlebar && systemTitleBar !== undefined}
+      <label class="check">
+        <input type="checkbox" checked={systemTitleBar} onchange={(e) => onsystemtitlebar(e.currentTarget.checked)} />
+        <span>Use system title bar</span>
+      </label>
+    {/if}
   </section>
 
   <section class="settings">
@@ -251,6 +262,11 @@
     display: grid;
     gap: 0.2rem;
     margin-bottom: 0.5rem;
+  }
+  .settings label.check {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
   }
   .settings label span {
     color: var(--uc-text-muted);

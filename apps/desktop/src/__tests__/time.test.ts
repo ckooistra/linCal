@@ -78,3 +78,13 @@ describe("time-of-day input", () => {
     expect(formatDuration(90)).toBe("1 h 30 min");
   });
 });
+
+describe("theme preference", async () => {
+  const { parseThemePreference } = await import("../services/theme");
+  it("defaults to dark and keeps explicit choices", () => {
+    expect(parseThemePreference(undefined)).toBe("dark");
+    expect(parseThemePreference("bogus")).toBe("dark");
+    expect(parseThemePreference("system")).toBe("system");
+    expect(parseThemePreference("light")).toBe("light");
+  });
+});

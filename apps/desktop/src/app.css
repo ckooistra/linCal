@@ -8,7 +8,9 @@
   --uc-text-muted: #5f6672;
   --uc-border: #dfe2e7;
   --uc-accent: #3b5bdb;
+  --uc-accent-strong: #2b44a8;
   --uc-accent-text: #ffffff;
+  --uc-titlebar: #eceef2;
   --uc-danger: #c92a2a;
   --uc-backdrop: rgb(15 18 25 / 0.35);
   --uc-focus: #3b5bdb;
@@ -23,7 +25,9 @@
   --uc-text-muted: #9aa1ad;
   --uc-border: #33373f;
   --uc-accent: #7a8cff;
+  --uc-accent-strong: #5468e8;
   --uc-accent-text: #0f1115;
+  --uc-titlebar: #121418;
   --uc-danger: #ff6b6b;
   --uc-backdrop: rgb(0 0 0 / 0.55);
   --uc-focus: #9aa8ff;

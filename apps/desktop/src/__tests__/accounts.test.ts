@@ -122,3 +122,37 @@ describe("EventEditor sync conflicts", () => {
     expect(onresolve).toHaveBeenCalledWith(true);
   });
 });
+
+describe("Calendar visibility defaults", () => {
+  it("shows real calendars, hides demo ones, and honours saved choices", () => {
+    const s = new CalendarsStore();
+    s.setChoices({ "cal-team": true, "dav/home": false });
+    s.load(
+      [
+        { id: "acct-work", name: "Work (simulated Google)", provider: "simulated" },
+        { id: "dav", name: "alice", provider: "caldav" },
+      ],
+      [
+        { id: "cal-work", accountId: "acct-work", name: "Work", color: "#111111", readOnly: false },
+        { id: "cal-team", accountId: "acct-work", name: "Team", color: "#222222", readOnly: false },
+        { id: "dav/work", accountId: "dav", name: "Work", color: "#333333", readOnly: false },
+        { id: "dav/home", accountId: "dav", name: "Home", color: "#444444", readOnly: false },
+      ],
+    );
+    expect([...s.hidden].sort()).toEqual(["cal-work", "dav/home"]);
+    s.toggle("dav/home");
+    expect(s.isVisible("dav/home")).toBe(true);
+    expect(s.choices()).toEqual({ "cal-team": true, "dav/home": true });
+  });
+});
+
+describe("TitleBar", async () => {
+  const { default: TitleBar } = await import("../components/TitleBar.svelte");
+  it("renders a draggable title with window controls", () => {
+    const { container } = render(TitleBar, { title: "Universal Calendar" });
+    expect(container.querySelector("[data-tauri-drag-region]")).toBeTruthy();
+    for (const name of ["Minimize", "Maximize", "Close"]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+  });
+});

@@ -28,11 +28,35 @@ export class CalendarsStore {
     this.syncing = next;
   }
 
+  /** Explicit user choices; calendars without one use `defaultVisible`. */
+  #choices: Record<CalendarId, boolean> = {};
+
+  /** Simulated demo calendars start hidden; real calendars start visible. */
+  defaultVisible(calendar: Calendar): boolean {
+    return this.accounts.find((a) => a.id === calendar.accountId)?.provider !== "simulated";
+  }
+
+  /** Restores saved visibility choices. */
+  setChoices(choices: Record<CalendarId, boolean>): void {
+    this.#choices = { ...choices };
+    this.#recompute();
+  }
+
+  /** Visibility choices to persist. */
+  choices(): Record<CalendarId, boolean> {
+    return { ...this.#choices };
+  }
+
+  #recompute(): void {
+    this.hidden = new Set(
+      this.calendars.filter((c) => !(this.#choices[c.id] ?? this.defaultVisible(c))).map((c) => c.id),
+    );
+  }
+
   load(accounts: Account[], calendars: Calendar[]): void {
     this.accounts = accounts;
     this.calendars = calendars;
-    const ids = new Set(calendars.map((c) => c.id));
-    this.hidden = new Set([...this.hidden].filter((id) => ids.has(id)));
+    this.#recompute();
   }
 
   get(id: CalendarId): Calendar | undefined {
@@ -49,6 +73,7 @@ export class CalendarsStore {
   }
 
   setVisible(id: CalendarId, visible: boolean): void {
+    this.#choices[id] = visible;
     if (visible === this.isVisible(id)) return;
     const next = new Set(this.hidden);
     if (visible) next.delete(id);

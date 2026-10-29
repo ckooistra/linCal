@@ -6,8 +6,11 @@ export function resolveTheme(preference: ThemePreference, systemDark: boolean): 
   return preference;
 }
 
+/** Dark unless the user chose otherwise. */
+export const DEFAULT_THEME_PREFERENCE: ThemePreference = "dark";
+
 export function parseThemePreference(value: unknown): ThemePreference {
-  return value === "light" || value === "dark" ? value : "system";
+  return value === "light" || value === "dark" || value === "system" ? value : DEFAULT_THEME_PREFERENCE;
 }
 
 /** Calls `onChange` when the OS colour scheme changes. Returns a cleanup function. */
