@@ -3,6 +3,7 @@
   import type { Calendar, CalendarEvent, EventDraft, EventTiming } from "../types/calendar";
   import type { SeriesScope } from "../stores/events.svelte";
   import { repeatOptions } from "../services/recurrence";
+  import TimeField from "./TimeField.svelte";
   import {
     addIsoDays,
     combineDateTime,
@@ -80,6 +81,41 @@
 
   let dialog: HTMLDivElement;
   let titleInput: HTMLInputElement;
+
+  /** Current start/end as instants (timed) or day numbers (all-day); null while invalid. */
+  function span(): { start: number; end: number } | null {
+    if (allDay) {
+      try {
+        return { start: parseIsoDate(startDate).getTime(), end: parseIsoDate(endDate).getTime() };
+      } catch {
+        return null;
+      }
+    }
+    const start = combineDateTime(startDate, startTime);
+    const end = combineDateTime(endDate, endTime);
+    return start && end ? { start: start.getTime(), end: end.getTime() } : null;
+  }
+
+  /** Moving the start keeps the event's length, as calendar apps usually do. */
+  function moveStart(apply: () => void) {
+    const before = span();
+    apply();
+    if (!before || before.end < before.start) return;
+    if (allDay) {
+      const days = Math.round((before.end - before.start) / 86_400_000);
+      try {
+        endDate = addIsoDays(startDate, days);
+      } catch {
+        // Start date still being typed.
+      }
+      return;
+    }
+    const start = combineDateTime(startDate, startTime);
+    if (!start) return;
+    const end = new Date(start.getTime() + (before.end - before.start));
+    endDate = toIsoDate(end);
+    endTime = toTimeString(end);
+  }
 
   const choices = $derived(readOnly ? calendars : calendars.filter((c) => !c.readOnly || c.id === calendarId));
   const heading = $derived(event ? (readOnly ? "Event details" : "Edit event") : "New event");
@@ -188,23 +224,25 @@
         <div class="when">
           <label>
             <span>Starts</span>
-            <input type="date" bind:value={startDate} required />
+            <input
+              type="date"
+              value={startDate}
+              required
+              oninput={(e) => {
+                const v = e.currentTarget.value;
+                moveStart(() => (startDate = v));
+              }}
+            />
           </label>
           {#if !allDay}
-            <label>
-              <span class="sr-only">Start time</span>
-              <input type="time" bind:value={startTime} step="300" required />
-            </label>
+            <TimeField label="Start time" value={startTime} onchange={(v) => moveStart(() => (startTime = v))} />
           {/if}
           <label>
             <span>Ends</span>
             <input type="date" bind:value={endDate} required />
           </label>
           {#if !allDay}
-            <label>
-              <span class="sr-only">End time</span>
-              <input type="time" bind:value={endTime} step="300" required />
-            </label>
+            <TimeField label="End time" bind:value={endTime} relativeTo={startDate === endDate ? startTime : null} />
           {/if}
         </div>
         <label class="full">

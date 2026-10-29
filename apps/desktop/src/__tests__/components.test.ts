@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/svelte";
 import Sidebar from "../components/Sidebar.svelte";
 import EventEditor from "../components/EventEditor.svelte";
+import TimeField from "../components/TimeField.svelte";
 import { CalendarsStore } from "../stores/calendars.svelte";
 import { simulatedAccounts, simulatedCalendars } from "../services/mock/generator";
 import { parseIsoDate } from "../services/time";
@@ -160,5 +161,90 @@ describe("EventEditor with recurring events", () => {
     await fireEvent.change(repeat, { target: { value: "FREQ=MONTHLY" } });
     await fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(onsave.mock.calls[0]?.[0]).toMatchObject({ rrule: "FREQ=MONTHLY", title: "Stand-up" });
+  });
+});
+
+describe("TimeField", () => {
+  it("opens a list of times on click and picks one", async () => {
+    const onchange = vi.fn();
+    render(TimeField, { value: "09:00", label: "Start time", onchange });
+    const input = screen.getByRole("combobox", { name: "Start time" });
+    await fireEvent.click(input);
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(96);
+    const selected = options.find((o) => o.getAttribute("aria-selected") === "true");
+    expect(selected?.dataset.index).toBe("36");
+    await fireEvent.mouseDown(options[42]!);
+    expect(onchange).toHaveBeenCalledWith("10:30");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("supports keyboard selection", async () => {
+    const onchange = vi.fn();
+    render(TimeField, { value: "09:00", label: "Start time", onchange });
+    const input = screen.getByRole("combobox", { name: "Start time" });
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(onchange).toHaveBeenCalledWith("09:15");
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("accepts typed times and shows durations after a start time", async () => {
+    const onchange = vi.fn();
+    render(TimeField, { value: "10:00", label: "End time", relativeTo: "09:00", onchange });
+    const input = screen.getByRole("combobox", { name: "End time" });
+    await fireEvent.input(input, { target: { value: "2:45pm" } });
+    expect(onchange).toHaveBeenLastCalledWith("14:45");
+    await fireEvent.click(input);
+    expect(screen.getAllByRole("option")[42]?.textContent).toMatch(/\(1 h 30 min\)/);
+  });
+});
+
+describe("EventEditor time handling", () => {
+  it("closes an open time list with Escape before closing the dialog", async () => {
+    const start = parseIsoDate("2026-06-15").getTime() + 9 * 3_600_000;
+    const onclose = vi.fn();
+    render(EventEditor, {
+      event: null,
+      timing: { kind: "timed", start, end: start + 3_600_000, timeZone: "Europe/Berlin" },
+      calendars: simulatedCalendars(),
+      defaultCalendarId: "cal-work",
+      readOnly: false,
+      onsave: () => null,
+      ondelete: noop,
+      onclose,
+    });
+    const input = screen.getByRole("combobox", { name: "Start time" });
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    await fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(onclose).not.toHaveBeenCalled();
+    await fireEvent.keyDown(input, { key: "Escape" });
+    expect(onclose).toHaveBeenCalledOnce();
+  });
+
+  it("moves the end with the start so the duration is kept", async () => {
+    const start = parseIsoDate("2026-06-15").getTime() + 9 * 3_600_000;
+    const timing = { kind: "timed" as const, start, end: start + 90 * 60_000, timeZone: "Europe/Berlin" };
+    const onsave = vi.fn((_draft: unknown) => null);
+    render(EventEditor, {
+      event: null,
+      timing,
+      calendars: simulatedCalendars(),
+      defaultCalendarId: "cal-work",
+      readOnly: false,
+      onsave,
+      ondelete: noop,
+      onclose: noop,
+    });
+    await fireEvent.input(screen.getByRole("combobox", { name: "Start time" }), { target: { value: "23:00" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const saved = onsave.mock.calls[0]?.[0] as { timing: { start: number; end: number } };
+    expect(saved.timing.end - saved.timing.start).toBe(90 * 60_000);
+    // Crosses midnight: the end date moved to the next day.
+    expect(new Date(saved.timing.end).getDate()).toBe(16);
   });
 });

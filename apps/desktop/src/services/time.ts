@@ -100,3 +100,58 @@ export function validateTiming(timing: EventTiming): string | null {
   if (timing.endDate <= timing.startDate) return "The event must end after it starts.";
   return null;
 }
+
+/**
+ * Parse a typed time of day into `HH:MM` (24 h). Accepts `9`, `930`, `0930`,
+ * `9:30`, `9.30`, `21h30`, and 12-hour forms such as `9:30pm`, `9 a`, `12am`.
+ * Returns null when the text is not a valid time.
+ */
+export function parseTimeInput(text: string): string | null {
+  const m = /^(\d{1,2})(?:[:.h]?(\d{2}))?\s*([ap])?\.?\s*m?\.?$/i.exec(text.trim());
+  if (!m) return null;
+  let hours = Number(m[1]);
+  const minutes = m[2] === undefined ? 0 : Number(m[2]);
+  const meridiem = m[3]?.toLowerCase();
+  if (minutes > 59) return null;
+  if (meridiem) {
+    if (hours < 1 || hours > 12) return null;
+    hours = (hours % 12) + (meridiem === "p" ? 12 : 0);
+  } else if (hours > 23) {
+    return null;
+  }
+  return `${pad(hours)}:${pad(minutes)}`;
+}
+
+/** Minutes since midnight of an `HH:MM` value. */
+export function minutesOfDay(value: string): number {
+  const [h = "0", m = "0"] = value.split(":");
+  return Number(h) * 60 + Number(m);
+}
+
+export function timeFromMinutes(minutes: number): string {
+  const m = ((minutes % 1440) + 1440) % 1440;
+  return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+}
+
+/** Whether the user's locale shows times on a 12-hour clock. */
+export function prefers12Hour(): boolean {
+  const cycle = new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hourCycle;
+  return cycle === "h11" || cycle === "h12";
+}
+
+/** Display label for an `HH:MM` value, e.g. `9:30 AM` or `09:30`. */
+export function formatTimeLabel(value: string, hour12: boolean): string {
+  if (!hour12) return value;
+  const minutes = minutesOfDay(value);
+  const h = Math.floor(minutes / 60);
+  const suffix = h < 12 ? "AM" : "PM";
+  return `${h % 12 === 0 ? 12 : h % 12}:${pad(minutes % 60)} ${suffix}`;
+}
+
+/** Short duration label, e.g. `30 min`, `1 h`, `1 h 30 min`. */
+export function formatDuration(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m} min`;
+  return m === 0 ? `${h} h` : `${h} h ${m} min`;
+}
