@@ -31,7 +31,7 @@ pub struct MemorySample {
     processes: usize,
 }
 
-fn bench_enabled() -> bool {
+pub fn enabled() -> bool {
     std::env::var("UC_BENCH").is_ok_and(|v| v == "1")
 }
 
@@ -44,7 +44,7 @@ pub fn bench_config() -> BenchConfig {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_SIZES.to_vec());
     BenchConfig {
-        enabled: bench_enabled(),
+        enabled: enabled(),
         sizes,
     }
 }
@@ -61,7 +61,7 @@ pub fn bench_memory() -> Option<MemorySample> {
 /// Fails when benchmark mode is off or the report cannot be written.
 #[tauri::command]
 pub async fn bench_report(app: tauri::AppHandle, report: serde_json::Value) -> Result<(), String> {
-    if !bench_enabled() {
+    if !enabled() {
         return Err("benchmark mode is not enabled".into());
     }
     let output = serde_json::json!({

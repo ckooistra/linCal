@@ -21,7 +21,8 @@ const timed: CalendarEvent = {
   seriesId: null,
   syncStatus: "saved",
   revision: 1,
-  updatedAt: 0,
+  recurrenceId: null,
+  rrule: null,
 };
 
 describe("svarMapping", () => {

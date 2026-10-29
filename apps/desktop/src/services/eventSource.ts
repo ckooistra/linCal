@@ -3,6 +3,7 @@ import type {
   Calendar,
   CalendarEvent,
   DateRange,
+  EditScope,
   EventDraft,
   EventId,
 } from "../types/calendar";
@@ -10,19 +11,27 @@ import type {
 /**
  * Boundary between the UI and whatever owns event data.
  *
- * Milestone 1 implements it with an in-memory mock. Milestone 2 replaces it
- * with a thin wrapper around Tauri commands backed by the Rust core and
- * SQLite; stores and components only ever see this interface.
+ * In the desktop app this is `TauriEventSource` (Rust core + SQLite); the
+ * in-memory `MockEventSource` serves tests and the browser preview. Stores
+ * and components only ever see this interface.
  */
 export interface EventSource {
   listAccounts(): Promise<Account[]>;
   listCalendars(): Promise<Calendar[]>;
-  /** Events overlapping `[range.start, range.end)`. Rejects with `AbortError` when aborted. */
+  /**
+   * Occurrences overlapping `[range.start, range.end)`, with recurring
+   * series expanded. Rejects with `AbortError` when aborted.
+   */
   queryRange(range: DateRange, options?: { signal?: AbortSignal }): Promise<CalendarEvent[]>;
   /** Create with a client-generated stable id so optimistic UI and persistence agree. */
   createEvent(id: EventId, draft: EventDraft): Promise<CalendarEvent>;
-  updateEvent(id: EventId, draft: EventDraft): Promise<CalendarEvent>;
-  deleteEvent(id: EventId): Promise<void>;
+  /**
+   * Update a one-off event, a single occurrence, or a whole series (`id` is
+   * then any occurrence id of it). Series updates return the series' first
+   * occurrence; callers should reload affected ranges.
+   */
+  updateEvent(id: EventId, draft: EventDraft, scope: EditScope): Promise<CalendarEvent>;
+  deleteEvent(id: EventId, scope: EditScope): Promise<void>;
 }
 
 /** User-facing error from a data source. */

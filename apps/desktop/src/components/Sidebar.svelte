@@ -8,6 +8,8 @@
     datasetSize: number;
     latencyMs: number;
     themePreference: ThemePreference;
+    /** Show latency/failure injection (in-memory preview only). */
+    simulationControls?: boolean;
     ontogglecalendar: (id: string) => void;
     oncolor: (id: string, color: string) => void;
     ondataset: (size: number) => void;
@@ -21,6 +23,7 @@
     datasetSize,
     latencyMs,
     themePreference,
+    simulationControls = true,
     ontogglecalendar,
     oncolor,
     ondataset,
@@ -82,13 +85,14 @@
   <section class="settings">
     <h3>Simulation</h3>
     <label>
-      <span>Dataset</span>
+      <span>Dataset (replaces all events)</span>
       <select value={datasetSize} onchange={(e) => ondataset(Number(e.currentTarget.value))}>
         {#each DATASET_SIZES as size (size)}
           <option value={size}>{size.toLocaleString()} events</option>
         {/each}
       </select>
     </label>
+    {#if simulationControls}
     <label>
       <span>Storage latency</span>
       <select value={latencyMs} onchange={(e) => onlatency(Number(e.currentTarget.value))}>
@@ -99,6 +103,7 @@
       </select>
     </label>
     <button type="button" onclick={onfailnext}>Fail next save</button>
+    {/if}
   </section>
 </nav>
 

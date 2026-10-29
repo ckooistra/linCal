@@ -1,8 +1,9 @@
 # Synchronization
 
-> **Status: design outline. Nothing here is implemented yet** (Milestones 2–4).
-> Milestone 1 already models the user-visible part (optimistic updates,
-> rollback, `SyncStatus`) against a mock source.
+> **Status: design outline. Remote synchronization is not implemented yet**
+> (Milestones 3–4). Milestone 2 provides the local half: every change is
+> committed to SQLite in a transaction before it is shown as `saved`, and the
+> UI's optimistic updates roll back if that write fails.
 
 ## Principles
 

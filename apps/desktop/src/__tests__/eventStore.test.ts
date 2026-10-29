@@ -169,3 +169,76 @@ describe("EventStore optimistic writes", () => {
     expect(store.get(result.id)).toBeDefined();
   });
 });
+
+describe("EventStore with recurring occurrences", () => {
+  function seriesSetup() {
+    const ctx = setup();
+    const start = parseIsoDate("2026-06-15").getTime() + 9 * 3_600_000;
+    const occ = (day: number) => ({
+      id: `s::${day}`,
+      calendarId: "cal-team",
+      title: "Stand-up",
+      description: "",
+      location: "",
+      timing: { kind: "timed" as const, start: start + day * 86_400_000, end: start + day * 86_400_000 + 900_000, timeZone: "UTC" },
+      seriesId: "s",
+      recurrenceId: String(day),
+      rrule: "FREQ=DAILY",
+      syncStatus: "saved" as const,
+      revision: 1,
+    });
+    return { ...ctx, occ };
+  }
+
+  it("passes the scope to the source and reloads after series edits", async () => {
+    const { store, source, changes, occ } = seriesSetup();
+    // Seed two occurrences through the source so the store can load them.
+    const created = [occ(0), occ(1)];
+    vi.spyOn(source, "queryRange").mockResolvedValue(created);
+    await store.load(june, "visible");
+    const update = vi.spyOn(source, "updateEvent").mockResolvedValue({ ...occ(0), title: "Daily sync" });
+
+    store.update("s::0", { ...occ(0), title: "Moved" }, "occurrence");
+    await flush();
+    expect(update).toHaveBeenLastCalledWith("s::0", expect.objectContaining({ title: "Moved" }), "occurrence");
+    expect(changes.some((c) => c.type === "invalidated")).toBe(false);
+
+    store.update("s::1", { ...occ(1), title: "Daily sync" }, "series");
+    await flush();
+    expect(update).toHaveBeenLastCalledWith("s::1", expect.objectContaining({ title: "Daily sync" }), "series");
+    expect(changes.at(-1)).toEqual({ type: "invalidated" });
+    expect(store.covers(june)).toBe(false);
+  });
+
+  it("refuses to move a single occurrence to another calendar", async () => {
+    const { store, source, occ } = seriesSetup();
+    vi.spyOn(source, "queryRange").mockResolvedValue([occ(0)]);
+    await store.load(june, "visible");
+    expect(store.update("s::0", { ...occ(0), calendarId: "cal-work" }, "occurrence").ok).toBe(false);
+  });
+
+  it("removes every cached occurrence when deleting a series, and restores them on failure", async () => {
+    const { store, source, errors, occ } = seriesSetup();
+    vi.spyOn(source, "queryRange").mockResolvedValue([occ(0), occ(1), occ(2)]);
+    await store.load(june, "visible");
+    const del = vi.spyOn(source, "deleteEvent").mockRejectedValueOnce(new Error("disk full"));
+    store.remove("s::1", "series");
+    expect(store.get("s::0")).toBeUndefined();
+    expect(store.get("s::2")).toBeUndefined();
+    expect(del).toHaveBeenCalledWith("s::1", "series");
+    await flush();
+    expect(store.get("s::0")?.id).toBe("s::0");
+    expect(store.get("s::2")?.id).toBe("s::2");
+    expect(errors).toEqual(["The event could not be deleted."]);
+  });
+
+  it("cancels a single occurrence without touching the others", async () => {
+    const { store, source, occ } = seriesSetup();
+    vi.spyOn(source, "queryRange").mockResolvedValue([occ(0), occ(1)]);
+    await store.load(june, "visible");
+    const del = vi.spyOn(source, "deleteEvent").mockResolvedValue();
+    store.remove("s::0", "occurrence");
+    expect(del).toHaveBeenCalledWith("s::0", "occurrence");
+    expect(store.get("s::1")).toBeDefined();
+  });
+});

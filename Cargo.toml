@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/desktop/src-tauri"]
+members = ["apps/desktop/src-tauri", "crates/calendar-core", "crates/calendar-storage"]
 
 [workspace.package]
 edition = "2024"

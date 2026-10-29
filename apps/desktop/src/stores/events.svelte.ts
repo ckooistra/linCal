@@ -1,13 +1,25 @@
 import { isAbortError, SourceError, type EventSource } from "../services/eventSource";
 import { eventBounds, overlaps, validateTiming } from "../services/time";
-import type { CalendarEvent, CalendarId, DateRange, EventDraft, EventId } from "../types/calendar";
+import type {
+  CalendarEvent,
+  CalendarId,
+  DateRange,
+  EditScope,
+  EventDraft,
+  EventId,
+} from "../types/calendar";
 import { mergeRange, rangeCovered } from "./ranges";
 
 export type StoreChange =
   | { type: "upsert"; event: CalendarEvent }
   | { type: "remove"; id: EventId }
   | { type: "loaded"; range: DateRange }
+  /** Cached ranges were dropped (e.g. a whole series changed); reload what is visible. */
+  | { type: "invalidated" }
   | { type: "reset" };
+
+/** For occurrences of a series: change just this one, or the whole series. */
+export type SeriesScope = "occurrence" | "series";
 
 export type MutationResult = { ok: true; id: EventId } | { ok: false; message: string };
 
@@ -124,6 +136,17 @@ export class EventStore {
     }
   }
 
+  /**
+   * Drop cached ranges so the next load fetches fresh data. Used after
+   * changes that affect occurrences other than the one edited.
+   */
+  invalidate(): void {
+    this.#abort("visible");
+    this.#abort("prefetch");
+    this.#loaded = [];
+    this.#emit({ type: "invalidated" });
+  }
+
   create(draft: EventDraft): MutationResult {
     const invalid = this.#validate(draft);
     if (invalid) return { ok: false, message: invalid };
@@ -132,13 +155,18 @@ export class EventStore {
       ...draft,
       id,
       seriesId: null,
+      recurrenceId: null,
+      rrule: draft.rrule ?? null,
       syncStatus: "pending-local",
       revision: 1,
-      updatedAt: Date.now(),
     };
     this.#set(optimistic);
     this.#source.createEvent(id, draft).then(
-      (saved) => this.#settle(id, optimistic.revision, saved),
+      (saved) => {
+        this.#settle(id, optimistic.revision, saved);
+        // A new series has occurrences beyond the one shown optimistically.
+        if (optimistic.rrule) this.invalidate();
+      },
       (error: unknown) => {
         if (this.#events.get(id)?.revision === optimistic.revision) this.#delete(id);
         this.#options.onError(describe(error, "The event could not be created."));
@@ -147,7 +175,11 @@ export class EventStore {
     return { ok: true, id };
   }
 
-  update(id: EventId, draft: EventDraft): MutationResult {
+  /**
+   * Edit an event. For an occurrence of a recurring series, `scope` chooses
+   * between changing only this occurrence and changing the whole series.
+   */
+  update(id: EventId, draft: EventDraft, scope: SeriesScope = "occurrence"): MutationResult {
     const previous = this.#events.get(id);
     if (!previous) return { ok: false, message: "The event no longer exists." };
     if (this.#options.isReadOnly(previous.calendarId)) {
@@ -155,16 +187,32 @@ export class EventStore {
     }
     const invalid = this.#validate(draft);
     if (invalid) return { ok: false, message: invalid };
+    const effective: EditScope = previous.seriesId ? scope : "event";
+    if (effective === "occurrence" && draft.calendarId !== previous.calendarId) {
+      return { ok: false, message: "A single occurrence cannot move to another calendar." };
+    }
+    const rrule = effective === "occurrence" || draft.rrule === undefined ? previous.rrule : draft.rrule;
     const optimistic: CalendarEvent = {
       ...previous,
       ...draft,
+      rrule,
       syncStatus: "pending-local",
       revision: previous.revision + 1,
-      updatedAt: Date.now(),
     };
     this.#set(optimistic);
-    this.#source.updateEvent(id, draft).then(
-      (saved) => this.#settle(id, optimistic.revision, saved),
+    const affectsOthers = effective === "series" || rrule !== previous.rrule;
+    this.#source.updateEvent(id, { ...draft, rrule }, effective).then(
+      (saved) => {
+        if (affectsOthers) {
+          // Other occurrences changed too: let the reload replace this one.
+          const current = this.#events.get(id);
+          if (current?.revision === optimistic.revision) this.#events.set(id, { ...current, syncStatus: "saved" });
+          this.#confirmed.delete(id);
+          this.invalidate();
+        } else {
+          this.#settle(id, optimistic.revision, saved);
+        }
+      },
       (error: unknown) => {
         // Only roll back if no newer local edit has superseded this one.
         if (this.#events.get(id)?.revision === optimistic.revision) {
@@ -176,22 +224,37 @@ export class EventStore {
     return { ok: true, id };
   }
 
-  remove(id: EventId): MutationResult {
+  /**
+   * Delete an event. For an occurrence of a series, `scope` chooses between
+   * cancelling this occurrence and deleting the whole series.
+   */
+  remove(id: EventId, scope: SeriesScope = "occurrence"): MutationResult {
     const previous = this.#events.get(id);
     if (!previous) return { ok: false, message: "The event no longer exists." };
     if (this.#options.isReadOnly(previous.calendarId)) {
       return { ok: false, message: "This event belongs to a read-only calendar." };
     }
-    this.#tombstones.add(id);
-    this.#delete(id);
-    this.#source.deleteEvent(id).then(
+    const effective: EditScope = previous.seriesId ? scope : "event";
+    const removed =
+      effective === "series"
+        ? [...this.#events.values()].filter((e) => e.seriesId === previous.seriesId)
+        : [previous];
+    for (const event of removed) {
+      this.#tombstones.add(event.id);
+      this.#delete(event.id);
+    }
+    this.#source.deleteEvent(id, effective).then(
       () => {
-        this.#tombstones.delete(id);
-        this.#confirmed.delete(id);
+        for (const event of removed) {
+          this.#tombstones.delete(event.id);
+          this.#confirmed.delete(event.id);
+        }
       },
       (error: unknown) => {
-        this.#tombstones.delete(id);
-        this.#set(this.#confirmed.get(id) ?? previous);
+        for (const event of removed) {
+          this.#tombstones.delete(event.id);
+          this.#set(this.#confirmed.get(event.id) ?? event);
+        }
         this.#options.onError(describe(error, "The event could not be deleted."));
       },
     );

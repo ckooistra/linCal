@@ -1,6 +1,6 @@
 # Dependency and license review
 
-- **Last reviewed:** 2026-10-29 (Milestone 1)
+- **Last reviewed:** 2026-10-29 (Milestone 2)
 - **Project license:** GPL-3.0-or-later
 
 ## Direct dependencies
@@ -10,14 +10,20 @@
 | `@svar-ui/svelte-calendar` | 2.7.1 (exact pin) | MIT | Calendar widget (see [0001](0001-svar-calendar.md)) |
 | `@tauri-apps/api` | 2.12.4 | Apache-2.0 OR MIT | Tauri IPC (bench hooks only in M1) |
 | `tauri` / `tauri-build` (Rust) | 2.12.5 / 2.7.4 | Apache-2.0 OR MIT | Desktop shell |
-| `serde`, `serde_json` (Rust) | 1.x | MIT OR Apache-2.0 | Command (de)serialisation |
+| `serde`, `serde_json` (Rust) | 1.x | MIT OR Apache-2.0 | Command and wire (de)serialisation |
+| `sqlx` (sqlite, runtime-tokio, migrate) | 0.9.0 | MIT OR Apache-2.0 | SQLite access and embedded migrations |
+| `libsqlite3-sys` (bundled SQLite) | 0.37.0 | MIT (SQLite itself: public domain) | Pulled in by SQLx; bundled so no system SQLite is needed |
+| `rrule` | 0.14.0 | MIT OR Apache-2.0 | RFC 5545 recurrence evaluation |
+| `chrono`, `chrono-tz` | 0.4 / 0.10 | MIT OR Apache-2.0 | Dates, times, IANA zones |
+| `tokio` | 1.54 | MIT | Blocking pool for recurrence expansion; async runtime |
+| `thiserror` | 2.x | MIT OR Apache-2.0 | Error types |
 | Dev: `svelte` 5.57, `vite` 8.3, `@sveltejs/vite-plugin-svelte` 7.3, `typescript` 6.0, `svelte-check` 4.7, `vitest` 5.0, `jsdom` 30, `@testing-library/svelte` 5.4, `@tauri-apps/cli` 2.12 | | MIT / Apache-2.0 | Build and test tooling |
 
 TypeScript is held at 6.x because `svelte-check` 4.7 doesn't yet support TypeScript 7.
 
 ## Transitive audit
 
-**Rust** (`cargo metadata`, linux-x86_64 resolve): 277 crates. All are permissive and GPL-3.0-compatible:
+**Rust** (`cargo metadata`, linux-x86_64 resolve): 330 crates after Milestone 2. All are permissive and GPL-3.0-compatible:
 
 - MIT and/or Apache-2.0 (including Apache-2.0 WITH LLVM-exception);
 - Unicode-3.0;

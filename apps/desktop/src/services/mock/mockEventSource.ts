@@ -3,6 +3,7 @@ import type {
   Calendar,
   CalendarEvent,
   DateRange,
+  EditScope,
   EventDraft,
   EventId,
 } from "../../types/calendar";
@@ -22,7 +23,9 @@ interface Entry {
 }
 
 /**
- * In-memory `EventSource` with an index sorted by start time.
+ * In-memory `EventSource` with an index sorted by start time, used by tests
+ * and the browser preview. It has no recurrence engine: occurrences are
+ * stored pre-expanded and every scope edits just the addressed row.
  *
  * Range queries binary-search the start index and only scan back as far as
  * the longest event, so cost scales with the result size rather than the
@@ -92,15 +95,16 @@ export class MockEventSource implements EventSource {
       ...draft,
       id,
       seriesId: null,
+      recurrenceId: null,
+      rrule: draft.rrule ?? null,
       syncStatus: "saved",
       revision: 1,
-      updatedAt: Date.now(),
     };
     this.#insert(this.#entry(event));
     return event;
   }
 
-  async updateEvent(id: EventId, draft: EventDraft): Promise<CalendarEvent> {
+  async updateEvent(id: EventId, draft: EventDraft, _scope: EditScope = "event"): Promise<CalendarEvent> {
     await this.#delay();
     this.#maybeFail();
     const existing = this.#byId.get(id);
@@ -110,16 +114,16 @@ export class MockEventSource implements EventSource {
     const event: CalendarEvent = {
       ...existing.event,
       ...draft,
+      rrule: draft.rrule === undefined ? existing.event.rrule : draft.rrule,
       syncStatus: "saved",
       revision: existing.event.revision + 1,
-      updatedAt: Date.now(),
     };
     this.#remove(existing);
     this.#insert(this.#entry(event));
     return event;
   }
 
-  async deleteEvent(id: EventId): Promise<void> {
+  async deleteEvent(id: EventId, _scope: EditScope = "event"): Promise<void> {
     await this.#delay();
     this.#maybeFail();
     const existing = this.#byId.get(id);

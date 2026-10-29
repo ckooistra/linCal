@@ -48,7 +48,54 @@ Whatever remains after JS + layout is paint and compositing, plus any async foll
 
 The scenarios run at 100, 1,000 and 5,000 events.
 
-## Results: 2026-10-29, VM baseline
+## Results: Milestone 2 (SQLite + Rust core), 2026-10-29
+
+Same VM and Xvfb setup as below, so treat these as a pessimistic baseline too.
+
+Raw data:
+- UI benchmark: [`benchmarks/20261029-162950-vm-xvfb-m2.json`](benchmarks/20261029-162950-vm-xvfb-m2.json)
+- Storage benchmark: `cargo run --release -p calendar-storage --example bench_queries`
+
+The data now comes from SQLite through Tauri IPC, with recurring series expanded by the Rust core. The 1,000-event dataset holds 7 series masters (four of them unbounded), one moved occurrence and two cancelled occurrences.
+
+### Storage: on-disk SQLite (WAL), release build
+
+12 ranges spread over the year around the anchor. Times include decoding and recurrence expansion.
+
+| Dataset | Load dataset (one transaction) | Week query p50 / p95 | 6-week month query p50 / p95 | 3-month prefetch query p50 / p95 |
+|---|---:|---:|---:|---:|
+| 100 | 10 ms | 0.8 / 1.0 ms | 1.1 / 1.6 ms | 1.8 / 2.1 ms |
+| 1,000 | 63 ms | 1.5 / 2.0 ms | 3.1 / 5.5 ms | 6.1 / 10.4 ms |
+| 5,000 | 336 ms | 4.0 / 4.6 ms | 10.9 / 18.0 ms | 20.5 / 31.3 ms |
+
+From the UI, a full `query_range` round trip for the visible range (IPC + SQLite + expansion + JSON) took **1.5 ms p50 at 1,000 events and 2.7 ms at 5,000**. These queries run asynchronously and never block input.
+
+### UI interactions: 1,000 events, M2 vs M1 (p50 / p95 ms)
+
+| Interaction | M1 (in-memory mock) | M2 (SQLite) | Target |
+|---|---|---|---|
+| month next | 14 / 51 | 41 / 80 | < 50 — p50 ✔, p95 ✘ |
+| month previous | 27 / 54 | 40 / 64 | < 50 — p50 ✔, p95 ✘ |
+| switch to week | 50 / 57 | 48 / 55 | |
+| week next | 28 / 79 | 36 / 73 | |
+| visibility toggle | 30 / 39 | 28 / 35 | < 30 — p50 ✔, p95 ✘ |
+| open editor | 31 / 35 | 32 / 33 | < 50 ✔ |
+| create event (optimistic) | 28 / 40 | 16 / 32 | immediate ✔ |
+| search | 14 / 47 | 15 / 51 | < 100 ✔ |
+| drag proxy | 57 fps | 55 fps | 60 fps — close |
+| idle CPU | 0.07 % | 0.07 % | ≈ 0 ✔ |
+
+At 5,000 events, week view is still paint-bound: 146 ms to switch to week and 14 fps for the drag proxy. This matches Milestone 1, so it is not caused by storage.
+
+### Interpretation
+
+- **Storage is not the bottleneck.** Even the 3-month prefetch at 5,000 events (20 ms) runs off the UI thread. The visible-range round trip is under 3 ms.
+- **Navigation p50 rose by 10–25 ms at 1,000 events.** Data now arrives after an IPC round trip, so the adapter re-feeds SVAR during the measured frames. The mock used to resolve within the same microtask. Navigation never waits for data: SVAR renders immediately from the prefetched window.
+- **Known costs to optimise later, if measurements on real hardware call for it:**
+  - every query re-expands each series from its DTSTART, so long-running daily series cost more over time (a per-series expansion cache is the planned fix);
+  - SVAR receives the whole prefetch window again after each load.
+
+## Results: Milestone 1 (in-memory mock), 2026-10-29, VM baseline
 
 Raw data: [`benchmarks/20261029-153738-vm-xvfb.json`](benchmarks/20261029-153738-vm-xvfb.json)
 

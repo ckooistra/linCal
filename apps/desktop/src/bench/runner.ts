@@ -33,8 +33,8 @@ export interface BenchHarness {
   /** Move an event by `minutes` through the same path as a completed drag. */
   moveEvent(id: string, minutes: number): void;
   renameEvent(id: string, title: string): void;
-  /** Time `count` consecutive raw data-source range queries; total ms. */
-  timeQueries(range: DateRange, count: number): number;
+  /** Time `count` consecutive data-source range queries; total ms. */
+  timeQueries(range: DateRange, count: number): Promise<number>;
   visibleRange(): DateRange;
   anchor: Date;
 }
@@ -60,7 +60,7 @@ export interface BenchReport {
   results: ScenarioResult[];
 }
 
-const QUERY_BATCH = 100;
+const QUERY_BATCH = 10;
 
 async function repeat(log: PerfLog, name: string, times: number, action: () => void | Promise<unknown>) {
   for (let i = 0; i < times; i++) await measureInteraction(name, action, log);
@@ -164,7 +164,7 @@ export async function runBenchmarks(
     const window = h.visibleRange();
     const queries = [];
     for (let i = 0; i < 20; i++) {
-      const total = h.timeQueries(window, QUERY_BATCH);
+      const total = await h.timeQueries(window, QUERY_BATCH);
       queries.push({ script: total / QUERY_BATCH, paint: total / QUERY_BATCH });
     }
 

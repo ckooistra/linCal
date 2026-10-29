@@ -13,49 +13,75 @@
   import Toasts from "./components/Toasts.svelte";
   import Toolbar from "./components/Toolbar.svelte";
   import { runBenchmarks, type BenchHarness } from "./bench/runner";
+  import type { Backend } from "./services/backend";
   import { getBenchConfig, submitBenchReport } from "./services/bridge";
-  import { DEFAULT_SEED, generateDataset } from "./services/mock/generator";
-  import { MockEventSource } from "./services/mock/mockEventSource";
   import { measureInteraction, nextPaint, observeLongTasks } from "./services/perf";
   import { resolveShortcut } from "./services/shortcuts";
-  import {
-    loadThemePreference,
-    resolveTheme,
-    saveThemePreference,
-    watchSystemDark,
-    type ThemePreference,
-  } from "./services/theme";
-  import { HOUR, localTimeZone, parseIsoDate, toIsoDate } from "./services/time";
+  import { parseThemePreference, resolveTheme, watchSystemDark, type ThemePreference } from "./services/theme";
+  import { HOUR, localTimeZone, parseIsoDate } from "./services/time";
   import { CalendarsStore } from "./stores/calendars.svelte";
-  import { EventStore } from "./stores/events.svelte";
+  import { EventStore, type SeriesScope } from "./stores/events.svelte";
   import { Notifications } from "./stores/notifications.svelte";
   import type { CalendarEvent, CalendarViewKind, EventDraft, EventTiming } from "./types/calendar";
 
   const BENCH_ANCHOR = "2026-06-15";
   const SEARCH_DEBOUNCE_MS = 150;
 
+  let { backend }: { backend: Backend } = $props();
+
   // --- data -----------------------------------------------------------------
   const notifications = new Notifications();
   const calendars = new CalendarsStore();
-  let datasetSize = $state(1000);
+  const initialSettings = untrack(() => backend.settings);
+  let datasetSize = $state(typeof initialSettings.datasetSize === "number" ? initialSettings.datasetSize : 1000);
   let latencyMs = $state(0);
-  let anchor = toIsoDate(new Date());
-  let source = createSource(untrack(() => datasetSize));
-  const store = new EventStore(source, {
+  let startupError = $state(untrack(() => backend.startupError));
+  const store = new EventStore(untrack(() => backend.source), {
     isReadOnly: (id) => calendars.isReadOnly(id),
     onError: (message) => notifications.push(message),
   });
 
-  function createSource(size: number): MockEventSource {
-    const dataset = generateDataset({ seed: DEFAULT_SEED, eventCount: size, anchor });
-    calendars.load(dataset.accounts, dataset.calendars);
-    return new MockEventSource(dataset, { latencyMs });
+  async function reloadCalendars(): Promise<void> {
+    try {
+      const { accounts, calendars: list } = await backend.loadCalendars();
+      calendars.load(accounts, list);
+    } catch (error) {
+      startupError = error instanceof Error ? error.message : String(error);
+    }
   }
 
-  function switchDataset(size: number): void {
-    datasetSize = size;
-    source = createSource(size);
-    store.reset(source);
+  let datasetBusy = false;
+  async function switchDataset(size: number, anchor?: string): Promise<void> {
+    if (datasetBusy) return;
+    datasetBusy = true;
+    try {
+      const source = await backend.loadDataset(size, anchor);
+      datasetSize = size;
+      void backend.saveSetting("datasetSize", size);
+      await reloadCalendars();
+      store.reset(source);
+    } catch (error) {
+      notifications.push(error instanceof Error ? error.message : "The dataset could not be loaded.");
+    } finally {
+      datasetBusy = false;
+    }
+  }
+
+  function setCalendarColor(id: string, color: string): void {
+    const previous = calendars.get(id)?.color;
+    calendars.setColor(id, color);
+    backend.setCalendarColor(id, color).catch((error: unknown) => {
+      if (previous) calendars.setColor(id, previous);
+      notifications.push(error instanceof Error ? error.message : "The colour could not be saved.");
+    });
+  }
+
+  // Visibility is a per-device preference: persist it, debounced.
+  let hiddenTimer: ReturnType<typeof setTimeout> | undefined;
+  function toggleCalendar(id: string): void {
+    calendars.toggle(id);
+    clearTimeout(hiddenTimer);
+    hiddenTimer = setTimeout(() => void backend.saveSetting("hiddenCalendars", [...calendars.hidden]), 300);
   }
 
   // --- view -----------------------------------------------------------------
@@ -86,7 +112,7 @@
   }
 
   // --- theme ----------------------------------------------------------------
-  let themePreference = $state<ThemePreference>(loadThemePreference());
+  let themePreference = $state<ThemePreference>(parseThemePreference(initialSettings.theme));
   let systemDark = $state(false);
   const theme = $derived(resolveTheme(themePreference, systemDark));
   $effect(() => {
@@ -95,7 +121,7 @@
 
   function setThemePreference(preference: ThemePreference) {
     themePreference = preference;
-    saveThemePreference(preference);
+    void backend.saveSetting("theme", preference);
   }
 
   // --- editor ---------------------------------------------------------------
@@ -139,28 +165,29 @@
 
   function saveEditor(draft: EventDraft): string | null {
     if (!editor) return null;
-    const result = editor.event ? store.update(editor.event.id, draft) : store.create(draft);
+    // The editor edits whole series; dragging moves single occurrences.
+    const result = editor.event ? store.update(editor.event.id, draft, "series") : store.create(draft);
     if (!result.ok) return result.message;
     editor = null;
     return null;
   }
 
-  function deleteFromEditor() {
+  function deleteFromEditor(scope: SeriesScope) {
     if (!editor?.event) return;
-    const result = store.remove(editor.event.id);
+    const result = store.remove(editor.event.id, scope);
     if (!result.ok) notifications.push(result.message);
     editor = null;
   }
 
   function draftOf(event: CalendarEvent): EventDraft {
-    const { calendarId, title, description, location, timing } = event;
-    return { calendarId, title, description, location, timing };
+    const { calendarId, title, description, location, timing, rrule } = event;
+    return { calendarId, title, description, location, timing, rrule };
   }
 
   function moveEvent({ id, timing }: MoveRequest) {
     const event = store.get(id);
     if (!event) return;
-    const result = store.update(id, { ...draftOf(event), timing });
+    const result = store.update(id, { ...draftOf(event), timing }, "occurrence");
     if (!result.ok) notifications.push(result.message);
   }
 
@@ -227,12 +254,17 @@
         });
       }),
     );
+    const hidden = initialSettings.hiddenCalendars;
+    void reloadCalendars().then(() => {
+      if (Array.isArray(hidden)) for (const id of hidden) if (typeof id === "string") calendars.setVisible(id, false);
+    });
     void startBenchIfRequested();
   });
 
   onDestroy(() => {
     for (const cleanup of cleanups) cleanup();
     clearTimeout(searchTimer);
+    clearTimeout(hiddenTimer);
     notifications.dispose();
   });
 
@@ -248,7 +280,7 @@
   const harness: BenchHarness = {
     anchor: parseIsoDate(BENCH_ANCHOR),
     async loadDataset(size) {
-      switchDataset(size);
+      await switchDataset(size, BENCH_ANCHOR);
       await tick();
       await untilVisibleLoaded();
     },
@@ -293,9 +325,10 @@
       const event = store.get(id);
       if (event) store.update(id, { ...draftOf(event), title });
     },
-    timeQueries: (range, count) => {
+    timeQueries: async (range, count) => {
+      // Full round trip: IPC + SQLite + recurrence expansion (desktop).
       const start = performance.now();
-      for (let i = 0; i < count; i++) source.queryRangeSync(range);
+      for (let i = 0; i < count; i++) await backend.source.queryRange(range);
       return performance.now() - start;
     },
     visibleRange: () => viewState.range,
@@ -309,7 +342,6 @@
       return;
     }
     if (!config.enabled) return;
-    anchor = BENCH_ANCHOR;
     try {
       const report = await runBenchmarks(harness, config.sizes, (m) => (benchStatus = m));
       benchStatus = "Benchmark finished";
@@ -321,8 +353,12 @@
   }
 
   const statusLine = $derived(
-    store.loadError ??
-      (benchStatus || `${datasetSize.toLocaleString()} simulated events · ${calendars.calendars.length} calendars`),
+    startupError ??
+      store.loadError ??
+      (benchStatus ||
+        `${datasetSize.toLocaleString()} simulated events · ${calendars.calendars.length} calendars · ${
+          backend.kind === "desktop" ? "saved locally" : "browser preview (not saved)"
+        }`),
   );
 </script>
 
@@ -332,16 +368,18 @@
     {datasetSize}
     {latencyMs}
     {themePreference}
-    ontogglecalendar={(id) => void measureInteraction("visibility-toggle", () => calendars.toggle(id))}
-    oncolor={(id, color) => calendars.setColor(id, color)}
+    simulationControls={backend.mock !== null}
+    ontogglecalendar={(id) => void measureInteraction("visibility-toggle", () => toggleCalendar(id))}
+    oncolor={setCalendarColor}
     ondataset={(size) => void measureInteraction("dataset-load", () => switchDataset(size))}
     onlatency={(ms) => {
       latencyMs = ms;
-      source.latencyMs = ms;
+      if (backend.mock) backend.mock.latencyMs = ms;
     }}
     ontheme={setThemePreference}
     onfailnext={() => {
-      source.failNextWrites++;
+      if (!backend.mock) return;
+      backend.mock.failNextWrites++;
       notifications.push("The next save will fail (simulated).", "info");
     }}
   />

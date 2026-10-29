@@ -2,8 +2,7 @@
  * Provider-neutral calendar model used by the UI.
  *
  * These types deliberately avoid provider specifics (Google, Graph, CalDAV).
- * In Milestone 2 they will mirror the Rust `calendar-core` types that cross
- * the Tauri bridge; for Milestone 1 they are populated by the mock source.
+ * They mirror the serialized types in `crates/calendar-core/src/wire.rs`.
  */
 
 export type AccountId = string;
@@ -54,31 +53,44 @@ export type EventTiming =
   | { kind: "timed"; start: number; end: number; timeZone: string | null }
   | { kind: "all-day"; startDate: IsoDate; endDate: IsoDate };
 
+/**
+ * One displayed occurrence. For a one-off event `id` is the event id; for an
+ * occurrence of a recurring series it is `<seriesId>::<recurrenceId>`, which
+ * stays stable when that occurrence is moved or edited on its own.
+ */
 export interface CalendarEvent {
-  /** Stable internal identifier; never reused. */
   id: EventId;
   calendarId: CalendarId;
   title: string;
   description: string;
   location: string;
   timing: EventTiming;
-  /**
-   * Identifier of the recurring series this occurrence belongs to. In M1 the
-   * generator emits pre-expanded occurrences; real RRULE expansion moves to
-   * the Rust core in Milestone 2.
-   */
+  /** Recurring series this occurrence belongs to, if any. */
   seriesId: string | null;
+  /** Original start of this occurrence within its series (RECURRENCE-ID). */
+  recurrenceId: string | null;
+  /** RRULE of the series (e.g. `FREQ=WEEKLY;BYDAY=MO`), if recurring. */
+  rrule: string | null;
   syncStatus: SyncStatus;
-  /** Monotonic local revision, bumped on every local change. */
+  /** Monotonic revision, bumped on every change. */
   revision: number;
-  updatedAt: number;
 }
 
-/** Fields a user can edit. */
+/** Fields a user can edit. `rrule` applies to whole events/series only. */
 export type EventDraft = Pick<
   CalendarEvent,
   "calendarId" | "title" | "description" | "location" | "timing"
->;
+> & { rrule?: string | null };
+
+/**
+ * What an edit or delete applies to: a one-off event, a single occurrence
+ * of a series, or the whole series.
+ */
+export type EditScope = "event" | "occurrence" | "series";
+
+export function isRecurring(event: Pick<CalendarEvent, "seriesId">): boolean {
+  return event.seriesId !== null;
+}
 
 /** Half-open instant range `[start, end)` in epoch ms. */
 export interface DateRange {

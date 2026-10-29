@@ -132,6 +132,12 @@
       case "remove":
         if (svarEvent(change.id)) exec("delete-event", { id: change.id });
         break;
+      case "invalidated":
+        // Keep showing current data until the reload replaces it.
+        providedWindow = null;
+        wantedWindow = null;
+        if (visibleRange) void syncRange(visibleRange);
+        break;
       case "reset":
         providedWindow = null;
         wantedWindow = null;

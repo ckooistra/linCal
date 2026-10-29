@@ -1,9 +1,14 @@
 import type { Account, Calendar, CalendarEvent, IsoDate } from "../../types/calendar";
-import { addDays, addIsoDays, localTimeZone, parseIsoDate, toIsoDate } from "../time";
+import { addDays, addIsoDays, localTimeZone, parseIsoDate, timingBounds, toIsoDate } from "../time";
 import { Prng } from "./prng";
 
 /**
- * Deterministic simulated dataset for development and benchmarks.
+ * Deterministic simulated dataset for tests and the browser preview.
+ *
+ * The desktop app seeds SQLite from the Rust generator
+ * (`crates/calendar-core/src/sim.rs`), which emits real RRULE series. This
+ * fixture keeps the same shapes but pre-expands recurring occurrences,
+ * because the in-memory mock has no recurrence engine.
  *
  * The same `{ seed, eventCount, anchor, timeZone }` always yields identical
  * output. Events are spread over roughly ±6 months around `anchor` and
@@ -104,8 +109,19 @@ export function generateDataset(options: DatasetOptions): Dataset {
   let seq = 0;
   const nextId = () => `sim-${seed}-${seq++}`;
 
-  const push = (e: Omit<CalendarEvent, "id" | "syncStatus" | "revision" | "updatedAt">) => {
-    events.push({ ...e, id: nextId(), syncStatus: "synced", revision: 1, updatedAt: 0 });
+  const push = (
+    e: Omit<CalendarEvent, "id" | "syncStatus" | "revision" | "recurrenceId" | "rrule">,
+  ) => {
+    const id = nextId();
+    const recurrenceId = e.seriesId ? String(timingBounds(e.timing).start) : null;
+    events.push({
+      ...e,
+      id: e.seriesId ? `${e.seriesId}::${recurrenceId}` : id,
+      recurrenceId,
+      rrule: e.seriesId ? "FREQ=WEEKLY" : null,
+      syncStatus: "synced",
+      revision: 1,
+    });
   };
 
   const timed = (

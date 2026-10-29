@@ -65,6 +65,7 @@ describe("EventEditor", () => {
       description: "",
       location: "",
       timing,
+      rrule: null,
     });
     // Read-only calendars are not offered as targets.
     expect(screen.queryByRole("option", { name: "Holidays" })).toBeNull();
@@ -100,7 +101,8 @@ describe("EventEditor", () => {
       seriesId: null,
       syncStatus: "synced",
       revision: 1,
-      updatedAt: 0,
+      recurrenceId: null,
+  rrule: null,
     };
     render(EventEditor, {
       event,
@@ -116,5 +118,47 @@ describe("EventEditor", () => {
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     await fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(onclose).toHaveBeenCalled();
+  });
+});
+
+describe("EventEditor with recurring events", () => {
+  const start = parseIsoDate("2026-06-15").getTime() + 9 * 3_600_000;
+  const occurrence: CalendarEvent = {
+    id: "series-1::20260615T070000Z",
+    calendarId: "cal-team",
+    title: "Stand-up",
+    description: "",
+    location: "",
+    timing: { kind: "timed", start, end: start + 900_000, timeZone: "Europe/Berlin" },
+    seriesId: "series-1",
+    recurrenceId: "20260615T070000Z",
+    rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+    syncStatus: "saved",
+    revision: 1,
+  };
+
+  it("keeps a custom rule, offers presets and both delete scopes", async () => {
+    const onsave = vi.fn((_draft: unknown) => null);
+    const ondelete = vi.fn();
+    render(EventEditor, {
+      event: occurrence,
+      timing: occurrence.timing,
+      calendars: simulatedCalendars(),
+      defaultCalendarId: null,
+      readOnly: false,
+      onsave,
+      ondelete,
+      onclose: noop,
+    });
+    const repeat = screen.getByLabelText("Repeat") as HTMLSelectElement;
+    expect(repeat.selectedOptions[0]?.textContent).toBe("Every weekday (Mon–Fri)");
+    expect(screen.getByRole("note").textContent).toContain("every event in this series");
+    await fireEvent.click(screen.getByRole("button", { name: "Delete this event" }));
+    expect(ondelete).toHaveBeenCalledWith("occurrence");
+    await fireEvent.click(screen.getByRole("button", { name: "Delete series" }));
+    expect(ondelete).toHaveBeenCalledWith("series");
+    await fireEvent.change(repeat, { target: { value: "FREQ=MONTHLY" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onsave.mock.calls[0]?.[0]).toMatchObject({ rrule: "FREQ=MONTHLY", title: "Stand-up" });
   });
 });

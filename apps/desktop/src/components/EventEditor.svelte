@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import type { Calendar, CalendarEvent, EventDraft, EventTiming } from "../types/calendar";
+  import type { SeriesScope } from "../stores/events.svelte";
+  import { repeatOptions } from "../services/recurrence";
   import {
     addIsoDays,
     combineDateTime,
@@ -20,7 +22,8 @@
     defaultCalendarId: string | null;
     readOnly: boolean;
     onsave: (draft: EventDraft) => string | null;
-    ondelete: () => void;
+    /** For recurring events: delete just this occurrence or the whole series. */
+    ondelete: (scope: SeriesScope) => void;
     onclose: () => void;
   }
 
@@ -42,6 +45,7 @@
         calendarId: event?.calendarId ?? defaultCalendarId ?? calendars.find((c) => !c.readOnly)?.id ?? "",
         location: event?.location ?? "",
         description: event?.description ?? "",
+        rrule: event?.rrule ?? null,
       };
     }
     const s = new Date(t.start);
@@ -56,6 +60,7 @@
       calendarId: event?.calendarId ?? defaultCalendarId ?? calendars.find((c) => !c.readOnly)?.id ?? "",
       location: event?.location ?? "",
       description: event?.description ?? "",
+      rrule: event?.rrule ?? null,
     };
   });
 
@@ -63,6 +68,9 @@
   let calendarId = $state(init.calendarId);
   let location = $state(init.location);
   let description = $state(init.description);
+  let rrule = $state<string | null>(init.rrule);
+  const recurring = untrack(() => event?.seriesId != null);
+  const repeatChoices = repeatOptions(init.rrule);
   let allDay = $state(init.allDay);
   let startDate = $state(init.startDate);
   let endDate = $state(init.endDate);
@@ -105,7 +113,7 @@
       error = invalid;
       return;
     }
-    error = onsave({ calendarId, title: title.trim(), description, location, timing: t });
+    error = onsave({ calendarId, title: title.trim(), description, location, timing: t, rrule });
   }
 
   function keydown(e: KeyboardEvent) {
@@ -155,6 +163,10 @@
       <h2 id="editor-title">{heading}</h2>
       {#if readOnly}
         <p class="note" role="note">This calendar is read-only.</p>
+      {:else if recurring}
+        <p class="note" role="note">
+          Saving applies to every event in this series. Drag an event in the calendar to move just that one.
+        </p>
       {/if}
       <fieldset disabled={readOnly}>
         <label class="full">
@@ -196,6 +208,14 @@
           {/if}
         </div>
         <label class="full">
+          <span>Repeat</span>
+          <select bind:value={rrule}>
+            {#each repeatChoices as choice (choice.rrule)}
+              <option value={choice.rrule}>{choice.label}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="full">
           <span>Location</span>
           <input bind:value={location} autocomplete="off" />
         </label>
@@ -209,7 +229,12 @@
       {/if}
       <div class="actions">
         {#if event && !readOnly}
-          <button type="button" class="danger" onclick={ondelete}>Delete</button>
+          {#if recurring}
+            <button type="button" class="danger" onclick={() => ondelete("occurrence")}>Delete this event</button>
+            <button type="button" class="danger" onclick={() => ondelete("series")}>Delete series</button>
+          {:else}
+            <button type="button" class="danger" onclick={() => ondelete("occurrence")}>Delete</button>
+          {/if}
         {/if}
         <span class="spacer"></span>
         <button type="button" onclick={onclose}>{readOnly ? "Close" : "Cancel"}</button>
@@ -231,7 +256,7 @@
     z-index: 50;
   }
   .dialog {
-    width: min(30rem, calc(100vw - 2rem));
+    width: min(34rem, calc(100vw - 2rem));
     max-height: calc(100vh - 2rem);
     overflow: auto;
     background: var(--uc-surface);
@@ -287,5 +312,8 @@
   }
   .spacer {
     flex: 1;
+  }
+  .actions button {
+    white-space: nowrap;
   }
 </style>
