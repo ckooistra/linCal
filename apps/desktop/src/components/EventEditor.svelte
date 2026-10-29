@@ -1,0 +1,291 @@
+<script lang="ts">
+  import { onMount, untrack } from "svelte";
+  import type { Calendar, CalendarEvent, EventDraft, EventTiming } from "../types/calendar";
+  import {
+    addIsoDays,
+    combineDateTime,
+    localTimeZone,
+    parseIsoDate,
+    toIsoDate,
+    toTimeString,
+    validateTiming,
+  } from "../services/time";
+
+  interface Props {
+    /** Existing event, or null when creating. */
+    event: CalendarEvent | null;
+    /** Initial timing for a new event. */
+    timing: EventTiming;
+    calendars: readonly Calendar[];
+    defaultCalendarId: string | null;
+    readOnly: boolean;
+    onsave: (draft: EventDraft) => string | null;
+    ondelete: () => void;
+    onclose: () => void;
+  }
+
+  let { event, timing, calendars, defaultCalendarId, readOnly, onsave, ondelete, onclose }: Props = $props();
+
+  // The form edits a local copy initialised once from the props; the parent
+  // re-creates this component (keyed) for every editor session.
+  const init = untrack(() => {
+    const t = event?.timing ?? timing;
+    if (t.kind === "all-day") {
+      return {
+        allDay: true,
+        startDate: t.startDate,
+        // Show the inclusive last day; the model stores an exclusive end.
+        endDate: addIsoDays(t.endDate, -1),
+        startTime: "09:00",
+        endTime: "10:00",
+        title: event?.title ?? "",
+        calendarId: event?.calendarId ?? defaultCalendarId ?? calendars.find((c) => !c.readOnly)?.id ?? "",
+        location: event?.location ?? "",
+        description: event?.description ?? "",
+      };
+    }
+    const s = new Date(t.start);
+    const e = new Date(t.end);
+    return {
+      allDay: false,
+      startDate: toIsoDate(s),
+      endDate: toIsoDate(e),
+      startTime: toTimeString(s),
+      endTime: toTimeString(e),
+      title: event?.title ?? "",
+      calendarId: event?.calendarId ?? defaultCalendarId ?? calendars.find((c) => !c.readOnly)?.id ?? "",
+      location: event?.location ?? "",
+      description: event?.description ?? "",
+    };
+  });
+
+  let title = $state(init.title);
+  let calendarId = $state(init.calendarId);
+  let location = $state(init.location);
+  let description = $state(init.description);
+  let allDay = $state(init.allDay);
+  let startDate = $state(init.startDate);
+  let endDate = $state(init.endDate);
+  let startTime = $state(init.startTime);
+  let endTime = $state(init.endTime);
+  let error = $state<string | null>(null);
+
+  let dialog: HTMLDivElement;
+  let titleInput: HTMLInputElement;
+
+  const choices = $derived(readOnly ? calendars : calendars.filter((c) => !c.readOnly || c.id === calendarId));
+  const heading = $derived(event ? (readOnly ? "Event details" : "Edit event") : "New event");
+
+  function buildTiming(): EventTiming | string {
+    if (allDay) {
+      try {
+        parseIsoDate(startDate);
+        return { kind: "all-day", startDate, endDate: addIsoDays(endDate, 1) };
+      } catch {
+        return "Enter dates as YYYY-MM-DD.";
+      }
+    }
+    const start = combineDateTime(startDate, startTime);
+    const end = combineDateTime(endDate, endTime);
+    if (!start || !end) return "Enter dates as YYYY-MM-DD and times as HH:MM.";
+    const zone = event?.timing.kind === "timed" ? event.timing.timeZone : localTimeZone();
+    return { kind: "timed", start: start.getTime(), end: end.getTime(), timeZone: zone };
+  }
+
+  function submit(e: SubmitEvent) {
+    e.preventDefault();
+    if (readOnly) return;
+    const t = buildTiming();
+    if (typeof t === "string") {
+      error = t;
+      return;
+    }
+    const invalid = validateTiming(t);
+    if (invalid) {
+      error = invalid;
+      return;
+    }
+    error = onsave({ calendarId, title: title.trim(), description, location, timing: t });
+  }
+
+  function keydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      onclose();
+    } else if (e.key === "Tab") {
+      trapFocus(e);
+    }
+  }
+
+  function trapFocus(e: KeyboardEvent) {
+    const focusable = dialog.querySelectorAll<HTMLElement>(
+      "input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled])",
+    );
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) return;
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  onMount(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    (readOnly ? dialog : titleInput)?.focus();
+    return () => previous?.focus?.();
+  });
+</script>
+
+<div class="backdrop" role="presentation" onmousedown={(e) => e.target === e.currentTarget && onclose()}>
+  <div
+    class="dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="editor-title"
+    tabindex="-1"
+    bind:this={dialog}
+    onkeydown={keydown}
+  >
+    <form onsubmit={submit} novalidate>
+      <h2 id="editor-title">{heading}</h2>
+      {#if readOnly}
+        <p class="note" role="note">This calendar is read-only.</p>
+      {/if}
+      <fieldset disabled={readOnly}>
+        <label class="full">
+          <span>Title</span>
+          <input bind:this={titleInput} bind:value={title} placeholder="(No title)" autocomplete="off" />
+        </label>
+        <label class="full">
+          <span>Calendar</span>
+          <select bind:value={calendarId}>
+            {#each choices as c (c.id)}
+              <option value={c.id}>{c.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={allDay} />
+          <span>All day</span>
+        </label>
+        <div class="when">
+          <label>
+            <span>Starts</span>
+            <input type="date" bind:value={startDate} required />
+          </label>
+          {#if !allDay}
+            <label>
+              <span class="sr-only">Start time</span>
+              <input type="time" bind:value={startTime} step="300" required />
+            </label>
+          {/if}
+          <label>
+            <span>Ends</span>
+            <input type="date" bind:value={endDate} required />
+          </label>
+          {#if !allDay}
+            <label>
+              <span class="sr-only">End time</span>
+              <input type="time" bind:value={endTime} step="300" required />
+            </label>
+          {/if}
+        </div>
+        <label class="full">
+          <span>Location</span>
+          <input bind:value={location} autocomplete="off" />
+        </label>
+        <label class="full">
+          <span>Description</span>
+          <textarea bind:value={description} rows="3"></textarea>
+        </label>
+      </fieldset>
+      {#if error}
+        <p class="error" role="alert">{error}</p>
+      {/if}
+      <div class="actions">
+        {#if event && !readOnly}
+          <button type="button" class="danger" onclick={ondelete}>Delete</button>
+        {/if}
+        <span class="spacer"></span>
+        <button type="button" onclick={onclose}>{readOnly ? "Close" : "Cancel"}</button>
+        {#if !readOnly}
+          <button type="submit" class="primary">Save</button>
+        {/if}
+      </div>
+    </form>
+  </div>
+</div>
+
+<style>
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--uc-backdrop);
+    display: grid;
+    place-items: center;
+    z-index: 50;
+  }
+  .dialog {
+    width: min(30rem, calc(100vw - 2rem));
+    max-height: calc(100vh - 2rem);
+    overflow: auto;
+    background: var(--uc-surface);
+    color: var(--uc-text);
+    border: 1px solid var(--uc-border);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgb(0 0 0 / 0.3);
+    padding: 1.25rem;
+    outline: none;
+  }
+  h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.1rem;
+  }
+  fieldset {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 0.6rem;
+  }
+  label {
+    display: grid;
+    gap: 0.25rem;
+    font-size: 0.85rem;
+  }
+  label > span {
+    color: var(--uc-text-muted);
+  }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .when {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.5rem;
+    align-items: end;
+  }
+  .note {
+    margin: 0 0 0.75rem;
+    color: var(--uc-text-muted);
+  }
+  .error {
+    color: var(--uc-danger);
+    margin: 0.75rem 0 0;
+  }
+  .actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 1rem;
+  }
+  .spacer {
+    flex: 1;
+  }
+</style>

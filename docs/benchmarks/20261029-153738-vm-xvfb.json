@@ -1,0 +1,654 @@
+{
+  "machine": {
+    "label": "vm-xvfb",
+    "kernel": "6.8.0-110-generic",
+    "os": "Ubuntu 24.04.1 LTS",
+    "cpu": "QEMU Virtual CPU version 2.5+",
+    "logicalCpus": 8,
+    "memoryGiB": 7.8,
+    "webkit2gtk": "2.52.6",
+    "display": "Xvfb (software rendering)"
+  },
+  "ui": {
+    "finalMemory": {
+      "appKb": 139748,
+      "childrenKb": 380408,
+      "processes": 3,
+      "totalKb": 520156
+    },
+    "report": {
+      "devicePixelRatio": 1,
+      "hardwareConcurrency": 8,
+      "results": [
+        {
+          "domNodes": {
+            "day": 142,
+            "month": 270,
+            "week": 245
+          },
+          "dragProxy": {
+            "durationMs": 2001,
+            "fps": 98.95052473763118,
+            "frames": 198,
+            "maxFrameMs": 18,
+            "p95FrameMs": 16,
+            "slowFrames": 0
+          },
+          "idleFrames": {
+            "durationMs": 1005,
+            "fps": 121.39303482587064,
+            "frames": 122,
+            "maxFrameMs": 16,
+            "p95FrameMs": 15,
+            "slowFrames": 0
+          },
+          "interactions": [
+            {
+              "count": 1,
+              "layoutP50": 13.999999999999943,
+              "max": 30.999999999999943,
+              "mean": 30.999999999999943,
+              "name": "dataset-load",
+              "p50": 30.999999999999943,
+              "p95": 30.999999999999943,
+              "scriptP50": 11.999999999999943
+            },
+            {
+              "count": 12,
+              "layoutP50": 7,
+              "max": 34,
+              "mean": 22.166666666666668,
+              "name": "month-next",
+              "p50": 20.000000000000114,
+              "p95": 34,
+              "scriptP50": 3
+            },
+            {
+              "count": 12,
+              "layoutP50": 7,
+              "max": 23.000000000000114,
+              "mean": 17.75000000000001,
+              "name": "month-prev",
+              "p50": 17,
+              "p95": 23.000000000000114,
+              "scriptP50": 4
+            },
+            {
+              "count": 1,
+              "layoutP50": 18.999999999999886,
+              "max": 44.999999999999886,
+              "mean": 44.999999999999886,
+              "name": "month-rapid-10",
+              "p50": 44.999999999999886,
+              "p95": 44.999999999999886,
+              "scriptP50": 15.999999999999886
+            },
+            {
+              "count": 1,
+              "layoutP50": 3,
+              "max": 14,
+              "mean": 14,
+              "name": "today",
+              "p50": 14,
+              "p95": 14,
+              "scriptP50": 2
+            },
+            {
+              "count": 5,
+              "layoutP50": 6.999999999999773,
+              "max": 61,
+              "mean": 36.2,
+              "name": "view-week",
+              "p50": 31.999999999999773,
+              "p95": 61,
+              "scriptP50": 3.9999999999997726
+            },
+            {
+              "count": 5,
+              "layoutP50": 5,
+              "max": 16,
+              "mean": 13.999999999999954,
+              "name": "view-day",
+              "p50": 14,
+              "p95": 16,
+              "scriptP50": 3
+            },
+            {
+              "count": 5,
+              "layoutP50": 4,
+              "max": 41,
+              "mean": 29.600000000000044,
+              "name": "view-month",
+              "p50": 30,
+              "p95": 41,
+              "scriptP50": 3
+            },
+            {
+              "count": 10,
+              "layoutP50": 3,
+              "max": 14,
+              "mean": 11.2,
+              "name": "week-next",
+              "p50": 10,
+              "p95": 14,
+              "scriptP50": 2
+            },
+            {
+              "count": 10,
+              "layoutP50": 3,
+              "max": 19,
+              "mean": 11.8,
+              "name": "week-prev",
+              "p50": 12,
+              "p95": 19,
+              "scriptP50": 2
+            },
+            {
+              "count": 30,
+              "layoutP50": 2,
+              "max": 11.000000000000227,
+              "mean": 6.133333333333334,
+              "name": "visibility-toggle",
+              "p50": 5,
+              "p95": 10,
+              "scriptP50": 2
+            },
+            {
+              "count": 10,
+              "layoutP50": 4.999999999999773,
+              "max": 59.00000000000023,
+              "mean": 24.49999999999995,
+              "name": "open-editor",
+              "p50": 21,
+              "p95": 59.00000000000023,
+              "scriptP50": 1.9999999999995453
+            },
+            {
+              "count": 10,
+              "layoutP50": 0,
+              "max": 10,
+              "mean": 9.400000000000045,
+              "name": "close-editor",
+              "p50": 9,
+              "p95": 10,
+              "scriptP50": 0
+            },
+            {
+              "count": 5,
+              "layoutP50": 3,
+              "max": 10,
+              "mean": 6.2,
+              "name": "create-event",
+              "p50": 5,
+              "p95": 10,
+              "scriptP50": 2
+            },
+            {
+              "count": 5,
+              "layoutP50": 2,
+              "max": 6,
+              "mean": 5.4,
+              "name": "rename-event",
+              "p50": 5,
+              "p95": 6,
+              "scriptP50": 2
+            },
+            {
+              "count": 5,
+              "layoutP50": 3,
+              "max": 16,
+              "mean": 9.8,
+              "name": "search",
+              "p50": 9,
+              "p95": 16,
+              "scriptP50": 2
+            }
+          ],
+          "longTasks": null,
+          "memoryAfter": {
+            "appKb": 139640,
+            "childrenKb": 299400,
+            "processes": 3,
+            "totalKb": 439040
+          },
+          "queryMs": {
+            "count": 20,
+            "layoutP50": 0,
+            "max": 0.01,
+            "mean": 0.0015,
+            "name": "query-visible-range",
+            "p50": 0,
+            "p95": 0.01,
+            "scriptP50": 0
+          },
+          "size": 100
+        },
+        {
+          "domNodes": {
+            "day": 155,
+            "month": 663,
+            "week": 313
+          },
+          "dragProxy": {
+            "durationMs": 2008,
+            "fps": 57.27091633466136,
+            "frames": 115,
+            "maxFrameMs": 37,
+            "p95FrameMs": 21,
+            "slowFrames": 1
+          },
+          "idleFrames": {
+            "durationMs": 1001,
+            "fps": 119.88011988011988,
+            "frames": 120,
+            "maxFrameMs": 17,
+            "p95FrameMs": 15,
+            "slowFrames": 0
+          },
+          "interactions": [
+            {
+              "count": 1,
+              "layoutP50": 6,
+              "max": 38,
+              "mean": 38,
+              "name": "dataset-load",
+              "p50": 38,
+              "p95": 38,
+              "scriptP50": 5
+            },
+            {
+              "count": 12,
+              "layoutP50": 5,
+              "max": 51,
+              "mean": 26.666666666666668,
+              "name": "month-next",
+              "p50": 14,
+              "p95": 51,
+              "scriptP50": 3
+            },
+            {
+              "count": 12,
+              "layoutP50": 13,
+              "max": 54,
+              "mean": 29.416666666666668,
+              "name": "month-prev",
+              "p50": 27,
+              "p95": 54,
+              "scriptP50": 5
+            },
+            {
+              "count": 1,
+              "layoutP50": 15,
+              "max": 37,
+              "mean": 37,
+              "name": "month-rapid-10",
+              "p50": 37,
+              "p95": 37,
+              "scriptP50": 13
+            },
+            {
+              "count": 1,
+              "layoutP50": 4.0000000000009095,
+              "max": 38,
+              "mean": 38,
+              "name": "today",
+              "p50": 38,
+              "p95": 38,
+              "scriptP50": 2
+            },
+            {
+              "count": 5,
+              "layoutP50": 6,
+              "max": 57,
+              "mean": 50.60000000000037,
+              "name": "view-week",
+              "p50": 50,
+              "p95": 57,
+              "scriptP50": 4
+            },
+            {
+              "count": 5,
+              "layoutP50": 5,
+              "max": 24,
+              "mean": 21.599999999999817,
+              "name": "view-day",
+              "p50": 21,
+              "p95": 24,
+              "scriptP50": 3.9999999999990905
+            },
+            {
+              "count": 5,
+              "layoutP50": 4,
+              "max": 64,
+              "mean": 61.19999999999982,
+              "name": "view-month",
+              "p50": 60,
+              "p95": 64,
+              "scriptP50": 3
+            },
+            {
+              "count": 10,
+              "layoutP50": 9,
+              "max": 79.00000000000091,
+              "mean": 36.2,
+              "name": "week-next",
+              "p50": 28,
+              "p95": 79.00000000000091,
+              "scriptP50": 6
+            },
+            {
+              "count": 10,
+              "layoutP50": 10,
+              "max": 59,
+              "mean": 36.3,
+              "name": "week-prev",
+              "p50": 33,
+              "p95": 59,
+              "scriptP50": 7
+            },
+            {
+              "count": 30,
+              "layoutP50": 11,
+              "max": 41,
+              "mean": 31.033333333333335,
+              "name": "visibility-toggle",
+              "p50": 30,
+              "p95": 39,
+              "scriptP50": 5.000000000001819
+            },
+            {
+              "count": 10,
+              "layoutP50": 5,
+              "max": 35,
+              "mean": 31.5,
+              "name": "open-editor",
+              "p50": 31,
+              "p95": 35,
+              "scriptP50": 2
+            },
+            {
+              "count": 10,
+              "layoutP50": 0.999999999998181,
+              "max": 21.00000000000182,
+              "mean": 19.4,
+              "name": "close-editor",
+              "p50": 19,
+              "p95": 21.00000000000182,
+              "scriptP50": 0.999999999998181
+            },
+            {
+              "count": 5,
+              "layoutP50": 8,
+              "max": 40,
+              "mean": 26.6,
+              "name": "create-event",
+              "p50": 28,
+              "p95": 40,
+              "scriptP50": 4
+            },
+            {
+              "count": 5,
+              "layoutP50": 4,
+              "max": 16,
+              "mean": 10.4,
+              "name": "rename-event",
+              "p50": 9,
+              "p95": 16,
+              "scriptP50": 3
+            },
+            {
+              "count": 5,
+              "layoutP50": 6,
+              "max": 47,
+              "mean": 19.8,
+              "name": "search",
+              "p50": 14,
+              "p95": 47,
+              "scriptP50": 3
+            }
+          ],
+          "longTasks": null,
+          "memoryAfter": {
+            "appKb": 139652,
+            "childrenKb": 328432,
+            "processes": 3,
+            "totalKb": 468084
+          },
+          "queryMs": {
+            "count": 20,
+            "layoutP50": 0,
+            "max": 0.01,
+            "mean": 0.003,
+            "name": "query-visible-range",
+            "p50": 0,
+            "p95": 0.01,
+            "scriptP50": 0
+          },
+          "size": 1000
+        },
+        {
+          "domNodes": {
+            "day": 224,
+            "month": 724,
+            "week": 684
+          },
+          "dragProxy": {
+            "durationMs": 2006,
+            "fps": 9.471585244267198,
+            "frames": 19,
+            "maxFrameMs": 135,
+            "p95FrameMs": 135,
+            "slowFrames": 19
+          },
+          "idleFrames": {
+            "durationMs": 1001,
+            "fps": 118.88111888111888,
+            "frames": 119,
+            "maxFrameMs": 16,
+            "p95FrameMs": 15,
+            "slowFrames": 0
+          },
+          "interactions": [
+            {
+              "count": 1,
+              "layoutP50": 16.99999999999818,
+              "max": 99.99999999999818,
+              "mean": 99.99999999999818,
+              "name": "dataset-load",
+              "p50": 99.99999999999818,
+              "p95": 99.99999999999818,
+              "scriptP50": 16
+            },
+            {
+              "count": 12,
+              "layoutP50": 7.000000000001819,
+              "max": 103,
+              "mean": 55.666666666666664,
+              "name": "month-next",
+              "p50": 27,
+              "p95": 103,
+              "scriptP50": 4.000000000001819
+            },
+            {
+              "count": 12,
+              "layoutP50": 17.00000000000182,
+              "max": 135.00000000000182,
+              "mean": 55.583333333333336,
+              "name": "month-prev",
+              "p50": 43,
+              "p95": 135.00000000000182,
+              "scriptP50": 6
+            },
+            {
+              "count": 1,
+              "layoutP50": 22,
+              "max": 66,
+              "mean": 66,
+              "name": "month-rapid-10",
+              "p50": 66,
+              "p95": 66,
+              "scriptP50": 20
+            },
+            {
+              "count": 1,
+              "layoutP50": 3,
+              "max": 73,
+              "mean": 73,
+              "name": "today",
+              "p50": 73,
+              "p95": 73,
+              "scriptP50": 2
+            },
+            {
+              "count": 5,
+              "layoutP50": 8,
+              "max": 170,
+              "mean": 159,
+              "name": "view-week",
+              "p50": 159,
+              "p95": 170,
+              "scriptP50": 5
+            },
+            {
+              "count": 5,
+              "layoutP50": 15.00000000000182,
+              "max": 62,
+              "mean": 60.19999999999963,
+              "name": "view-day",
+              "p50": 59.99999999999818,
+              "p95": 62,
+              "scriptP50": 12
+            },
+            {
+              "count": 5,
+              "layoutP50": 6.000000000001819,
+              "max": 113,
+              "mean": 93.60000000000072,
+              "name": "view-month",
+              "p50": 89,
+              "p95": 113,
+              "scriptP50": 5
+            },
+            {
+              "count": 10,
+              "layoutP50": 40,
+              "max": 178.00000000000364,
+              "mean": 116.5,
+              "name": "week-next",
+              "p50": 105,
+              "p95": 178.00000000000364,
+              "scriptP50": 28
+            },
+            {
+              "count": 10,
+              "layoutP50": 38,
+              "max": 171,
+              "mean": 125.6,
+              "name": "week-prev",
+              "p50": 105.99999999999636,
+              "p95": 171,
+              "scriptP50": 26
+            },
+            {
+              "count": 30,
+              "layoutP50": 18,
+              "max": 81.99999999999636,
+              "mean": 52.333333333333336,
+              "name": "visibility-toggle",
+              "p50": 52,
+              "p95": 63,
+              "scriptP50": 9.999999999996362
+            },
+            {
+              "count": 10,
+              "layoutP50": 5,
+              "max": 54,
+              "mean": 45.600000000000726,
+              "name": "open-editor",
+              "p50": 45,
+              "p95": 54,
+              "scriptP50": 2
+            },
+            {
+              "count": 10,
+              "layoutP50": 0.999999999996362,
+              "max": 35,
+              "mean": 34.399999999999274,
+              "name": "close-editor",
+              "p50": 34,
+              "p95": 35,
+              "scriptP50": 0.999999999996362
+            },
+            {
+              "count": 5,
+              "layoutP50": 6,
+              "max": 21,
+              "mean": 15.8,
+              "name": "create-event",
+              "p50": 16,
+              "p95": 21,
+              "scriptP50": 6
+            },
+            {
+              "count": 5,
+              "layoutP50": 5,
+              "max": 15,
+              "mean": 13.4,
+              "name": "rename-event",
+              "p50": 14,
+              "p95": 15,
+              "scriptP50": 5
+            },
+            {
+              "count": 5,
+              "layoutP50": 8,
+              "max": 87,
+              "mean": 31,
+              "name": "search",
+              "p50": 17,
+              "p95": 87,
+              "scriptP50": 4
+            }
+          ],
+          "longTasks": null,
+          "memoryAfter": {
+            "appKb": 139656,
+            "childrenKb": 379364,
+            "processes": 3,
+            "totalKb": 519020
+          },
+          "queryMs": {
+            "count": 20,
+            "layoutP50": 0.01,
+            "max": 0.05,
+            "mean": 0.0105,
+            "name": "query-visible-range",
+            "p50": 0.01,
+            "p95": 0.01000000000003638,
+            "scriptP50": 0.01
+          },
+          "size": 5000
+        }
+      ],
+      "startedAt": "2026-10-29T15:37:39.757Z",
+      "userAgent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15",
+      "viewport": {
+        "height": 820,
+        "width": 1280
+      }
+    }
+  },
+  "idle": {
+    "settleSeconds": 8,
+    "sampleSeconds": 30.0,
+    "processes": 3,
+    "cpuSeconds": 0.02,
+    "cpuPercentOfOneCore": 0.07,
+    "rssKb": {
+      "46532": 134108,
+      "46542": 49316,
+      "46546": 185988
+    },
+    "totalRssKb": 369412
+  }
+}

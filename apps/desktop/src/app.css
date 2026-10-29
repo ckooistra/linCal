@@ -1,0 +1,106 @@
+/* Application theme tokens. SVAR's own palette comes from its Willow themes. */
+:root {
+  color-scheme: light;
+  --uc-bg: #ffffff;
+  --uc-surface: #ffffff;
+  --uc-surface-alt: #f6f7f9;
+  --uc-text: #1d2026;
+  --uc-text-muted: #5f6672;
+  --uc-border: #dfe2e7;
+  --uc-accent: #3b5bdb;
+  --uc-accent-text: #ffffff;
+  --uc-danger: #c92a2a;
+  --uc-backdrop: rgb(15 18 25 / 0.35);
+  --uc-focus: #3b5bdb;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --uc-bg: #17191e;
+  --uc-surface: #1f2228;
+  --uc-surface-alt: #1a1c21;
+  --uc-text: #e6e8ec;
+  --uc-text-muted: #9aa1ad;
+  --uc-border: #33373f;
+  --uc-accent: #7a8cff;
+  --uc-accent-text: #0f1115;
+  --uc-danger: #ff6b6b;
+  --uc-backdrop: rgb(0 0 0 / 0.55);
+  --uc-focus: #9aa8ff;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--uc-bg);
+  color: var(--uc-text);
+  /* Use the desktop's UI font (Noto Sans on Plasma) instead of a web font. */
+  font-family: system-ui, "Noto Sans", "Segoe UI", Cantarell, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* SVAR reads its font from this variable; keep it on the system font. */
+.wx-theme {
+  --wx-font-family: system-ui, "Noto Sans", "Segoe UI", Cantarell, sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button,
+input:not([type="checkbox"]):not([type="color"]),
+select,
+textarea {
+  border: 1px solid var(--uc-border);
+  border-radius: 6px;
+  background: var(--uc-surface);
+  padding: 0.3rem 0.6rem;
+  min-height: 2rem;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--uc-surface-alt);
+}
+
+button.primary {
+  background: var(--uc-accent);
+  border-color: var(--uc-accent);
+  color: var(--uc-accent-text);
+}
+
+button.danger {
+  color: var(--uc-danger);
+  border-color: var(--uc-danger);
+}
+
+:focus-visible {
+  outline: 2px solid var(--uc-focus);
+  outline-offset: 1px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
