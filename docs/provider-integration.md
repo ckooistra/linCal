@@ -1,8 +1,8 @@
 # Provider integration
 
-> **Status: design outline. Nothing here is implemented yet.**
-> Milestone 1 uses simulated data only. CalDAV arrives in Milestone 3, and
-> Google and Microsoft in Milestone 4.
+> **Status:**
+> - **CalDAV:** implemented (Milestone 3) in `crates/calendar-caldav`.
+> - **Google and Microsoft:** Milestone 4.
 
 ## Boundaries
 
@@ -10,43 +10,43 @@
 - Adapters translate between provider formats and `calendar-core` types. They also keep the provider metadata needed for lossless round trips: ETags, change keys, raw iCalendar properties and provider IDs.
 - The UI sees only provider-neutral types. On the frontend, the `EventSource` interface (`apps/desktop/src/services/eventSource.ts`) is the data boundary.
 
-## Provider contract (initial sketch)
+## Provider contract
+
+Defined in `crates/calendar-provider-api`.
 
 ```rust
-#[async_trait::async_trait]
+#[async_trait]
 pub trait CalendarProvider: Send + Sync {
-    fn capabilities(&self) -> &ProviderCapabilities;
-    async fn list_calendars(&self) -> Result<Vec<RemoteCalendar>, ProviderError>;
-    /// Incremental changes since `cursor` (sync token, delta link, ctag/etag set).
-    /// Paginated; `None` cursor means initial sync of `window`.
-    async fn fetch_changes(&self, calendar: &RemoteCalendarRef, cursor: Option<&SyncCursor>,
-                           window: Option<DateWindow>) -> Result<ChangePage, ProviderError>;
-    /// Conditional write: fails with `ProviderError::Conflict` when `expected_version` is stale.
-    async fn create_event(&self, calendar: &RemoteCalendarRef, event: &EventPayload)
-        -> Result<RemoteVersion, ProviderError>;
-    async fn update_event(&self, event: &RemoteEventRef, payload: &EventPayload,
-                          expected_version: &RemoteVersion) -> Result<RemoteVersion, ProviderError>;
-    async fn delete_event(&self, event: &RemoteEventRef, expected_version: &RemoteVersion)
-        -> Result<(), ProviderError>;
+    async fn list_calendars(&self) -> ProviderResult<Vec<RemoteCalendar>>;
+    /// Changes since `cursor` (None = full listing). `known` = (href, etag) the client holds,
+    /// so providers without cursors can download only what differs and report deletions.
+    async fn fetch_changes(&self, calendar: &RemoteCalendar, cursor: Option<&str>,
+                           known: &[(String, Option<String>)]) -> ProviderResult<ChangeSet>;
+    async fn put_object(&self, href: &str, ical: &str, precondition: &Precondition)
+        -> ProviderResult<WriteResult>;   // Precondition::Create | Version(etag) | Overwrite
+    async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()>;
 }
 ```
 
-`ProviderCapabilities` describes, per provider and per calendar:
+Providers exchange **calendar object resources**: an iCalendar object per item, with an `href` and an opaque `etag`.
 
-- read-only status;
-- recurrence editing support ("this and following");
-- attendees and reminders support;
-- maximum page size;
-- available sync mechanisms: CalDAV sync-token, Google `syncToken`, Graph delta.
+- **CalDAV and ICS** are natively like this.
+- **JSON APIs** (Google, Graph) will map their events to iCalendar objects inside their adapter. The sync engine, the offline queue and conflict handling then stay identical for every provider.
+- **Implication for Milestone 4:** those adapters need a careful JSON ⇄ iCalendar mapping, including their recurrence exceptions. Their opaque version tokens (Google `etag`, Graph `changeKey`) take the place of ETags.
 
-`ProviderError` separates the following cases, so the sync engine can choose between retry, backoff, re-authentication and surfacing the error to the user:
+`ProviderError` classifies failures so the engine can choose between retry with backoff, conflict, re-authentication and reporting:
 
-- auth expired/revoked
-- rate-limited (with retry-after)
-- conflict
-- not found / calendar deleted
-- transient network
-- malformed data
+- `Unauthorized`
+- `Forbidden`
+- `NotFound`
+- `PreconditionFailed`
+- `SyncTokenInvalid`
+- `RateLimited { retry_after }`
+- `Network`
+- `Server`
+- `InvalidResponse`
+
+`ProviderError::is_transient()` marks the retryable cases.
 
 ## Authentication
 
@@ -59,7 +59,7 @@ pub trait CalendarProvider: Send + Sync {
 
 Tokens and passwords live **only** in the OS secret store: the Secret Service API (KWallet / GNOME Keyring) on Linux, via the `keyring` crate or equivalent. Nothing secret goes into SQLite or logs.
 
-## Adding a provider (future checklist)
+## Adding a provider
 
 1. Create the crate `calendar-<name>` implementing `CalendarProvider`.
 2. Declare capabilities honestly; the UI greys out unsupported actions.

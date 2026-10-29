@@ -92,6 +92,25 @@ export function isRecurring(event: Pick<CalendarEvent, "seriesId">): boolean {
   return event.seriesId !== null;
 }
 
+/** Sync state of an account, as reported by the engine. */
+export interface AccountStatus {
+  accountId: AccountId;
+  /** True for accounts synchronized with a server. */
+  remote: boolean;
+  lastSyncedAt: number | null;
+  /** Last sync error shown to the user, or null. */
+  error: string | null;
+  pending: number;
+  failed: number;
+  conflicts: number;
+}
+
+/** Progress events from the background sync engine. */
+export type SyncEvent =
+  | { type: "syncing"; accountId: AccountId }
+  | { type: "synced"; accountId: AccountId; changed: boolean }
+  | { type: "failed"; accountId: AccountId; message: string; offline: boolean };
+
 /** Half-open instant range `[start, end)` in epoch ms. */
 export interface DateRange {
   start: number;

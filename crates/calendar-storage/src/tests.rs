@@ -599,3 +599,537 @@ async fn series_text_changes_reach_overrides_that_kept_the_series_value() {
     got.sort();
     assert_eq!(got, vec!["Daily sync", "Daily sync", "Special"]);
 }
+
+// --- synchronization -----------------------------------------------------
+
+mod sync {
+    use super::*;
+    use crate::{IncomingObject, OpFailure, OpKind, RemoteCalendarSpec};
+    use calendar_core::{Account, EventContent, ObjectContent, ProviderKind};
+
+    const CAL_URL: &str = "https://dav.example/cal/alice/work/";
+
+    async fn remote_store() -> (Store, String) {
+        let store = Store::open_in_memory().await.unwrap();
+        store
+            .replace_all(&sim::accounts(), &sim::calendars(), &[])
+            .await
+            .unwrap();
+        let account = Account {
+            id: "acct-dav".into(),
+            name: "alice@dav.example".into(),
+            provider: ProviderKind::Caldav,
+        };
+        let spec = RemoteCalendarSpec {
+            remote_url: CAL_URL.into(),
+            name: "Work".into(),
+            color: Some("#112233".into()),
+            read_only: false,
+            supports_sync: true,
+            ctag: None,
+        };
+        store
+            .create_remote_account(
+                &account,
+                &serde_json::json!({"serverUrl": "https://dav.example/"}),
+                &[spec],
+            )
+            .await
+            .unwrap();
+        let cal = store.calendars_of("acct-dav").await.unwrap().remove(0);
+        (store, cal.id)
+    }
+
+    fn content(uid: &str, title: &str, rrule: Option<&str>) -> ObjectContent {
+        ObjectContent {
+            uid: uid.into(),
+            master: Some(EventContent {
+                title: title.into(),
+                description: String::new(),
+                location: String::new(),
+                timing: zoned(local(2026, 6, 1, 9, 0), 30),
+                recurrence: rrule.map(|r| calendar_core::Recurrence {
+                    rrule: r.into(),
+                    ..Default::default()
+                }),
+                recurrence_id: None,
+            }),
+            overrides: vec![],
+        }
+    }
+
+    fn incoming(href: &str, etag: &str, c: ObjectContent) -> IncomingObject {
+        IncomingObject {
+            href: format!("{CAL_URL}{href}"),
+            etag: Some(etag.into()),
+            ical: format!("ICS {etag}"),
+            content: Ok(c),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_creates_are_queued_and_settle_after_upload() {
+        let (store, cal) = remote_store().await;
+        let e = store
+            .create_event(
+                "local-1",
+                draft(&cal, "New", zoned(local(2026, 6, 10, 9, 0), 60), None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(e.sync_status, SyncStatus::PendingSync);
+        let ops = store.due_operations("acct-dav", now_ms()).await.unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, OpKind::Put);
+        assert_eq!(ops[0].href, format!("{CAL_URL}local-1.ics"));
+        let push = store
+            .object_for_push(&cal, &ops[0].href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((push.uid.as_str(), push.etag.as_deref()), ("local-1", None));
+        assert_eq!(push.content.master.unwrap().title, "New");
+
+        store
+            .complete_put(&ops[0], Some("\"e1\""), "BEGIN:VCALENDAR...")
+            .await
+            .unwrap();
+        assert!(
+            store
+                .due_operations("acct-dav", now_ms())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let shown = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+        assert_eq!(shown[0].sync_status, SyncStatus::Synced);
+        assert_eq!(
+            store.known_objects(&cal).await.unwrap(),
+            vec![(ops[0].href.clone(), Some("\"e1\"".into()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_during_upload_is_not_lost() {
+        let (store, cal) = remote_store().await;
+        store
+            .create_event(
+                "local-1",
+                draft(&cal, "v1", zoned(local(2026, 6, 10, 9, 0), 60), None),
+            )
+            .await
+            .unwrap();
+        let op = store
+            .due_operations("acct-dav", now_ms())
+            .await
+            .unwrap()
+            .remove(0);
+        // The user edits while the upload of v1 is in flight.
+        store
+            .update_event(
+                "local-1",
+                draft(&cal, "v2", zoned(local(2026, 6, 10, 9, 0), 60), None),
+            )
+            .await
+            .unwrap();
+        store.complete_put(&op, Some("\"e1\""), "v1").await.unwrap();
+        let again = store.due_operations("acct-dav", now_ms()).await.unwrap();
+        assert_eq!(again.len(), 1, "v2 still needs uploading");
+        assert!(again[0].generation > op.generation);
+        assert_eq!(
+            store.query_range(month(2026, 6), BERLIN).await.unwrap()[0].sync_status,
+            SyncStatus::PendingSync
+        );
+        let push = store
+            .object_for_push(&cal, &again[0].href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            push.etag.as_deref(),
+            Some("\"e1\""),
+            "next upload is conditional on the new version"
+        );
+    }
+
+    #[tokio::test]
+    async fn deletes_are_queued_only_for_uploaded_objects() {
+        let (store, cal) = remote_store().await;
+        store
+            .create_event(
+                "never",
+                draft(&cal, "x", zoned(local(2026, 6, 10, 9, 0), 60), None),
+            )
+            .await
+            .unwrap();
+        store.delete_event("never").await.unwrap();
+        assert!(
+            store
+                .due_operations("acct-dav", now_ms())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"1\"", content("a", "Remote", None))],
+                &[],
+                Some("tok-1"),
+            )
+            .await
+            .unwrap();
+        let id = store.query_range(month(2026, 6), BERLIN).await.unwrap()[0]
+            .id
+            .clone();
+        assert_eq!(id, format!("{cal}/a"));
+        store.delete_event(&id).await.unwrap();
+        let ops = store.due_operations("acct-dav", now_ms()).await.unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, OpKind::Delete);
+        store.complete_delete(&ops[0]).await.unwrap();
+        assert!(store.known_objects(&cal).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pulled_objects_replace_rows_with_stable_ids() {
+        let (store, cal) = remote_store().await;
+        let mut series = content("s", "Stand-up", Some("FREQ=DAILY;COUNT=3"));
+        series.overrides.push(EventContent {
+            title: "Stand-up (moved)".into(),
+            description: String::new(),
+            location: String::new(),
+            timing: zoned(local(2026, 6, 2, 15, 0), 30),
+            recurrence: None,
+            recurrence_id: Some(OccurrenceKey::Instant(resolve_local(
+                &BERLIN,
+                local(2026, 6, 2, 9, 0),
+            ))),
+        });
+        let r = store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("s.ics", "\"1\"", series.clone())],
+                &[],
+                Some("t1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.applied, 1);
+        let first = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+        assert_eq!(first.len(), 3);
+        assert_eq!(
+            first.iter().filter(|o| o.title.contains("moved")).count(),
+            1
+        );
+        assert!(first.iter().all(|o| o.sync_status == SyncStatus::Synced));
+
+        // A new server version replaces the rows (no duplicates, same ids).
+        series.master.as_mut().unwrap().title = "Daily".into();
+        store
+            .apply_remote_changes(&cal, &[incoming("s.ics", "\"2\"", series)], &[], Some("t2"))
+            .await
+            .unwrap();
+        let second = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+        let ids = |v: &[Occurrence]| {
+            let mut i: Vec<_> = v.iter().map(|o| o.id.clone()).collect();
+            i.sort();
+            i
+        };
+        assert_eq!(ids(&first), ids(&second));
+        assert_eq!(second.iter().filter(|o| o.title == "Daily").count(), 2);
+        assert_eq!(
+            store.remote_calendars("acct-dav").await.unwrap()[0]
+                .sync_token
+                .as_deref(),
+            Some("t2")
+        );
+
+        store
+            .apply_remote_changes(&cal, &[], &[format!("{CAL_URL}s.ics")], None)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .query_range(month(2026, 6), BERLIN)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_changes_win_until_uploaded_and_bad_objects_are_isolated() {
+        let (store, cal) = remote_store().await;
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"1\"", content("a", "Server v1", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        let id = format!("{cal}/a");
+        store
+            .update_event(
+                &id,
+                draft(&cal, "Mine", zoned(local(2026, 6, 1, 9, 0), 30), None),
+            )
+            .await
+            .unwrap();
+        let report = store
+            .apply_remote_changes(
+                &cal,
+                &[
+                    incoming("a.ics", "\"2\"", content("a", "Server v2", None)),
+                    incoming(
+                        "bad.ics",
+                        "\"1\"",
+                        content("bad", "Broken rule", Some("FREQ=NEVER")),
+                    ),
+                    IncomingObject {
+                        href: format!("{CAL_URL}garbage.ics"),
+                        etag: Some("\"1\"".into()),
+                        ical: "x".into(),
+                        content: Err("malformed".into()),
+                    },
+                    incoming("ok.ics", "\"1\"", content("ok", "Fine", None)),
+                ],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.skipped_pending, vec![format!("{CAL_URL}a.ics")]);
+        assert_eq!(report.failed.len(), 2);
+        assert_eq!(report.applied, 1);
+        let mut got = titles(&store, month(2026, 6)).await;
+        got.sort();
+        assert_eq!(got, vec!["Fine", "Mine"]);
+        // Failed objects are remembered by ETag so they are not re-fetched forever.
+        assert_eq!(store.known_objects(&cal).await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn conflicts_and_their_resolution() {
+        let (store, cal) = remote_store().await;
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"1\"", content("a", "Server", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        let id = format!("{cal}/a");
+        store
+            .update_event(
+                &id,
+                draft(&cal, "Mine", zoned(local(2026, 6, 1, 9, 0), 30), None),
+            )
+            .await
+            .unwrap();
+        let op = store
+            .due_operations("acct-dav", now_ms())
+            .await
+            .unwrap()
+            .remove(0);
+        store
+            .fail_operation(&op, "changed on server", OpFailure::Conflict)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.query_range(month(2026, 6), BERLIN).await.unwrap()[0].sync_status,
+            SyncStatus::Conflict
+        );
+        assert!(
+            store
+                .due_operations("acct-dav", now_ms())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let status = store
+            .account_statuses()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.account_id == "acct-dav")
+            .unwrap();
+        assert_eq!((status.conflicts, status.pending), (1, 0));
+
+        assert_eq!(
+            store.object_of(&id).await.unwrap(),
+            Some((cal.clone(), format!("{CAL_URL}a.ics")))
+        );
+        store
+            .resolve_operation(&cal, &format!("{CAL_URL}a.ics"), true)
+            .await
+            .unwrap();
+        let forced = store.due_operations("acct-dav", now_ms()).await.unwrap();
+        assert!(forced[0].force);
+
+        // Choosing the server version drops the local change, forgets the
+        // ETag and resets the sync token so the next sync refetches it.
+        store
+            .apply_remote_changes(&cal, &[], &[], Some("tok"))
+            .await
+            .unwrap();
+        store
+            .resolve_operation(&cal, &format!("{CAL_URL}a.ics"), false)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .due_operations("acct-dav", now_ms())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.known_objects(&cal).await.unwrap().is_empty());
+        assert_eq!(
+            store.remote_calendars("acct-dav").await.unwrap()[0].sync_token,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_are_scheduled() {
+        let (store, cal) = remote_store().await;
+        store
+            .create_event(
+                "e",
+                draft(&cal, "x", zoned(local(2026, 6, 10, 9, 0), 60), None),
+            )
+            .await
+            .unwrap();
+        let op = store
+            .due_operations("acct-dav", now_ms())
+            .await
+            .unwrap()
+            .remove(0);
+        let later = now_ms() + 60_000;
+        store
+            .fail_operation(&op, "offline", OpFailure::Retry { at_ms: later })
+            .await
+            .unwrap();
+        assert!(
+            store
+                .due_operations("acct-dav", now_ms())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.next_retry_ms("acct-dav").await.unwrap(), Some(later));
+        assert_eq!(
+            store.due_operations("acct-dav", later).await.unwrap()[0].attempts,
+            1
+        );
+        // "Sync now" skips the backoff.
+        store.retry_now().await.unwrap();
+        assert_eq!(
+            store
+                .due_operations("acct-dav", now_ms())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn calendar_lists_are_reconciled() {
+        let (store, cal) = remote_store().await;
+        let new = RemoteCalendarSpec {
+            remote_url: "https://dav.example/cal/alice/home/".into(),
+            name: "Home".into(),
+            color: None,
+            read_only: true,
+            supports_sync: false,
+            ctag: None,
+        };
+        // Work keeps a pending change, so it survives disappearing from the server.
+        store
+            .create_event(
+                "e",
+                draft(&cal, "x", zoned(local(2026, 6, 10, 9, 0), 60), None),
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .update_remote_calendars("acct-dav", std::slice::from_ref(&new))
+                .await
+                .unwrap()
+        );
+        let names: Vec<_> = store
+            .calendars_of("acct-dav")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["Work", "Home"]);
+        assert!(
+            store
+                .list_calendars()
+                .await
+                .unwrap()
+                .iter()
+                .any(|c| c.name == "Home" && c.read_only)
+        );
+    }
+
+    #[tokio::test]
+    async fn datasets_keep_real_accounts_and_moves_are_refused() {
+        let (store, cal) = remote_store().await;
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"1\"", content("a", "Keep me", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        let data = sim::generate(&DatasetOptions {
+            seed: 1,
+            event_count: 100,
+            anchor: NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+            time_zone: BERLIN,
+        });
+        store
+            .replace_all(&data.accounts, &data.calendars, &data.events)
+            .await
+            .unwrap();
+        assert!(
+            titles(&store, month(2026, 6))
+                .await
+                .contains(&"Keep me".to_owned())
+        );
+        assert_eq!(store.remote_accounts().await.unwrap().len(), 1);
+        assert!(matches!(
+            store
+                .update_event(
+                    &format!("{cal}/a"),
+                    draft(
+                        "cal-work",
+                        "Moved",
+                        zoned(local(2026, 6, 1, 9, 0), 30),
+                        None
+                    )
+                )
+                .await,
+            Err(StorageError::Unsupported(_))
+        ));
+        store.remove_account("acct-dav").await.unwrap();
+        assert!(
+            !titles(&store, month(2026, 6))
+                .await
+                .contains(&"Keep me".to_owned())
+        );
+    }
+}

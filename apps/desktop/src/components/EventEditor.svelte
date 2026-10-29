@@ -26,9 +26,16 @@
     /** For recurring events: delete just this occurrence or the whole series. */
     ondelete: (scope: SeriesScope) => void;
     onclose: () => void;
+    /** Resolve a sync conflict or failure for this event. */
+    onresolve?: (keepLocal: boolean) => void;
   }
 
-  let { event, timing, calendars, defaultCalendarId, readOnly, onsave, ondelete, onclose }: Props = $props();
+  let { event, timing, calendars, defaultCalendarId, readOnly, onsave, ondelete, onclose, onresolve }: Props =
+    $props();
+
+  const syncIssue = $derived(
+    event?.syncStatus === "conflict" ? "conflict" : event?.syncStatus === "sync-failed" ? "failed" : null,
+  );
 
   // The form edits a local copy initialised once from the props; the parent
   // re-creates this component (keyed) for every editor session.
@@ -197,6 +204,21 @@
   >
     <form onsubmit={submit} novalidate>
       <h2 id="editor-title">{heading}</h2>
+      {#if syncIssue && onresolve}
+        <div class="banner" role="alert">
+          <p>
+            {syncIssue === "conflict"
+              ? "This event was also changed on the server. Choose which version to keep."
+              : "Your change could not be saved to the server."}
+          </p>
+          <div class="banner-actions">
+            <button type="button" onclick={() => onresolve(true)}>{syncIssue === "conflict" ? "Keep mine" : "Try again"}</button>
+            <button type="button" onclick={() => onresolve(false)}>
+              {syncIssue === "conflict" ? "Use server version" : "Discard my change"}
+            </button>
+          </div>
+        </div>
+      {/if}
       {#if readOnly}
         <p class="note" role="note">This calendar is read-only.</p>
       {:else if recurring}
@@ -334,6 +356,19 @@
     grid-template-columns: 1fr auto;
     gap: 0.5rem;
     align-items: end;
+  }
+  .banner {
+    border: 1px solid var(--uc-danger);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    margin: 0 0 0.75rem;
+  }
+  .banner p {
+    margin: 0 0 0.5rem;
+  }
+  .banner-actions {
+    display: flex;
+    gap: 0.5rem;
   }
   .note {
     margin: 0 0 0.75rem;

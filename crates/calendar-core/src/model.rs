@@ -176,6 +176,28 @@ pub struct EventDraft {
     pub rrule: Option<String>,
 }
 
+/// Provider-neutral content of one remote event component (e.g. a VEVENT).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventContent {
+    pub title: String,
+    pub description: String,
+    pub location: String,
+    pub timing: EventTiming,
+    /// Present on a series master only.
+    pub recurrence: Option<Recurrence>,
+    /// Present on overrides (modified occurrences) only.
+    pub recurrence_id: Option<OccurrenceKey>,
+}
+
+/// The events of one remote object (one UID): an optional master and its
+/// overrides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectContent {
+    pub uid: String,
+    pub master: Option<EventContent>,
+    pub overrides: Vec<EventContent>,
+}
+
 /// One concrete appearance of an event inside a queried range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Occurrence {

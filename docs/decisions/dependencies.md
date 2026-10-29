@@ -1,6 +1,6 @@
 # Dependency and license review
 
-- **Last reviewed:** 2026-10-29 (Milestone 2)
+- **Last reviewed:** 2026-10-29 (Milestone 3)
 - **Project license:** GPL-3.0-or-later
 
 ## Direct dependencies
@@ -17,13 +17,20 @@
 | `chrono`, `chrono-tz` | 0.4 / 0.10 | MIT OR Apache-2.0 | Dates, times, IANA zones |
 | `tokio` | 1.54 | MIT | Blocking pool for recurrence expansion; async runtime |
 | `thiserror` | 2.x | MIT OR Apache-2.0 | Error types |
+| `reqwest` (rustls, platform verifier) | 0.13 | MIT OR Apache-2.0 | CalDAV HTTP. TLS via `rustls` (Apache-2.0 OR ISC OR MIT) and `aws-lc-rs` (ISC / Apache-2.0 / MIT / BSD-3-Clause) |
+| `roxmltree` | 0.21 | MIT OR Apache-2.0 | WebDAV multistatus parsing |
+| `url` | 2.x | MIT OR Apache-2.0 | URL handling |
+| `async-trait` | 0.1 | MIT OR Apache-2.0 | Object-safe async provider trait |
+| `keyring` (zbus Secret Service store) | 4.2 | MIT OR Apache-2.0 (`zbus`: MIT) | OS credential storage |
+| Dev: `wiremock` | 0.6 | MIT/Apache-2.0 | Mock CalDAV server in tests |
+| Dev tool (not shipped): Radicale | 3.9 | GPL-3.0 | Local CalDAV server for end-to-end tests (`scripts/dev-radicale.sh`) |
 | Dev: `svelte` 5.57, `vite` 8.3, `@sveltejs/vite-plugin-svelte` 7.3, `typescript` 6.0, `svelte-check` 4.7, `vitest` 5.0, `jsdom` 30, `@testing-library/svelte` 5.4, `@tauri-apps/cli` 2.12 | | MIT / Apache-2.0 | Build and test tooling |
 
 TypeScript is held at 6.x because `svelte-check` 4.7 doesn't yet support TypeScript 7.
 
 ## Transitive audit
 
-**Rust** (`cargo metadata`, linux-x86_64 resolve): 330 crates after Milestone 2. All are permissive and GPL-3.0-compatible:
+**Rust** (`cargo metadata`, linux-x86_64 resolve): 435 crates after Milestone 3. All are permissive and GPL-3.0-compatible:
 
 - MIT and/or Apache-2.0 (including Apache-2.0 WITH LLVM-exception);
 - Unicode-3.0;

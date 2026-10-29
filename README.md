@@ -2,10 +2,10 @@
 
 A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma first), designed to unify CalDAV, Google Calendar, Microsoft 365 and ICS subscriptions behind one responsive interface. The app needs no hosted backend, telemetry or developer-run account.
 
-> **Status: Milestone 2 (Rust calendar core and SQLite).**
-> Events, settings and calendar colours are stored locally in SQLite, and
-> recurring events are expanded by the Rust core. Data is still simulated
-> (no calendar providers are connected yet). See [Roadmap](#roadmap).
+> **Status: Milestone 3 (CalDAV).** CalDAV accounts (Nextcloud, Fastmail,
+> Radicale, Baïkal, …) sync both ways with an offline queue; everything is
+> stored locally in SQLite. Google and Microsoft arrive in Milestone 4.
+> Simulated demo calendars remain available. See [Roadmap](#roadmap).
 
 ![Month view](docs/screenshots/light-month.png)
 
@@ -14,6 +14,24 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 | ![Week view, dark](docs/screenshots/dark-week.png) | ![Editor](docs/screenshots/light-editor.png) |
 
 ## Features
+
+### CalDAV accounts
+
+- **Add CalDAV account…** in the sidebar: enter the server address (for Nextcloud, just `https://your.cloud`), the user name and an **app password**.
+- **Discovery** follows the standard route (`/.well-known/caldav` → principal → calendar home). Every event calendar is listed with its server colour; shared read-only calendars are detected.
+- **Two-way sync** in the background:
+  - Every change is saved locally first, then uploaded with ETag checks, so another client's edits are never silently overwritten.
+  - Server changes are fetched incrementally with sync tokens where supported (RFC 6578), falling back to an ETag comparison.
+  - It syncs on start-up, a few seconds after local edits, every 5 minutes, and on **Sync now**.
+- **Offline:**
+  - Changes are queued in SQLite and survive restarts and crashes.
+  - Failed uploads retry with backoff (30 s doubling to 1 h).
+  - The sidebar shows *Offline*, *N changes waiting* or errors.
+- **Conflicts:** if an event changed on the server and here, it is marked with a dashed red outline, and the editor offers *Keep mine* or *Use server version*.
+- **Round trips are lossless.** Properties this app doesn't edit (alarms, attendees, vendor `X-` fields, VTIMEZONEs) are kept exactly as the server sent them.
+- **Credentials** are stored in the system keyring via the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in the database or logs.
+
+### Calendar
 
 - Tauri 2 desktop shell with a Svelte 5 + TypeScript (strict) + Vite frontend.
 - Month, week and day views powered by the MIT-licensed [SVAR Svelte Calendar](https://github.com/svar-widgets/calendar), kept behind an adapter so it can be replaced.
@@ -42,11 +60,19 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 
   Shortcuts don't fire while you're typing in a field.
 - Deterministic data generator (100 / 1,000 / 5,000 events, written in Rust), a scripted UI benchmark that runs in the real WebKitGTK window, and a storage benchmark. See [docs/performance.md](docs/performance.md).
-- On first run the app seeds 1,000 simulated events. **Choosing a dataset in the sidebar replaces all events.**
+- On first run the app seeds 1,000 simulated events in three demo accounts. **Choosing a dataset in the sidebar replaces the simulated events only**; CalDAV accounts are not touched.
 
 ## Supported platforms
 
 Linux (developed on Ubuntu 24.04; target desktop KDE Plasma). Windows and macOS are architecturally possible through Tauri but not yet built or tested.
+
+## Requirements at runtime
+
+- A Secret Service provider (the `org.freedesktop.secrets` D-Bus API) for storing CalDAV passwords:
+  - **KDE Plasma:** KWallet implements it since KDE Frameworks 5.97. It must be enabled (see KWallet settings) and the wallet unlocked.
+  - **Elsewhere:** GNOME Keyring works too.
+
+  Without one, adding an account fails with a clear message. Not yet tested on a real Plasma desktop.
 
 ## Prerequisites
 
@@ -91,8 +117,27 @@ npm run build          # production bundle
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-cargo build -p calendar-core -p calendar-storage   # the engine builds without Tauri
+cargo build -p calendar-core -p calendar-storage -p calendar-sync   # the engine builds without Tauri
 ```
+
+### Testing against a real CalDAV server
+
+```sh
+scripts/dev-radicale.sh start      # local Radicale on 127.0.0.1:5232 (user test/test, calendar "UC Test")
+UC_CALDAV_URL=http://127.0.0.1:5232/ UC_CALDAV_USER=test UC_CALDAV_PASSWORD=test \
+  cargo test -p calendar-caldav -p calendar-sync --test real_server -- --nocapture
+scripts/dev-radicale.sh stop
+```
+
+The script needs Radicale (`python3 -m pip install radicale`, or set `RADICALE=/path/to/radicale`).
+
+The same tests work against Nextcloud or any other server:
+- use an **app password** and a **dedicated test calendar**;
+- set `UC_CALDAV_CALENDAR` to that calendar's name (default "UC Test").
+
+They only touch events they create, and delete them at the end. Without these variables the tests skip themselves.
+
+For trying the UI on a machine without a Secret Service daemon, `UC_CREDENTIALS=memory` keeps passwords in memory only. They are lost on exit, so use it for testing only.
 
 ## Benchmark
 
@@ -109,7 +154,11 @@ The UI benchmark uses a temporary database and never touches your calendar. Both
 
 ```text
 crates/calendar-core/        Provider-neutral models, validation, recurrence, wire types, simulated data
-crates/calendar-storage/     SQLite (SQLx) persistence, migrations, range queries
+crates/calendar-ical/        Lossless iCalendar parser/writer and VEVENT ⇄ model mapping
+crates/calendar-provider-api/ Provider contract (objects, ETags, change sets, errors)
+crates/calendar-caldav/      CalDAV client: discovery, listing, sync-collection, conditional writes
+crates/calendar-sync/        Sync engine, offline queue processing, scheduler, credentials
+crates/calendar-storage/     SQLite (SQLx) persistence, migrations, range queries, sync state
 apps/desktop/src/            Svelte UI: components, stores, services, bench runner
 apps/desktop/src-tauri/      Thin Tauri 2 shell: commands forward to the crates
 docs/                        Architecture, performance, provider/sync design, decisions
@@ -121,8 +170,8 @@ See [docs/architecture.md](docs/architecture.md).
 ## Roadmap
 
 1. Desktop foundation and performance prototype ✔
-2. **Rust calendar core, SQLite storage, Tauri commands, recurrence** ← current
-3. CalDAV (Nextcloud reference) with offline queue
+2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
+3. **CalDAV (Nextcloud reference) with offline queue** ← current
 4. Google Calendar and Microsoft Graph
 5. Production quality: recurrence editing, notifications, agenda view, ICS subscriptions, packaging
 

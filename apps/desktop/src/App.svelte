@@ -7,6 +7,8 @@
     EditorRequest,
     MoveRequest,
   } from "./components/calendar/types";
+  import AddAccountDialog from "./components/AddAccountDialog.svelte";
+  import ConfirmDialog from "./components/ConfirmDialog.svelte";
   import EventEditor from "./components/EventEditor.svelte";
   import PerfPanel from "./components/PerfPanel.svelte";
   import Sidebar from "./components/Sidebar.svelte";
@@ -22,7 +24,7 @@
   import { CalendarsStore } from "./stores/calendars.svelte";
   import { EventStore, type SeriesScope } from "./stores/events.svelte";
   import { Notifications } from "./stores/notifications.svelte";
-  import type { CalendarEvent, CalendarViewKind, EventDraft, EventTiming } from "./types/calendar";
+  import type { CalendarEvent, CalendarViewKind, EventDraft, EventTiming, SyncEvent } from "./types/calendar";
 
   const BENCH_ANCHOR = "2026-06-15";
   const SEARCH_DEBOUNCE_MS = 150;
@@ -76,11 +78,91 @@
     });
   }
 
+  // --- accounts and sync ---------------------------------------------------
+  let addingAccount = $state(false);
+  let removing = $state<{ id: string; name: string } | null>(null);
+  let statusTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function refreshStatuses(): void {
+    backend
+      .accountStatuses()
+      .then((list) => calendars.setStatuses(list))
+      .catch(() => {});
+  }
+
+  /** Coalesces status refreshes after bursts of local edits. */
+  function refreshStatusesSoon(): void {
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(refreshStatuses, 400);
+  }
+
+  async function addAccount(serverUrl: string, username: string, password: string): Promise<string | null> {
+    try {
+      await backend.addCaldavAccount(serverUrl, username, password);
+      addingAccount = false;
+      await reloadCalendars();
+      refreshStatuses();
+      notifications.push("Account added. Syncing…", "info");
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : "The account could not be added.";
+    }
+  }
+
+  async function confirmRemoveAccount(): Promise<void> {
+    if (!removing) return;
+    const { id } = removing;
+    removing = null;
+    try {
+      await backend.removeAccount(id);
+      await reloadCalendars();
+      store.invalidate();
+      refreshStatuses();
+    } catch (error) {
+      notifications.push(error instanceof Error ? error.message : "The account could not be removed.");
+    }
+  }
+
+  function onSync(event: SyncEvent): void {
+    switch (event.type) {
+      case "syncing":
+        calendars.setSyncing(event.accountId, true);
+        break;
+      case "synced":
+        calendars.setSyncing(event.accountId, false);
+        refreshStatuses();
+        if (event.changed) {
+          // New or changed server data: reload calendars and the visible range.
+          void reloadCalendars();
+          store.invalidate();
+        }
+        break;
+      case "failed":
+        calendars.setSyncing(event.accountId, false);
+        refreshStatuses();
+        break;
+    }
+  }
+
+  async function resolveFromEditor(keepLocal: boolean): Promise<void> {
+    const event = editor?.event;
+    if (!event) return;
+    editor = null;
+    try {
+      await backend.resolveConflict(event.id, keepLocal);
+      store.invalidate();
+      refreshStatuses();
+    } catch (error) {
+      notifications.push(error instanceof Error ? error.message : "The conflict could not be resolved.");
+    }
+  }
+
   // Visibility is a per-device preference: persist it, debounced.
   let hiddenTimer: ReturnType<typeof setTimeout> | undefined;
   function toggleCalendar(id: string): void {
     calendars.toggle(id);
     clearTimeout(hiddenTimer);
+    clearTimeout(statusTimer);
     hiddenTimer = setTimeout(() => void backend.saveSetting("hiddenCalendars", [...calendars.hidden]), 300);
   }
 
@@ -199,7 +281,7 @@
   let perfOpen = $state(false);
 
   function onKeydown(e: KeyboardEvent) {
-    if (editor) return; // The dialog handles its own keys (Esc, Tab).
+    if (editor || addingAccount || removing) return; // Dialogs handle their own keys.
     const action = resolveShortcut(e);
     if (!action) return;
     e.preventDefault();
@@ -254,6 +336,18 @@
         });
       }),
     );
+    cleanups.push(store.subscribe(() => refreshStatusesSoon()));
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void backend.onSyncEvent(onSync).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    cleanups.push(() => {
+      disposed = true;
+      unlisten?.();
+    });
+    refreshStatuses();
     const hidden = initialSettings.hiddenCalendars;
     void reloadCalendars().then(() => {
       if (Array.isArray(hidden)) for (const id of hidden) if (typeof id === "string") calendars.setVisible(id, false);
@@ -265,6 +359,7 @@
     for (const cleanup of cleanups) cleanup();
     clearTimeout(searchTimer);
     clearTimeout(hiddenTimer);
+    clearTimeout(statusTimer);
     notifications.dispose();
   });
 
@@ -369,6 +464,9 @@
     {latencyMs}
     {themePreference}
     simulationControls={backend.mock !== null}
+    onaddaccount={backend.kind === "desktop" ? () => (addingAccount = true) : undefined}
+    onremoveaccount={(id) => (removing = { id, name: calendars.accounts.find((a) => a.id === id)?.name ?? id })}
+    onsyncnow={() => void backend.syncNow()}
     ontogglecalendar={(id) => void measureInteraction("visibility-toggle", () => toggleCalendar(id))}
     oncolor={setCalendarColor}
     ondataset={(size) => void measureInteraction("dataset-load", () => switchDataset(size))}
@@ -425,8 +523,23 @@
       onsave={saveEditor}
       ondelete={deleteFromEditor}
       onclose={closeEditor}
+      onresolve={backend.kind === "desktop" ? (keep) => void resolveFromEditor(keep) : undefined}
     />
   {/key}
+{/if}
+
+{#if addingAccount}
+  <AddAccountDialog onsubmit={addAccount} onclose={() => (addingAccount = false)} />
+{/if}
+
+{#if removing}
+  <ConfirmDialog
+    title="Remove account?"
+    message={`“${removing.name}” and its calendars will be removed from this computer. Events on the server are not deleted. Changes that have not synced yet will be lost.`}
+    confirmLabel="Remove account"
+    onconfirm={() => void confirmRemoveAccount()}
+    oncancel={() => (removing = null)}
+  />
 {/if}
 
 {#if perfOpen}

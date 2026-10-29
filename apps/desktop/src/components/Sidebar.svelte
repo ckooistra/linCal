@@ -16,6 +16,10 @@
     onlatency: (ms: number) => void;
     ontheme: (preference: ThemePreference) => void;
     onfailnext: () => void;
+    /** Account actions; omitted in the browser preview. */
+    onaddaccount?: () => void;
+    onremoveaccount?: (accountId: string) => void;
+    onsyncnow?: () => void;
   }
 
   let {
@@ -30,7 +34,30 @@
     onlatency,
     ontheme,
     onfailnext,
+    onaddaccount,
+    onremoveaccount,
+    onsyncnow,
   }: Props = $props();
+
+  function ago(ms: number): string {
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return "just now";
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    if (s < 86_400) return `${Math.round(s / 3600)} h ago`;
+    return new Date(ms).toLocaleDateString();
+  }
+
+  /** One-line sync summary for a remote account. */
+  function summary(accountId: string): { text: string; tone: "ok" | "busy" | "warn" | "error" } | null {
+    const st = calendars.statuses[accountId];
+    if (!st?.remote) return null;
+    if (calendars.syncing.has(accountId)) return { text: "Syncing…", tone: "busy" };
+    if (st.conflicts) return { text: `${st.conflicts} conflict${st.conflicts > 1 ? "s" : ""} to resolve`, tone: "error" };
+    if (st.error) return { text: st.error, tone: st.error.startsWith("Offline") ? "warn" : "error" };
+    if (st.failed) return { text: `${st.failed} change${st.failed > 1 ? "s" : ""} could not be saved`, tone: "error" };
+    if (st.pending) return { text: `${st.pending} change${st.pending > 1 ? "s" : ""} waiting to sync`, tone: "warn" };
+    return { text: st.lastSyncedAt ? `Synced ${ago(st.lastSyncedAt)}` : "Not synced yet", tone: "ok" };
+  }
 
   const groups = $derived(
     calendars.accounts.map((account) => ({
@@ -42,8 +69,22 @@
 
 <nav class="sidebar" aria-label="Calendars and settings">
   {#each groups as { account, items } (account.id)}
+    {@const sync = summary(account.id)}
     <section>
-      <h3>{account.name}</h3>
+      <div class="account">
+        <h3 title={account.name}>{account.name}</h3>
+        {#if onremoveaccount && account.provider !== "simulated" && account.provider !== "local"}
+          <button
+            type="button"
+            class="small"
+            title="Remove this account from Universal Calendar"
+            onclick={() => onremoveaccount(account.id)}>Remove</button
+          >
+        {/if}
+      </div>
+      {#if sync}
+        <p class={`sync ${sync.tone}`} role="status">{sync.text}</p>
+      {/if}
       <ul>
         {#each items as cal (cal.id)}
           <li>
@@ -69,6 +110,15 @@
       </ul>
     </section>
   {/each}
+
+  {#if onaddaccount}
+    <section class="accounts-actions">
+      <button type="button" onclick={onaddaccount}>Add CalDAV account…</button>
+      {#if onsyncnow && Object.values(calendars.statuses).some((s) => s.remote)}
+        <button type="button" onclick={onsyncnow} title="Sync all accounts now">Sync now</button>
+      {/if}
+    </section>
+  {/if}
 
   <section class="settings">
     <h3>Settings</h3>
@@ -117,6 +167,39 @@
     border-right: 1px solid var(--uc-border);
     background: var(--uc-surface-alt);
     font-size: 0.9rem;
+  }
+  .account {
+    display: flex;
+    align-items: baseline;
+    gap: 0.25rem;
+  }
+  .account h3 {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .small {
+    min-height: 0;
+    padding: 0 0.4rem;
+    font-size: 0.7rem;
+  }
+  .sync {
+    margin: 0 0 0.3rem;
+    font-size: 0.75rem;
+    color: var(--uc-text-muted);
+  }
+  .sync.warn {
+    color: #b7791f;
+  }
+  .sync.error {
+    color: var(--uc-danger);
+  }
+  .accounts-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
   }
   h3 {
     margin: 0 0 0.35rem;

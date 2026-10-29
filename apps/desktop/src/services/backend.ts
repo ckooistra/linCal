@@ -3,15 +3,22 @@
  * or an in-memory mock when the UI runs in a plain browser (preview/tests).
  * Everything above this module works against the same interface.
  */
-import type { Account, Calendar } from "../types/calendar";
+import type { Account, AccountStatus, Calendar, SyncEvent } from "../types/calendar";
 import {
+  accountStatuses,
+  addCaldavAccount,
   isTauri,
   loadSettings,
   loadSimulatedDataset,
+  onSyncEvent,
+  removeAccount,
+  resolveConflict,
   saveSetting,
   setCalendarColor,
+  syncNow,
   type Settings,
 } from "./bridge";
+import { SourceError } from "./eventSource";
 import type { EventSource } from "./eventSource";
 import { DEFAULT_SEED, generateDataset } from "./mock/generator";
 import { MockEventSource } from "./mock/mockEventSource";
@@ -33,7 +40,17 @@ export interface Backend {
   loadDataset(size: number, anchor?: string): Promise<EventSource>;
   setCalendarColor(calendarId: string, color: string): Promise<void>;
   saveSetting(key: string, value: unknown): Promise<void>;
+  /** Remote accounts (desktop only; the preview rejects with a message). */
+  addCaldavAccount(serverUrl: string, username: string, password: string): Promise<string>;
+  removeAccount(accountId: string): Promise<void>;
+  syncNow(): Promise<void>;
+  accountStatuses(): Promise<AccountStatus[]>;
+  resolveConflict(eventId: string, keepLocal: boolean): Promise<void>;
+  onSyncEvent(listener: (event: SyncEvent) => void): Promise<() => void>;
 }
+
+const desktopOnly = () =>
+  Promise.reject(new SourceError("Accounts are only available in the desktop app, not the browser preview."));
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -73,6 +90,12 @@ async function desktopBackend(): Promise<Backend> {
     },
     setCalendarColor,
     saveSetting,
+    addCaldavAccount,
+    removeAccount,
+    syncNow,
+    accountStatuses,
+    resolveConflict,
+    onSyncEvent,
   };
 }
 
@@ -98,6 +121,12 @@ function previewBackend(settings: Settings): Backend {
     },
     setCalendarColor: async () => {},
     saveSetting,
+    addCaldavAccount: desktopOnly,
+    removeAccount: desktopOnly,
+    syncNow: async () => {},
+    accountStatuses: async () => [],
+    resolveConflict: desktopOnly,
+    onSyncEvent: async () => () => {},
   };
   return backend;
 }

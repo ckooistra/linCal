@@ -302,6 +302,18 @@
       rgb(255 255 255 / 0.18) 6px 12px
     );
   }
+  .adapter :global(.uc-st-pending-sync) {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      transparent 0 6px,
+      rgb(255 255 255 / 0.14) 6px 12px
+    );
+  }
+  .adapter :global(.uc-st-sync-failed),
+  .adapter :global(.uc-st-conflict) {
+    outline: 2px dashed var(--uc-danger);
+    outline-offset: -2px;
+  }
   .adapter :global(.uc-ro) {
     cursor: default;
   }

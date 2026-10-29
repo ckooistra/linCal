@@ -1,0 +1,12 @@
+[package]
+name = "calendar-provider-api"
+version = "0.1.0"
+description = "Provider-neutral contract between the sync engine and calendar providers"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+thiserror = "2"

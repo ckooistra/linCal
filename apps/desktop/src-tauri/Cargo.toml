@@ -17,6 +17,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 calendar-core = { path = "../../../crates/calendar-core", features = ["sim"] }
 calendar-storage = { path = "../../../crates/calendar-storage" }
+calendar-sync = { path = "../../../crates/calendar-sync", features = ["keyring"] }
+calendar-provider-api = { path = "../../../crates/calendar-provider-api" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
 serde = { version = "1", features = ["derive"] }

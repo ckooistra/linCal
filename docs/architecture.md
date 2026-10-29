@@ -1,6 +1,6 @@
 # Architecture
 
-This describes the code after **Milestone 2** (Rust core + SQLite) and the boundaries that later milestones fill in.
+This describes the code after **Milestone 3** (CalDAV sync) and the boundaries that later milestones fill in.
 
 ## Guiding rules
 
@@ -14,6 +14,10 @@ This describes the code after **Milestone 2** (Rust core + SQLite) and the bound
 
 ```text
 crates/
+├── calendar-ical/            Lossless iCalendar content model, values, VEVENT ⇄ EventContent
+├── calendar-provider-api/    CalendarProvider trait: objects (href + ETag + iCalendar), ChangeSet, errors
+├── calendar-caldav/          CalDAV provider: discovery, PROPFIND/REPORT, sync-collection, multiget, PUT/DELETE
+├── calendar-sync/            SyncEngine (push → calendars → pull), scheduler, CredentialStore (keyring / memory)
 ├── calendar-core/            No I/O, no Tauri
 │   ├── model.rs              Account, Calendar, CalendarEvent, EventTiming, Recurrence, SeriesLink, Occurrence, SyncStatus
 │   ├── timing.rs             Instants for zoned/floating/all-day timings, DST-gap/overlap resolution, validation
@@ -47,7 +51,32 @@ apps/desktop/
     └── components/, bench/, App.svelte
 ```
 
-`cargo tree -p calendar-storage` contains no Tauri crates, and the engine builds on its own (`cargo build -p calendar-core -p calendar-storage`).
+None of the engine crates depend on Tauri (`cargo tree -p calendar-sync | grep tauri` is empty), and they build on their own.
+
+Dependency direction:
+
+- `calendar-sync` → `calendar-caldav` → `calendar-provider-api`
+- `calendar-sync` → `calendar-ical` → `calendar-core`
+- `calendar-sync` → `calendar-storage` → `calendar-core`
+
+Storage knows nothing about iCalendar or HTTP. It stores parsed `ObjectContent` plus the raw server copy.
+
+## Synchronization
+
+```text
+ UI edit ─► Store: write rows + queue operation (one transaction) ─► scheduler.trigger()
+                                                                        │ (debounced 1.5 s, or every 5 min, or retry due)
+ SyncEngine.sync_account
+   1. push   due operations: rebuild the object from rows + last server copy (calendar-ical),
+             PUT with If-Match / If-None-Match:* (DELETE with If-Match)
+             412 → conflict · network/5xx/429 → retry with backoff · 401 → account error
+   2. list   calendars (added / renamed / permissions / removed-unless-pending)
+   3. pull   per calendar: sync-collection(token) or ETag listing → multiget changed →
+             parse → apply in one transaction (objects with queued changes are skipped)
+ ─► "sync-event" (Tauri event) ─► UI refreshes statuses; on changes reloads the visible range
+```
+
+The details (queue semantics, conflicts, recovery) are in [synchronization.md](synchronization.md).
 
 ## Data flow
 
@@ -107,7 +136,13 @@ The `events` table holds one-off events, series masters (`rrule`, `rdates`, `exd
 
 **Occurrences are never stored.** `range_start_ms` / `range_end_ms` index each row; for a series, the end is its last occurrence, or "unbounded". Indexes cover `(range_start_ms, range_end_ms)` and `(calendar_id, range_start_ms)`. Settings hold non-secret JSON values only.
 
-The sync state, pending-operation and provider-metadata tables arrive with CalDAV in Milestone 3.
+Migration 2 (Milestone 3) adds:
+
+- non-secret account `config` (JSON) and sync status;
+- per-calendar `remote_url`, `sync_token` and `ctag`;
+- `events.remote_href`;
+- `remote_objects`: the last server copy and ETag of every object;
+- `pending_operations`: the durable queue, at most one operation per object, with a generation counter.
 
 ### Widget adapter
 
@@ -130,7 +165,8 @@ Commands:
 |---|---|
 | Data | `list_accounts`, `list_calendars`, `query_range`, `create_event`, `update_event`, `delete_event` |
 | Preferences | `set_calendar_color`, `get_settings`, `set_setting` |
-| Simulation | `load_simulated_dataset` |
+| Simulation | `load_simulated_dataset` (replaces simulated accounts only) |
+| Accounts & sync | `add_caldav_account`, `remove_account`, `sync_now`, `account_statuses`, `resolve_conflict` |
 | Benchmark | `bench_*` |
 
 Each decodes its arguments and calls one storage method. Errors reach the UI as `{code, message}` with readable text; database details go to stderr, never to the UI.
@@ -139,10 +175,10 @@ The database opens in `setup`. If it can't be opened, the app still starts and s
 
 The capability file grants only `core:default`. The CSP restricts everything to `self`, plus inline styles for SVAR.
 
-## Planned crates (Milestone 3+)
+The sync engine runs on Tauri's Tokio runtime. Progress reaches the UI as `sync-event` events: `syncing`, `synced` (with a `changed` flag) and `failed` (with an `offline` flag).
+
+## Planned crates (Milestone 4+)
 
 | Crate | Responsibility |
 |---|---|
-| `calendar-provider-api` | `CalendarProvider` trait, capabilities, errors |
-| `calendar-sync` | Durable operation queue, retries/backoff, conflict detection |
-| `calendar-caldav`, `-google`, `-microsoft` | Provider adapters |
+| `calendar-google`, `calendar-microsoft` | Provider adapters mapping their JSON APIs to calendar objects |

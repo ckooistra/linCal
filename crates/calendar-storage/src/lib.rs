@@ -6,6 +6,12 @@
 //! above them) are never stalled. Related writes share one transaction.
 
 mod codec;
+mod remote;
+
+pub use remote::{
+    AccountStatus, ApplyReport, IncomingObject, OpFailure, OpKind, PendingOp, PushObject,
+    RemoteAccount, RemoteCalendarSpec, RemoteCalendarState,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -412,6 +418,35 @@ impl Store {
         Ok(())
     }
 
+    /// Events of synchronized calendars cannot change calendar yet (that
+    /// needs a server-side move or delete + create).
+    async fn check_move(tx: &mut Transaction<'_, Sqlite>, from: &str, to: &str) -> Result<()> {
+        if from != to
+            && (Self::calendar_remote(tx, from).await?.is_some()
+                || Self::calendar_remote(tx, to).await?.is_some())
+        {
+            return Err(StorageError::Unsupported(
+                "moving events to or from a synchronized calendar is not supported yet",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Marks the object of `event_id` as changed locally, if it is remote.
+    async fn touch_event(
+        tx: &mut Transaction<'_, Sqlite>,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<bool> {
+        match Self::event_href(tx, event_id).await? {
+            Some(href) => {
+                Self::touch_object(tx, calendar_id, &href).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     fn validated(draft: &EventDraft) -> Result<Option<Recurrence>> {
         draft.validate()?;
         Ok(match &draft.rrule {
@@ -448,9 +483,14 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
+        let mut event = event;
         let mut tx = self.pool.begin().await?;
         Self::writable_calendar(&mut tx, &event.calendar_id).await?;
         Self::insert(&mut tx, &event).await?;
+        if let Some(url) = Self::calendar_remote(&mut tx, &event.calendar_id).await? {
+            Self::attach_new_object(&mut tx, &event.calendar_id, &url, &event.id).await?;
+            event.sync_status = SyncStatus::PendingSync;
+        }
         tx.commit().await?;
         Ok(event)
     }
@@ -467,6 +507,7 @@ impl Store {
                 "a single occurrence cannot move to another calendar",
             ));
         }
+        Self::check_move(&mut tx, &current.calendar_id, &draft.calendar_id).await?;
         let recurrence = if current.series.is_some() {
             draft.validate()?;
             None
@@ -502,7 +543,11 @@ impl Store {
             updated_at: now(),
             ..current
         };
+        let mut updated = updated;
         Self::update_row(&mut tx, &updated).await?;
+        if Self::touch_event(&mut tx, &updated.calendar_id, id).await? {
+            updated.sync_status = SyncStatus::PendingSync;
+        }
         tx.commit().await?;
         Ok(updated)
     }
@@ -526,6 +571,7 @@ impl Store {
         };
         Self::writable_calendar(&mut tx, &master.calendar_id).await?;
         Self::writable_calendar(&mut tx, &draft.calendar_id).await?;
+        Self::check_move(&mut tx, &master.calendar_id, &draft.calendar_id).await?;
         draft.validate()?;
         // If the edited occurrence was moved on its own, measure the change
         // from where it is displayed, not from its original slot.
@@ -618,6 +664,10 @@ impl Store {
             }
             Self::shift_overrides(&mut tx, &series_id, delta).await?;
         }
+        let mut updated = updated;
+        if Self::touch_event(&mut tx, &updated.calendar_id, &series_id).await? {
+            updated.sync_status = SyncStatus::PendingSync;
+        }
         tx.commit().await?;
         Ok(updated)
     }
@@ -690,6 +740,17 @@ impl Store {
             Self::update_row(&mut tx, &event).await?;
         } else {
             Self::insert(&mut tx, &event).await?;
+            if let Some(href) = Self::event_href(&mut tx, series_id).await? {
+                sqlx::query("UPDATE events SET remote_href = ? WHERE id = ?")
+                    .bind(&href)
+                    .bind(&event.id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        let mut event = event;
+        if Self::touch_event(&mut tx, &event.calendar_id, series_id).await? {
+            event.sync_status = SyncStatus::PendingSync;
         }
         tx.commit().await?;
         let mut occ = event.as_occurrence();
@@ -703,7 +764,11 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let event = Self::load(&mut tx, id).await?;
         Self::writable_calendar(&mut tx, &event.calendar_id).await?;
+        let href = Self::event_href(&mut tx, id).await?;
         Self::delete_row(&mut tx, id).await?;
+        if let Some(href) = href {
+            Self::object_changed_or_removed(&mut tx, &event.calendar_id, &href).await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -738,13 +803,14 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         Self::delete_row(&mut tx, occurrence).await?;
+        Self::touch_event(&mut tx, &master.calendar_id, series_id).await?;
         tx.commit().await?;
         master.revision += 1;
         Ok(())
     }
 
-    /// Replaces all accounts, calendars and events in one transaction
-    /// (used to load simulated datasets).
+    /// Replaces all *simulated* accounts, calendars and events in one
+    /// transaction (used to load simulated datasets). Real accounts are kept.
     pub async fn replace_all(
         &self,
         accounts: &[Account],
@@ -752,11 +818,8 @@ impl Store {
         events: &[CalendarEvent],
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM events").execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM calendars")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM accounts")
+        // Calendars and events go with their account (ON DELETE CASCADE).
+        sqlx::query("DELETE FROM accounts WHERE provider = 'simulated'")
             .execute(&mut *tx)
             .await?;
         let now = now_ms();

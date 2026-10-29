@@ -9,10 +9,31 @@ mod commands;
 
 use std::path::PathBuf;
 
-use calendar_storage::Store;
-use tauri::Manager;
+use std::sync::Arc;
+use std::time::Duration;
 
-use commands::AppState;
+use calendar_storage::Store;
+use calendar_sync::{
+    CredentialStore, KeyringCredentials, MemoryCredentials, SyncEngine, caldav_factory,
+};
+use tauri::{Emitter, Manager};
+
+use commands::{AppState, Sync};
+
+/// How often remote accounts are checked when nothing else triggers a sync.
+const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Credential storage. `UC_CREDENTIALS=memory` keeps passwords in memory
+/// only (lost on exit) and exists solely for testing on machines without
+/// a Secret Service daemon.
+fn credentials() -> Arc<dyn CredentialStore> {
+    if std::env::var("UC_CREDENTIALS").is_ok_and(|v| v == "memory") {
+        eprintln!("[credentials] UC_CREDENTIALS=memory: passwords are not saved (testing only)");
+        Arc::new(MemoryCredentials::default())
+    } else {
+        Arc::new(KeyringCredentials::new("org.universalcalendar.desktop"))
+    }
+}
 
 /// Where the database lives. Benchmark runs use a throw-away directory so
 /// they never touch the user's calendar; `UC_DATA_DIR` overrides for testing.
@@ -41,10 +62,30 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let store = open_store(app);
-            if let Err(reason) = &store {
-                eprintln!("[storage] could not open database: {reason}");
-            }
-            app.manage(AppState(store));
+            let sync = match &store {
+                Ok(store) => {
+                    let handle = app.handle().clone();
+                    let engine = Arc::new(SyncEngine::new(
+                        store.clone(),
+                        credentials(),
+                        caldav_factory(),
+                        Arc::new(move |event| {
+                            let _ = handle.emit("sync-event", event);
+                        }),
+                    ));
+                    let (scheduler, run) =
+                        calendar_sync::scheduler(Arc::clone(&engine), SYNC_INTERVAL);
+                    if !bench::enabled() {
+                        tauri::async_runtime::spawn(run);
+                    }
+                    Some(Sync { engine, scheduler })
+                }
+                Err(reason) => {
+                    eprintln!("[storage] could not open database: {reason}");
+                    None
+                }
+            };
+            app.manage(AppState { store, sync });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -58,6 +99,11 @@ pub fn run() {
             commands::get_settings,
             commands::set_setting,
             commands::load_simulated_dataset,
+            commands::add_caldav_account,
+            commands::remove_account,
+            commands::sync_now,
+            commands::account_statuses,
+            commands::resolve_conflict,
             bench::bench_config,
             bench::bench_memory,
             bench::bench_report

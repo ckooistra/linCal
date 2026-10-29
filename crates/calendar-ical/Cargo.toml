@@ -1,0 +1,14 @@
+[package]
+name = "calendar-ical"
+version = "0.1.0"
+description = "Lossless iCalendar (RFC 5545) parsing/serialization and mapping to calendar-core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+calendar-core = { path = "../calendar-core" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
+thiserror = "2"

@@ -5,6 +5,7 @@
  */
 
 import { SourceError } from "./eventSource";
+import type { AccountStatus, SyncEvent } from "../types/calendar";
 
 export interface BenchConfig {
   enabled: boolean;
@@ -76,6 +77,33 @@ export async function setCalendarColor(calendarId: string, color: string): Promi
 /** Replace all data with a simulated dataset (desktop app only). */
 export async function loadSimulatedDataset(size: number, timeZone: string, anchor?: string): Promise<void> {
   await invoke("load_simulated_dataset", { size, timeZone, anchor: anchor ?? null });
+}
+
+/** Connects a CalDAV account; resolves to its id. The password goes to the system keyring. */
+export async function addCaldavAccount(serverUrl: string, username: string, password: string): Promise<string> {
+  return invoke<string>("add_caldav_account", { serverUrl, username, password });
+}
+
+export async function removeAccount(accountId: string): Promise<void> {
+  await invoke("remove_account", { accountId });
+}
+
+export async function syncNow(): Promise<void> {
+  await invoke("sync_now");
+}
+
+export async function accountStatuses(): Promise<AccountStatus[]> {
+  return invoke<AccountStatus[]>("account_statuses");
+}
+
+export async function resolveConflict(eventId: string, keepLocal: boolean): Promise<void> {
+  await invoke("resolve_conflict", { eventId, keepLocal });
+}
+
+/** Subscribes to sync progress events. Returns an unsubscribe function. */
+export async function onSyncEvent(listener: (event: SyncEvent) => void): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<SyncEvent>("sync-event", (e) => listener(e.payload));
 }
 
 export async function getBenchConfig(): Promise<BenchConfig> {

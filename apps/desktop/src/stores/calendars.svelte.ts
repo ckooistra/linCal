@@ -1,4 +1,4 @@
-import type { Account, Calendar, CalendarId } from "../types/calendar";
+import type { Account, AccountId, AccountStatus, Calendar, CalendarId } from "../types/calendar";
 
 /** Accounts, calendars and per-calendar display settings (visibility, colour). */
 export class CalendarsStore {
@@ -10,6 +10,23 @@ export class CalendarsStore {
   #byId = $derived(new Map(this.calendars.map((c) => [c.id, c])));
 
   writable = $derived(this.calendars.filter((c) => !c.readOnly));
+
+  /** Sync status per account (remote accounts only matter). */
+  statuses = $state.raw<Record<AccountId, AccountStatus>>({});
+  /** Accounts with a sync pass in progress. */
+  syncing = $state.raw<ReadonlySet<AccountId>>(new Set());
+
+  setStatuses(list: AccountStatus[]): void {
+    this.statuses = Object.fromEntries(list.map((s) => [s.accountId, s]));
+  }
+
+  setSyncing(accountId: AccountId, on: boolean): void {
+    if (on === this.syncing.has(accountId)) return;
+    const next = new Set(this.syncing);
+    if (on) next.add(accountId);
+    else next.delete(accountId);
+    this.syncing = next;
+  }
 
   load(accounts: Account[], calendars: Calendar[]): void {
     this.accounts = accounts;

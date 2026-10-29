@@ -4,20 +4,67 @@
 use calendar_core::sim::{self, DatasetOptions};
 use calendar_core::wire::{WireDraft, WireEvent, WireRange};
 use calendar_core::{Account, Calendar, CoreError, parse_time_zone};
-use calendar_storage::{StorageError, Store};
+use std::sync::Arc;
+
+use calendar_storage::{AccountStatus, StorageError, Store};
+use calendar_sync::{SchedulerHandle, SyncEngine, SyncError, user_message};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-/// Database handle, or the reason it could not be opened (shown in the UI).
-pub struct AppState(pub Result<Store, String>);
+pub struct Sync {
+    pub engine: Arc<SyncEngine>,
+    pub scheduler: SchedulerHandle,
+}
+
+/// Database handle (or why it could not be opened) and the sync engine.
+pub struct AppState {
+    pub store: Result<Store, String>,
+    pub sync: Option<Sync>,
+}
 
 impl AppState {
     fn store(&self) -> Result<&Store, CommandError> {
-        self.0.as_ref().map_err(|reason| CommandError {
+        self.store.as_ref().map_err(|reason| CommandError {
             code: "storage-unavailable",
             message: format!("The calendar database could not be opened: {reason}"),
         })
+    }
+
+    fn sync(&self) -> Result<&Sync, CommandError> {
+        self.sync.as_ref().ok_or_else(|| CommandError {
+            code: "storage-unavailable",
+            message: "Synchronization is unavailable because the database could not be opened."
+                .into(),
+        })
+    }
+
+    /// Ask for an upload soon if a change touched a synchronized calendar.
+    fn changed(&self, status: calendar_core::SyncStatus) {
+        if status == calendar_core::SyncStatus::PendingSync
+            && let Some(sync) = &self.sync
+        {
+            sync.scheduler.trigger();
+        }
+    }
+}
+
+impl From<SyncError> for CommandError {
+    fn from(error: SyncError) -> Self {
+        let code = match &error {
+            SyncError::Provider(e) => match e {
+                calendar_provider_api::ProviderError::Unauthorized => "unauthorized",
+                calendar_provider_api::ProviderError::Network(_) => "offline",
+                _ => "provider",
+            },
+            SyncError::Storage(_) => "storage",
+            SyncError::Credentials(_) => "credentials",
+            SyncError::Config(_) => "invalid",
+        };
+        Self {
+            code,
+            message: user_message(&error),
+        }
     }
 }
 
@@ -142,6 +189,7 @@ pub async fn update_event(
         Scope::Occurrence => store.update_occurrence(&id, draft, tz).await?,
         Scope::Series => store.update_series(&id, draft).await?.as_occurrence(),
     };
+    state.changed(occurrence.sync_status);
     Ok(WireEvent::from_occurrence(&occurrence, &tz))
 }
 
@@ -152,10 +200,14 @@ pub async fn delete_event(
     scope: Scope,
 ) -> CommandResult<()> {
     let store = state.store()?;
+    let remote = store.object_of(&id).await?.is_some();
     match scope {
         Scope::Event => store.delete_event(&id).await?,
         Scope::Occurrence => store.delete_occurrence(&id).await?,
         Scope::Series => store.delete_series(&id).await?,
+    }
+    if remote {
+        state.changed(calendar_core::SyncStatus::PendingSync);
     }
     Ok(())
 }
@@ -222,4 +274,68 @@ pub async fn load_simulated_dataset(
         .store()?
         .replace_all(&data.accounts, &data.calendars, &data.events)
         .await?)
+}
+
+/// Connects a CalDAV account (discovery + calendar list) and starts syncing.
+/// The password goes to the system keyring, never to the database.
+#[tauri::command]
+pub async fn add_caldav_account(
+    state: State<'_, AppState>,
+    server_url: String,
+    username: String,
+    password: String,
+) -> CommandResult<String> {
+    let sync = state.sync()?;
+    if username.trim().is_empty() || password.is_empty() {
+        return Err(CommandError {
+            code: "invalid",
+            message: "Enter a user name and password.".into(),
+        });
+    }
+    let id = sync
+        .engine
+        .add_caldav_account(&server_url, username.trim(), &password)
+        .await?;
+    sync.scheduler.trigger();
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn remove_account(state: State<'_, AppState>, account_id: String) -> CommandResult<()> {
+    Ok(state.sync()?.engine.remove_account(&account_id).await?)
+}
+
+/// Syncs all accounts now, retrying waiting uploads without backoff.
+#[tauri::command]
+pub async fn sync_now(state: State<'_, AppState>) -> CommandResult<()> {
+    state.store()?.retry_now().await?;
+    state.sync()?.scheduler.trigger();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn account_statuses(state: State<'_, AppState>) -> CommandResult<Vec<AccountStatus>> {
+    Ok(state.store()?.account_statuses().await?)
+}
+
+/// Resolves a sync conflict or failure for the object an event belongs to.
+#[tauri::command]
+pub async fn resolve_conflict(
+    state: State<'_, AppState>,
+    event_id: String,
+    keep_local: bool,
+) -> CommandResult<()> {
+    let store = state.store()?;
+    let (calendar_id, href) = store
+        .object_of(&event_id)
+        .await?
+        .ok_or_else(|| CommandError {
+            code: "not-found",
+            message: "This event is not synchronized.".into(),
+        })?;
+    store
+        .resolve_operation(&calendar_id, &href, keep_local)
+        .await?;
+    state.sync()?.scheduler.trigger();
+    Ok(())
 }

@@ -1,0 +1,32 @@
+[package]
+name = "calendar-sync"
+version = "0.1.0"
+description = "Background synchronization: offline queue, retries, conflicts, credentials"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+# OS credential store (Secret Service on Linux: KWallet / GNOME Keyring).
+keyring = ["dep:keyring"]
+
+[dependencies]
+calendar-caldav = { path = "../calendar-caldav" }
+calendar-core = { path = "../calendar-core" }
+calendar-ical = { path = "../calendar-ical" }
+calendar-provider-api = { path = "../calendar-provider-api" }
+calendar-storage = { path = "../calendar-storage" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+keyring = { version = "4", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+url = "2"
+
+[dev-dependencies]
+async-trait = "0.1"
+chrono-tz = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
