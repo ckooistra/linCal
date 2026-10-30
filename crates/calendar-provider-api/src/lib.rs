@@ -1,15 +1,20 @@
-//! Contract between the sync engine and calendar providers (CalDAV now;
-//! Google and Microsoft later).
+//! Contract between the sync engine and calendar providers (CalDAV, Google
+//! Calendar, Microsoft Graph).
 //!
-//! Providers exchange *calendar object resources*: one iCalendar object per
+//! Providers exchange *objects*: one recurring series or single event per
 //! remote item, identified by an `href` and versioned by an opaque `etag`.
-//! CalDAV and ICS are natively shaped like this; JSON providers map their
-//! events to iCalendar objects in their adapter so the engine stays uniform.
-//! Writes are conditional on the version the client last saw.
+//! The raw `data` is the provider's own format (iCalendar for CalDAV, JSON
+//! for Google and Graph); each provider's [`ObjectCodec`] converts it to and
+//! from the provider-neutral model, so the engine never parses provider
+//! formats. Writes are conditional on the version the client last saw.
+//! See `docs/decisions/0005-google-and-microsoft.md`.
 
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use calendar_core::{ObjectContent, OccurrenceKey};
 use thiserror::Error;
 
 /// Errors a provider can return, classified so the sync engine can decide
@@ -73,12 +78,39 @@ pub struct RemoteCalendar {
     pub capabilities: Capabilities,
 }
 
-/// One calendar object resource.
+/// One remote object (a single event or a whole recurring series).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteObject {
     pub href: String,
     pub etag: Option<String>,
-    pub ical: String,
+    /// Raw provider data, read with the provider's [`ObjectCodec`].
+    pub data: String,
+}
+
+/// An object read into the provider-neutral model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadObject {
+    pub content: ObjectContent,
+    /// What the model only approximates (shown to the user as such).
+    pub warnings: Vec<String>,
+}
+
+/// Converts a provider's raw object data to and from the neutral model.
+/// Pure and synchronous: the engine runs it on a blocking thread.
+pub trait ObjectCodec: Send + Sync {
+    fn read(&self, data: &str) -> Result<ReadObject, String>;
+
+    /// The upload payload for `content`. `base` is the last server copy
+    /// (`None` for a new object); properties this application does not
+    /// model must survive. `renamed` maps overrides' current recurrence ids
+    /// to the ones they have in `base` (the series was moved).
+    fn write(
+        &self,
+        base: Option<&str>,
+        uid: &str,
+        content: &ObjectContent,
+        renamed: &[(OccurrenceKey, OccurrenceKey)],
+    ) -> String;
 }
 
 /// Result of asking a calendar for changes since a cursor.
@@ -95,9 +127,13 @@ pub struct ChangeSet {
 /// Result of a successful write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteResult {
+    /// Where the object now lives; differs from the request for providers
+    /// that assign ids on create.
     pub href: String,
     /// New version, if the server returned one.
     pub etag: Option<String>,
+    /// The server's copy after the write, if the provider has it.
+    pub data: Option<String>,
 }
 
 /// How a write should be conditioned.
@@ -113,6 +149,15 @@ pub enum Precondition {
 
 #[async_trait]
 pub trait CalendarProvider: Send + Sync {
+    /// Reads and writes this provider's object data.
+    fn codec(&self) -> Arc<dyn ObjectCodec>;
+
+    /// A changed account secret (e.g. rotated OAuth tokens) to store in
+    /// place of the one the provider was created with. Taken once.
+    fn take_updated_secret(&self) -> Option<String> {
+        None
+    }
+
     /// Lists the calendars of the account.
     async fn list_calendars(&self) -> ProviderResult<Vec<RemoteCalendar>>;
 
@@ -126,11 +171,11 @@ pub trait CalendarProvider: Send + Sync {
         known: &[(String, Option<String>)],
     ) -> ProviderResult<ChangeSet>;
 
-    /// Creates or replaces an object.
+    /// Creates or replaces an object with a payload from [`ObjectCodec::write`].
     async fn put_object(
         &self,
         href: &str,
-        ical: &str,
+        payload: &str,
         precondition: &Precondition,
     ) -> ProviderResult<WriteResult>;
 

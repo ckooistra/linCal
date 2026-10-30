@@ -16,12 +16,15 @@ pub mod credentials;
 pub mod engine;
 pub mod scheduler;
 
+pub use calendar_oauth::OAuthError;
 pub use calendar_storage::Resolution;
 #[cfg(feature = "keyring")]
 pub use credentials::KeyringCredentials;
 pub use credentials::{CredentialStore, MemoryCredentials};
 pub use engine::{
-    CalDavConfig, SyncEngine, SyncError, SyncEvent, SyncProblem, SyncReport, backoff,
-    caldav_factory, user_message,
+    BrowserOpener, CalDavConfig, OAuthConfig, SyncEngine, SyncError, SyncEvent, SyncProblem,
+    SyncReport, backoff, codec_for, default_factory, user_message,
 };
 pub use scheduler::{SchedulerHandle, scheduler};
+/// Signal used to cancel a long operation (account setup).
+pub use tokio::sync::Notify as CancelSignal;

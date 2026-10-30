@@ -71,7 +71,7 @@ async fn round_trip_against_a_real_server() {
         .iter()
         .find(|o| o.href == href)
         .expect("created object is reported");
-    assert!(fetched.ical.contains("UC integration test"));
+    assert!(fetched.data.contains("UC integration test"));
     let etag = fetched.etag.clone().or(created.etag).expect("etag");
 
     let updated = ics.replace("UC integration test", "UC integration test (edited)");

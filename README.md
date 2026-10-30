@@ -2,10 +2,10 @@
 
 A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma first), designed to unify CalDAV, Google Calendar, Microsoft 365 and ICS subscriptions behind one responsive interface. The app needs no hosted backend, telemetry or developer-run account.
 
-> **Status: Milestone 3 (CalDAV).** CalDAV accounts (Nextcloud, Fastmail,
-> Radicale, Baïkal, …) sync both ways with an offline queue; everything is
-> stored locally in SQLite. Google and Microsoft arrive in Milestone 4.
-> Simulated demo calendars remain available. See [Roadmap](#roadmap).
+> **Status: Milestone 4 (Google and Microsoft) in progress.**
+> - **CalDAV** (Nextcloud, Fastmail, Radicale, Baïkal, …): syncs both ways with an offline queue, validated against Nextcloud.
+> - **Google Calendar and Microsoft 365 / Outlook.com:** accounts sign in with OAuth and sync through the same engine. They are tested against faithful API fakes; live use needs an OAuth client registration ([how](docs/provider-integration.md#registering-oauth-clients)).
+> - Everything is stored locally in SQLite. Simulated demo calendars remain available. See [Roadmap](#roadmap).
 
 ![Month view](docs/screenshots/light-month.png)
 
@@ -31,6 +31,15 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - **Unknown data is preserved.** Properties this app doesn't edit (alarms, attendees, vendor `X-` fields, VTIMEZONEs) are written back as the server sent them, also when a whole series is moved. This is tested for the cases in `crates/calendar-ical/tests/events.rs`; it is not a guarantee for every possible object.
 - **Untrusted server data** can't stop synchronization. An object that can't be read keeps its last good version, and the sidebar counts it as *could not be read*. Objects shown only approximately (unknown time zone, "this and following" changes, RDATE periods) are counted too.
 - **Credentials** are stored in the system keyring via the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in the database or logs. They are only sent over HTTPS (plain HTTP is allowed for `localhost` test servers only), and never to a host outside the server's domain found during discovery.
+
+### Google and Microsoft accounts
+
+- **Add Google account…** / **Add Microsoft account…** in the sidebar. You sign in in your web browser (OAuth with PKCE and a loopback redirect), so the app never sees your password. Tokens go to the system keyring and are refreshed automatically. If a sign-in expires or is revoked, **Sign in again…** appears and nothing queued is lost.
+- **Both use the same engine as CalDAV:** offline queue, version-checked uploads, conflicts, and the **Review…** list. Several accounts per provider are supported, and each account syncs and fails independently.
+- **Only what you change is sent.** Attendees, reminders, conferencing links and other details this app doesn't edit stay untouched.
+- **Google:** full recurring-series support, with incremental sync via sync tokens.
+- **Microsoft:** sync via calendar-view delta over a moving window (12 months back, 24 ahead). Recurring events are shown and edited one occurrence at a time. Editing a whole series, or creating a repeating event in a Microsoft calendar, isn't supported yet and is refused with a message.
+- **Client IDs:** each user or distributor registers their own OAuth client; no secret is built into the app. See [Registering OAuth clients](docs/provider-integration.md#registering-oauth-clients).
 
 ### Calendar
 
@@ -174,8 +183,8 @@ See [docs/architecture.md](docs/architecture.md).
 
 1. Desktop foundation and performance prototype ✔
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
-3. **CalDAV (Nextcloud reference) with offline queue** ← current
-4. Google Calendar and Microsoft Graph
+3. CalDAV (Nextcloud reference) with offline queue ✔
+4. **Google Calendar and Microsoft Graph** ← current (implemented; awaiting live checks with real accounts)
 5. Production quality: recurrence editing, notifications, agenda view, ICS subscriptions, packaging
 
 ## License

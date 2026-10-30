@@ -122,7 +122,7 @@ async fn initial_and_incremental_sync() {
     let changes = p.fetch_changes(&cal, None, &known).await.unwrap();
     assert_eq!(changes.upserted.len(), 1);
     assert!(changes.upserted[0].href.ends_with("/e2.ics"));
-    assert!(changes.upserted[0].ical.contains("SUMMARY:Review"));
+    assert!(changes.upserted[0].data.contains("SUMMARY:Review"));
     assert_eq!(changes.deleted.len(), 1, "unlisted known object is deleted");
     assert!(changes.deleted[0].ends_with("/stale.ics"));
     assert_eq!(changes.cursor.as_deref(), Some("http://sabre.io/ns/sync/7"));

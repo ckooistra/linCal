@@ -9,8 +9,11 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
+calendar-core = { path = "../calendar-core" }
+calendar-ical = { path = "../calendar-ical" }
 calendar-provider-api = { path = "../calendar-provider-api" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "charset", "http2"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 roxmltree = "0.21"
 url = "2"
 

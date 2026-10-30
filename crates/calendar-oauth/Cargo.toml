@@ -1,0 +1,23 @@
+[package]
+name = "calendar-oauth"
+version = "0.1.0"
+description = "OAuth 2.0 for installed apps: PKCE, loopback redirect, token refresh"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.21"
+getrandom = "0.2"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+wiremock = "0.6"

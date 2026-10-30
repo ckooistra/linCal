@@ -4,7 +4,12 @@
 Build a fast, local-first, free and open-source desktop calendar for Linux (primarily KDE Plasma) that unifies multiple calendar services. The UI must remain responsive during network access, synchronization, and database activity. Preserve a path to Windows and macOS support.
 
 ## Current priority
-**Implement Milestone 1 only:** a working Tauri 2 + Svelte 5 + TypeScript + Vite desktop prototype using the **free, MIT-licensed** SVAR Svelte Calendar component, provided its license and current capabilities are verified. Use simulated data and measure UI responsiveness. Do not start real provider integrations until this milestone is validated.
+**Implement Milestone 4: Google Calendar and Microsoft Graph** (see `PROJECT_SPEC.md` §14), alongside the existing CalDAV support. Settle the provider-contract questions in `docs/provider-integration.md` first. Use official native-app OAuth flows (PKCE, loopback redirect), and do not embed confidential client secrets.
+
+Status:
+- Milestones 1–3 are complete. Milestone 3 (CalDAV) has been validated against the user's Nextcloud.
+- Milestone 3 audit findings have been addressed, except performance on target KDE hardware (F19), which still needs measuring there.
+- Do not start Milestone 5 until Milestone 4 is accepted.
 
 ## Required stack
 - **Desktop:** Tauri 2

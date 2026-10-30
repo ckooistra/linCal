@@ -10,6 +10,7 @@
   } from "./components/calendar/types";
   import { parseDayHours } from "./components/calendar/types";
   import AddAccountDialog from "./components/AddAccountDialog.svelte";
+  import OAuthAccountDialog from "./components/OAuthAccountDialog.svelte";
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
   import EventEditor from "./components/EventEditor.svelte";
   import PerfPanel from "./components/PerfPanel.svelte";
@@ -91,7 +92,9 @@
   }
 
   // --- accounts and sync ---------------------------------------------------
-  let addingAccount = $state(false);
+  /** Which "add account" dialog is open. */
+  let addingAccount = $state<false | "caldav" | "google" | "microsoft">(false);
+  let builtInClientId = $state<string | null>(null);
   let removing = $state<{ id: string; name: string } | null>(null);
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -117,7 +120,39 @@
       notifications.push("Account added. Syncing…", "info");
       return null;
     } catch (error) {
+      if (!addingAccount) return null; // cancelled: the dialog is gone
       return error instanceof Error ? error.message : "The account could not be added.";
+    }
+  }
+
+  async function openAddAccount(kind: "caldav" | "google" | "microsoft"): Promise<void> {
+    builtInClientId = kind === "caldav" ? null : await backend.oauthClientId(kind).catch(() => null);
+    addingAccount = kind;
+  }
+
+  async function addOAuth(clientId: string, clientSecret: string | null): Promise<string | null> {
+    const microsoft = addingAccount === "microsoft";
+    try {
+      if (microsoft) await backend.addMicrosoftAccount(clientId);
+      else await backend.addGoogleAccount(clientId, clientSecret);
+      addingAccount = false;
+      await reloadCalendars();
+      refreshStatuses();
+      notifications.push(`${microsoft ? "Microsoft" : "Google"} account added. Syncing…`, "info");
+      return null;
+    } catch (error) {
+      if (!addingAccount) return null; // cancelled: the dialog is gone
+      return error instanceof Error ? error.message : "The account could not be added.";
+    }
+  }
+
+  async function signInAgain(accountId: string): Promise<void> {
+    notifications.push("Finish signing in in your web browser…", "info");
+    try {
+      await backend.signInAgain(accountId);
+      refreshStatuses();
+    } catch (error) {
+      notifications.push(error instanceof Error ? error.message : "Signing in failed.");
     }
   }
 
@@ -298,6 +333,30 @@
   }
   let editor = $state.raw<EditorState | null>(null);
   let editorKey = 0;
+  /** A newer stored version of the event being edited (e.g. from sync). */
+  let editorNewer = $state.raw<CalendarEvent | null>(null);
+
+  /** After the cache changed: does the open editor show an outdated event? */
+  function checkEditorEvent(): void {
+    const shown = editor?.event;
+    if (!shown) return;
+    const current = store.get(shown.id);
+    if (!current || current === shown || current.syncStatus === "pending-local") return;
+    const changed =
+      current.title !== shown.title ||
+      current.description !== shown.description ||
+      current.location !== shown.location ||
+      current.rrule !== shown.rrule ||
+      current.syncStatus !== shown.syncStatus ||
+      JSON.stringify(current.timing) !== JSON.stringify(shown.timing);
+    editorNewer = changed ? current : null;
+  }
+
+  function showNewerVersion(): void {
+    if (!editor || !editorNewer) return;
+    editor = { key: ++editorKey, event: editorNewer, timing: editorNewer.timing };
+    editorNewer = null;
+  }
 
   function defaultTiming(): EventTiming {
     // Next full hour today, or 09:00 on the first visible day if today is off-screen.
@@ -316,6 +375,7 @@
   }
 
   function openEditor(request: EditorRequest) {
+    editorNewer = null;
     if (request.mode === "edit") {
       const event = store.get(request.id);
       if (!event) return;
@@ -424,6 +484,7 @@
       }),
     );
     cleanups.push(store.subscribe(() => refreshStatusesSoon()));
+    cleanups.push(store.subscribe(() => checkEditorEvent()));
     let unlisten: (() => void) | null = null;
     let disposed = false;
     void backend.onSyncEvent(onSync).then((stop) => {
@@ -556,7 +617,8 @@
     systemTitleBar={backend.kind === "desktop" ? systemTitleBar : undefined}
     onsystemtitlebar={setSystemTitleBar}
     simulationControls={backend.mock !== null}
-    onaddaccount={backend.kind === "desktop" ? () => (addingAccount = true) : undefined}
+    onaddaccount={backend.kind === "desktop" ? (kind) => void openAddAccount(kind) : undefined}
+    onsignin={(id) => void signInAgain(id)}
     onremoveaccount={(id) => (removing = { id, name: calendars.accounts.find((a) => a.id === id)?.name ?? id })}
     onsyncnow={() => void backend.syncNow()}
     onreviewproblems={() => {
@@ -625,12 +687,26 @@
       ondelete={deleteFromEditor}
       onclose={closeEditor}
       onresolve={backend.kind === "desktop" ? (resolution) => void resolveFromEditor(resolution) : undefined}
+      newer={editorNewer !== null}
+      onshownewer={showNewerVersion}
     />
   {/key}
 {/if}
 
-{#if addingAccount}
-  <AddAccountDialog onsubmit={addAccount} onclose={() => (addingAccount = false)} />
+{#if addingAccount === "google" || addingAccount === "microsoft"}
+  <OAuthAccountDialog
+    provider={addingAccount}
+    {builtInClientId}
+    onsubmit={addOAuth}
+    onclose={() => (addingAccount = false)}
+    oncancel={() => void backend.cancelAddAccount()}
+  />
+{:else if addingAccount === "caldav"}
+  <AddAccountDialog
+    onsubmit={addAccount}
+    onclose={() => (addingAccount = false)}
+    oncancel={() => void backend.cancelAddAccount()}
+  />
 {/if}
 
 {#if reviewing}

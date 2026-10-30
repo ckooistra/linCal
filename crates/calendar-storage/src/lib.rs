@@ -121,10 +121,12 @@ impl Store {
             .connect_with(options)
             .await?;
         MIGRATOR.run(&pool).await?;
-        Ok(Self {
+        let store = Self {
             pool,
             expansions: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_EXPANSIONS)),
-        })
+        };
+        store.run_fixups().await?;
+        Ok(store)
     }
 
     pub async fn close(&self) {
@@ -462,6 +464,26 @@ impl Store {
         Ok(())
     }
 
+    /// Microsoft calendars are mirrored occurrence by occurrence (ADR 0005):
+    /// repeating events cannot be created there, nor series edited.
+    async fn check_series_supported(
+        tx: &mut Transaction<'_, Sqlite>,
+        calendar_id: &str,
+    ) -> Result<()> {
+        let provider: Option<String> = sqlx::query_scalar(
+            "SELECT a.provider FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?",
+        )
+        .bind(calendar_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if provider.as_deref() == Some("microsoft") {
+            return Err(StorageError::Unsupported(
+                "repeating events in Microsoft calendars cannot be created or edited here yet; edit single occurrences instead",
+            ));
+        }
+        Ok(())
+    }
+
     /// Events of synchronized calendars cannot change calendar yet (that
     /// needs a server-side move or delete + create).
     async fn check_move(tx: &mut Transaction<'_, Sqlite>, from: &str, to: &str) -> Result<()> {
@@ -533,6 +555,9 @@ impl Store {
         let mut event = event;
         let mut tx = self.pool.begin().await?;
         Self::writable_calendar(&mut tx, &event.calendar_id).await?;
+        if event.recurrence.is_some() {
+            Self::check_series_supported(&mut tx, &event.calendar_id).await?;
+        }
         Self::insert(&mut tx, &event).await?;
         if let Some(url) = Self::calendar_remote(&mut tx, &event.calendar_id).await? {
             Self::attach_new_object(&mut tx, &event.calendar_id, &url, &event.id).await?;
@@ -582,6 +607,9 @@ impl Store {
         {
             Self::prune_overrides(&mut tx, id, &draft.timing, rec).await?;
         }
+        if recurrence.is_some() && current.recurrence != recurrence {
+            Self::check_series_supported(&mut tx, &draft.calendar_id).await?;
+        }
         let updated = CalendarEvent {
             calendar_id: draft.calendar_id,
             title: draft.title,
@@ -623,6 +651,7 @@ impl Store {
         Self::writable_calendar(&mut tx, &master.calendar_id).await?;
         Self::writable_calendar(&mut tx, &draft.calendar_id).await?;
         Self::check_move(&mut tx, &master.calendar_id, &draft.calendar_id).await?;
+        Self::check_series_supported(&mut tx, &master.calendar_id).await?;
         draft.validate()?;
         // If the edited occurrence was moved on its own, measure the change
         // from where it is displayed, not from its original slot.

@@ -171,6 +171,8 @@ pub struct AccountStatus {
     pub import_failures: i64,
     /// Imported objects shown only approximately (see `import_warnings`).
     pub approximated: i64,
+    /// An OAuth sign-in expired or was revoked.
+    pub needs_sign_in: bool,
 }
 
 fn segment(url: &str) -> &str {
@@ -364,6 +366,52 @@ impl Store {
         Ok(())
     }
 
+    /// Runs the one-time fix-ups queued by migrations (`pending_fixups`).
+    pub(crate) async fn run_fixups(&self) -> Result<()> {
+        let pending: Vec<String> = sqlx::query_scalar("SELECT name FROM pending_fixups")
+            .fetch_all(&self.pool)
+            .await?;
+        for name in pending {
+            let mut tx = self.pool.begin().await?;
+            if name == "lone-instances" {
+                // Before migration 4, lone instances were recognised by an
+                // id of the form `<object>@<recurrence id>`.
+                let rows = sqlx::query(
+                    "SELECT id, calendar_id, remote_href FROM events WHERE remote_href IS NOT NULL \
+                     AND series_id IS NULL AND rrule IS NULL AND instr(id, '@') > 0",
+                )
+                .fetch_all(&mut *tx)
+                .await?;
+                for row in rows {
+                    let id: String = row.get("id");
+                    let own_id = pulled_id(
+                        &row.get::<String, _>("calendar_id"),
+                        &row.get::<String, _>("remote_href"),
+                    );
+                    // An event whose file name contains '@' has exactly its
+                    // object's id; a lone instance has `<that id>@<key>`.
+                    let lone = id
+                        .rsplit_once('@')
+                        .filter(|(object, _)| id != own_id && object.starts_with(own_id.as_str()))
+                        .and_then(|(_, k)| k.parse::<OccurrenceKey>().ok());
+                    if let Some(key) = lone {
+                        sqlx::query("UPDATE events SET lone_recurrence_id = ? WHERE id = ?")
+                            .bind(key.to_string())
+                            .bind(&id)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+                }
+            }
+            sqlx::query("DELETE FROM pending_fixups WHERE name = ?")
+                .bind(&name)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+        Ok(())
+    }
+
     // --- accounts and calendars ---------------------------------------------
 
     /// Adds a remote account and its calendars. Calendars are ordered after
@@ -493,6 +541,16 @@ impl Store {
         Ok(changed)
     }
 
+    /// Replaces a remote account's non-secret settings.
+    pub async fn set_account_config(&self, account_id: &str, config: &Value) -> Result<()> {
+        sqlx::query("UPDATE accounts SET config = ? WHERE id = ?")
+            .bind(config.to_string())
+            .bind(account_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn remote_accounts(&self) -> Result<Vec<RemoteAccount>> {
         let rows = sqlx::query(
             "SELECT id, name, provider, config, sync_error, last_synced_at FROM accounts \
@@ -547,10 +605,12 @@ impl Store {
         account_id: &str,
         error: Option<&str>,
         synced_at: Option<i64>,
+        needs_sign_in: bool,
     ) -> Result<()> {
-        sqlx::query("UPDATE accounts SET sync_error = ?, last_synced_at = COALESCE(?, last_synced_at) WHERE id = ?")
+        sqlx::query("UPDATE accounts SET sync_error = ?, last_synced_at = COALESCE(?, last_synced_at), needs_sign_in = ? WHERE id = ?")
             .bind(error)
             .bind(synced_at)
+            .bind(needs_sign_in)
             .bind(account_id)
             .execute(&self.pool)
             .await?;
@@ -571,7 +631,7 @@ impl Store {
 
     pub async fn account_statuses(&self) -> Result<Vec<AccountStatus>> {
         let rows = sqlx::query(
-            "SELECT a.id, a.provider, a.sync_error, a.last_synced_at, \
+            "SELECT a.id, a.provider, a.sync_error, a.last_synced_at, a.needs_sign_in, \
                (SELECT COUNT(*) FROM pending_operations p JOIN calendars c ON c.id = p.calendar_id WHERE c.account_id = a.id AND p.state = 'pending') AS pending, \
                (SELECT COUNT(*) FROM pending_operations p JOIN calendars c ON c.id = p.calendar_id WHERE c.account_id = a.id AND p.state = 'failed') AS failed, \
                (SELECT COUNT(*) FROM pending_operations p JOIN calendars c ON c.id = p.calendar_id WHERE c.account_id = a.id AND p.state = 'conflict') AS conflicts, \
@@ -595,6 +655,7 @@ impl Store {
                     conflicts: r.get("conflicts"),
                     import_failures: r.get("import_failures"),
                     approximated: r.get("approximated"),
+                    needs_sign_in: r.get::<i64, _>("needs_sign_in") != 0,
                 }
             })
             .collect())
@@ -655,37 +716,41 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
+        // (row id, RECURRENCE-ID of a lone instance)
+        let mut ids: Vec<(String, Option<OccurrenceKey>)> = Vec::new();
         if let Some(m) = &content.master {
             Self::insert(tx, &row(master_id.to_owned(), m, None)).await?;
+            ids.push((master_id.to_owned(), None));
         }
         for o in &content.overrides {
             let key = o.recurrence_id.unwrap_or_else(|| o.timing.start_key());
-            let event = match &content.master {
-                Some(_) => row(
-                    occurrence_id(master_id, &key),
-                    o,
-                    Some(SeriesLink {
-                        series_id: master_id.to_owned(),
-                        recurrence_id: key,
-                    }),
+            let (event, lone) = match &content.master {
+                Some(_) => (
+                    row(
+                        occurrence_id(master_id, &key),
+                        o,
+                        Some(SeriesLink {
+                            series_id: master_id.to_owned(),
+                            recurrence_id: key,
+                        }),
+                    ),
+                    None,
                 ),
                 // Instances without their series (e.g. a single invitation
                 // occurrence) are shown as one-off events.
-                None => row(format!("{master_id}@{key}"), o, None),
+                None => (row(format!("{master_id}@{key}"), o, None), Some(key)),
             };
             Self::insert(tx, &event).await?;
+            ids.push((event.id, lone));
         }
-        // Prefix comparison rather than LIKE: ids may contain % and _.
-        let lone = format!("{master_id}@");
-        sqlx::query("UPDATE events SET remote_href = ? WHERE calendar_id = ? AND (id = ? OR series_id = ? OR substr(id, 1, length(?)) = ?)")
-            .bind(href)
-            .bind(calendar_id)
-            .bind(master_id)
-            .bind(master_id)
-            .bind(&lone)
-            .bind(&lone)
-            .execute(&mut **tx)
-            .await?;
+        for (id, lone) in ids {
+            sqlx::query("UPDATE events SET remote_href = ?, lone_recurrence_id = ? WHERE id = ?")
+                .bind(href)
+                .bind(lone.map(|k| k.to_string()))
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+        }
         Ok(())
     }
 
@@ -698,13 +763,13 @@ impl Store {
     ) -> Result<()> {
         let existing: Option<String> = sqlx::query_scalar(
             "SELECT id FROM events WHERE calendar_id = ? AND remote_href = ? AND series_id IS NULL \
-             ORDER BY (rrule IS NULL), id LIMIT 1",
+             AND lone_recurrence_id IS NULL ORDER BY (rrule IS NULL), id LIMIT 1",
         )
         .bind(calendar_id)
         .bind(&obj.href)
         .fetch_optional(&mut **tx)
         .await?;
-        let master_id = match existing.filter(|id| !id.contains('@')) {
+        let master_id = match existing {
             Some(id) => id,
             None => Self::new_pulled_id(tx, calendar_id, &obj.href).await?,
         };
@@ -932,10 +997,27 @@ impl Store {
         .bind(href)
         .fetch_all(&self.pool)
         .await?;
+        let mut lone = std::collections::HashMap::new();
+        for r in sqlx::query(
+            "SELECT id, lone_recurrence_id FROM events \
+             WHERE calendar_id = ? AND remote_href = ? AND lone_recurrence_id IS NOT NULL",
+        )
+        .bind(calendar_id)
+        .bind(href)
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let value: String = r.get("lone_recurrence_id");
+            let key: OccurrenceKey = value
+                .parse()
+                .map_err(|_| StorageError::Corrupt(format!("recurrence id: {value}")))?;
+            lone.insert(r.get::<String, _>("id"), key);
+        }
         let mut master = None;
         let mut overrides = Vec::new();
         for row in rows {
             let event = decode_event(row)?;
+            let lone_key = lone.get(&event.id).copied();
             let content = EventContent {
                 title: event.title,
                 description: event.description,
@@ -946,11 +1028,7 @@ impl Store {
             };
             if event.series.is_some() {
                 overrides.push(content);
-            } else if let Some((_, key)) = event
-                .id
-                .rsplit_once('@')
-                .and_then(|(s, k)| Some((s, k.parse::<OccurrenceKey>().ok()?)))
-            {
+            } else if let Some(key) = lone_key {
                 // A lone instance imported without its series.
                 overrides.push(EventContent {
                     recurrence_id: Some(key),
@@ -1017,6 +1095,25 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// Moves an object to the `href` the provider assigned on create.
+    pub async fn rename_object(&self, calendar_id: &str, from: &str, to: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for sql in [
+            "UPDATE remote_objects SET href = ? WHERE calendar_id = ? AND href = ?",
+            "UPDATE pending_operations SET href = ? WHERE calendar_id = ? AND href = ?",
+            "UPDATE events SET remote_href = ? WHERE calendar_id = ? AND remote_href = ?",
+        ] {
+            sqlx::query(sql)
+                .bind(to)
+                .bind(calendar_id)
+                .bind(from)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Records a successful upload of `ical`, whose server version is now

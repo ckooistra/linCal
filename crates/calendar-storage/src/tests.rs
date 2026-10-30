@@ -1662,4 +1662,41 @@ mod sync {
             .unwrap();
         assert_eq!(titles(&store, month(2026, 5)).await, vec!["Renamed"]);
     }
+
+    /// Lone instances are marked explicitly; an `@` in a file name means nothing.
+    #[tokio::test]
+    async fn lone_instances_do_not_depend_on_id_shape() {
+        let (store, cal) = remote_store().await;
+        let key = OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, 3, 9, 0)));
+        let mut lone = content("inv", "Invitation", None);
+        let mut instance = lone.master.take().unwrap();
+        instance.recurrence_id = Some(key);
+        lone.overrides.push(instance);
+        store
+            .apply_remote_changes(
+                &cal,
+                &[
+                    incoming("inv.ics", "\"1\"", lone),
+                    incoming("x@20260101.ics", "\"1\"", content("x", "Plain", None)),
+                ],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        let inv = store
+            .object_for_push(&cal, &format!("{CAL_URL}inv.ics"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(inv.content.master.is_none());
+        assert_eq!(inv.content.overrides[0].recurrence_id, Some(key));
+        let plain = store
+            .object_for_push(&cal, &format!("{CAL_URL}x@20260101.ics"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.content.master.unwrap().title, "Plain");
+        assert!(plain.content.overrides.is_empty());
+    }
 }

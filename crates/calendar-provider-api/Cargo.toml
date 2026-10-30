@@ -9,4 +9,5 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
+calendar-core = { path = "../calendar-core" }
 thiserror = "2"

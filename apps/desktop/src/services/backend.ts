@@ -7,6 +7,10 @@ import type { Account, AccountStatus, Calendar, Resolution, SyncEvent, SyncProbl
 import {
   accountStatuses,
   addCaldavAccount,
+  addGoogleAccount,
+  addMicrosoftAccount,
+  cancelAddAccount,
+  oauthClientId,
   isTauri,
   loadSettings,
   loadSimulatedDataset,
@@ -16,6 +20,7 @@ import {
   resolveSyncProblem,
   saveSetting,
   setCalendarColor,
+  signInAgain,
   syncNow,
   syncProblems,
   type Settings,
@@ -44,6 +49,11 @@ export interface Backend {
   saveSetting(key: string, value: unknown): Promise<void>;
   /** Remote accounts (desktop only; the preview rejects with a message). */
   addCaldavAccount(serverUrl: string, username: string, password: string): Promise<string>;
+  cancelAddAccount(): Promise<void>;
+  oauthClientId(provider: "google" | "microsoft"): Promise<string | null>;
+  addGoogleAccount(clientId: string, clientSecret: string | null): Promise<string>;
+  addMicrosoftAccount(clientId: string): Promise<string>;
+  signInAgain(accountId: string): Promise<void>;
   removeAccount(accountId: string): Promise<void>;
   syncNow(): Promise<void>;
   accountStatuses(): Promise<AccountStatus[]>;
@@ -96,6 +106,11 @@ async function desktopBackend(): Promise<Backend> {
     setCalendarColor,
     saveSetting,
     addCaldavAccount,
+    cancelAddAccount,
+    oauthClientId,
+    addGoogleAccount,
+    addMicrosoftAccount,
+    signInAgain,
     removeAccount,
     syncNow,
     accountStatuses,
@@ -129,6 +144,11 @@ function previewBackend(settings: Settings): Backend {
     setCalendarColor: async () => {},
     saveSetting,
     addCaldavAccount: desktopOnly,
+    cancelAddAccount: async () => {},
+    oauthClientId: async () => null,
+    addGoogleAccount: desktopOnly,
+    addMicrosoftAccount: desktopOnly,
+    signInAgain: desktopOnly,
     removeAccount: desktopOnly,
     syncNow: async () => {},
     accountStatuses: async () => [],

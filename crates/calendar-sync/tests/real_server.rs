@@ -13,7 +13,7 @@ use std::sync::Arc;
 use calendar_core::timing::resolve_local;
 use calendar_core::{EventDraft, EventTiming, SyncStatus, TimeRange};
 use calendar_storage::Store;
-use calendar_sync::{MemoryCredentials, SyncEngine, caldav_factory};
+use calendar_sync::{MemoryCredentials, SyncEngine, default_factory};
 use chrono::{Duration, NaiveDate};
 
 const TZ: chrono_tz::Tz = chrono_tz::Europe::Berlin;
@@ -30,7 +30,7 @@ async fn client(url: &str, user: &str, password: &str, calendar_name: &str) -> C
     let engine = SyncEngine::new(
         store.clone(),
         Arc::new(MemoryCredentials::default()),
-        caldav_factory(),
+        default_factory(),
         Arc::new(|_| {}),
     );
     let account = engine

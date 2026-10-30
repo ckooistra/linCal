@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use calendar_core::{Account, ProviderKind};
-use calendar_ical::{parse, read_events, write_object};
 use calendar_provider_api::{
-    CalendarProvider, Capabilities, Precondition, ProviderError, RemoteCalendar, RemoteObject,
+    CalendarProvider, Capabilities, ObjectCodec, Precondition, ProviderError, RemoteCalendar,
+    RemoteObject,
 };
 use calendar_storage::{
     IncomingObject, OpFailure, OpKind, PendingOp, Presence, ProblemOperation, PushObject,
@@ -41,10 +41,14 @@ pub enum SyncError {
     Credentials(String),
     #[error("{0}")]
     Config(String),
+    #[error("sign-in: {0}")]
+    SignIn(#[from] calendar_oauth::OAuthError),
     #[error("synchronization took too long and was stopped")]
     TimedOut,
     #[error("a background task failed")]
     Task,
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// Status changes reported to the UI.
@@ -88,17 +92,60 @@ pub type ProviderFactory = Arc<
 >;
 pub type Listener = Arc<dyn Fn(SyncEvent) + Send + Sync>;
 
-/// Default factory: CalDAV accounts from their stored config.
-pub fn caldav_factory() -> ProviderFactory {
-    Arc::new(|account: &RemoteAccount, password: &str| {
-        let config: CalDavConfig = serde_json::from_value(account.config.clone())
-            .map_err(|_| ProviderError::InvalidResponse("account settings are damaged".into()))?;
-        let home = Url::parse(&config.calendar_home_url)
-            .map_err(|_| ProviderError::InvalidResponse("bad calendar home URL".into()))?;
-        let provider = calendar_caldav::CalDavProvider::new(home, &config.username, password)?;
-        Ok(Box::new(provider) as Box<dyn CalendarProvider>)
-    })
+/// Non-secret settings of an OAuth account (Google, Microsoft), stored as
+/// the account's config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthConfig {
+    /// OAuth client registration used for this account.
+    pub client_id: String,
+    pub email: String,
 }
+
+fn damaged() -> ProviderError {
+    ProviderError::InvalidResponse("account settings are damaged".into())
+}
+
+/// Default factory: providers for CalDAV and Google accounts from their
+/// stored config and secret.
+pub fn default_factory() -> ProviderFactory {
+    Arc::new(
+        |account: &RemoteAccount, secret: &str| match account.account.provider {
+            ProviderKind::Google => {
+                let config: OAuthConfig =
+                    serde_json::from_value(account.config.clone()).map_err(|_| damaged())?;
+                let api = Url::parse(calendar_google::API_BASE).expect("valid");
+                let provider =
+                    calendar_google::GoogleProvider::connect(&config.client_id, secret, api)?;
+                Ok(Box::new(provider) as Box<dyn CalendarProvider>)
+            }
+            ProviderKind::Microsoft => {
+                let config: OAuthConfig =
+                    serde_json::from_value(account.config.clone()).map_err(|_| damaged())?;
+                let api = Url::parse(calendar_microsoft::API_BASE).expect("valid");
+                let provider =
+                    calendar_microsoft::GraphProvider::connect(&config.client_id, secret, api)?;
+                Ok(Box::new(provider) as Box<dyn CalendarProvider>)
+            }
+            ProviderKind::Caldav => {
+                let config: CalDavConfig =
+                    serde_json::from_value(account.config.clone()).map_err(|_| damaged())?;
+                let home = Url::parse(&config.calendar_home_url)
+                    .map_err(|_| ProviderError::InvalidResponse("bad calendar home URL".into()))?;
+                let provider =
+                    calendar_caldav::CalDavProvider::new(home, &config.username, secret)?;
+                Ok(Box::new(provider) as Box<dyn CalendarProvider>)
+            }
+            other => Err(ProviderError::InvalidResponse(format!(
+                "{} accounts are not supported yet",
+                other.as_str()
+            ))),
+        },
+    )
+}
+
+/// Opens a URL in the user's browser (supplied by the desktop shell).
+pub type BrowserOpener = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
 /// Retry delay after `attempts` failures: 30 s doubling up to 1 h.
 pub fn backoff(attempts: i64) -> Duration {
@@ -144,29 +191,33 @@ pub struct SyncProblem {
     pub message: String,
 }
 
-/// Parses downloaded objects. Input is untrusted: a parser panic (a bug,
-/// but possible) fails that object only instead of the sync task.
-fn parse_objects(objects: Vec<RemoteObject>) -> Vec<IncomingObject> {
+/// The codec for objects of an account kind (also needed without a
+/// connected provider, e.g. to describe a deleted object).
+pub fn codec_for(kind: ProviderKind) -> Arc<dyn ObjectCodec> {
+    match kind {
+        ProviderKind::Google => Arc::new(calendar_google::GoogleCodec),
+        ProviderKind::Microsoft => Arc::new(calendar_microsoft::GraphCodec),
+        _ => Arc::new(calendar_caldav::ICalendarCodec),
+    }
+}
+
+/// Reads downloaded objects. Input is untrusted: a codec panic (a bug, but
+/// possible) fails that object only instead of the sync task.
+fn read_objects(codec: &dyn ObjectCodec, objects: Vec<RemoteObject>) -> Vec<IncomingObject> {
     objects
         .into_iter()
         .map(|o| {
-            let read = std::panic::catch_unwind(|| {
-                parse(&o.ical)
-                    .map_err(|e| e.to_string())
-                    .and_then(|cal| read_events(&cal).map_err(|e| e.to_string()))
-            })
-            .unwrap_or_else(|_| Err("the event data could not be read".into()));
+            let read =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.read(&o.data)))
+                    .unwrap_or_else(|_| Err("the event data could not be read".into()));
             let (content, warnings) = match read {
-                Ok(mut events) => {
-                    let warnings = std::mem::take(&mut events.warnings);
-                    (Ok(events.into_content()), warnings)
-                }
+                Ok(r) => (Ok(r.content), r.warnings),
                 Err(e) => (Err(e), Vec::new()),
             };
             IncomingObject {
                 href: o.href,
                 etag: o.etag,
-                ical: o.ical,
+                ical: o.data,
                 content,
                 warnings,
             }
@@ -174,15 +225,14 @@ fn parse_objects(objects: Vec<RemoteObject>) -> Vec<IncomingObject> {
         .collect()
 }
 
-/// SUMMARY of the first event in an iCalendar text, for describing objects
-/// that have no local rows (deletions).
-fn summary(ical: &str) -> Option<String> {
-    let cal = parse(ical).ok()?;
-    let events = read_events(&cal).ok()?;
-    events
+/// Title of an object's first event, for describing objects that have no
+/// local rows (deletions).
+fn summary(codec: &dyn ObjectCodec, data: &str) -> Option<String> {
+    let content = codec.read(data).ok()?.content;
+    content
         .master
         .map(|m| m.title)
-        .or_else(|| events.overrides.into_iter().next().map(|o| o.title))
+        .or_else(|| content.overrides.into_iter().next().map(|o| o.title))
         .filter(|t| !t.is_empty())
 }
 
@@ -201,7 +251,7 @@ fn spec(c: &RemoteCalendar) -> RemoteCalendarSpec {
     }
 }
 
-fn new_account_id() -> String {
+fn new_account_id(kind: &str) -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let nanos = std::time::SystemTime::now()
@@ -209,7 +259,7 @@ fn new_account_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     format!(
-        "caldav-{nanos:x}-{}",
+        "{kind}-{nanos:x}-{}",
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
 }
@@ -284,6 +334,25 @@ impl SyncEngine {
         username: &str,
         password: &str,
     ) -> Result<String, SyncError> {
+        self.add_caldav_account_cancellable(
+            server_url,
+            username,
+            password,
+            &tokio::sync::Notify::new(),
+        )
+        .await
+    }
+
+    /// [`Self::add_caldav_account`] that gives up when `cancel` is notified
+    /// during discovery (the network part). Nothing is stored before
+    /// discovery has finished, so cancelling never leaves anything behind.
+    pub async fn add_caldav_account_cancellable(
+        &self,
+        server_url: &str,
+        username: &str,
+        password: &str,
+        cancel: &tokio::sync::Notify,
+    ) -> Result<String, SyncError> {
         let mut server = Url::parse(server_url.trim())
             .or_else(|_| Url::parse(&format!("https://{}", server_url.trim())))
             .map_err(|_| {
@@ -304,12 +373,22 @@ impl SyncEngine {
             let path = format!("{}/", server.path());
             server.set_path(&path);
         }
-        let found = calendar_caldav::discover(&server, username, password).await?;
-        let provider =
-            calendar_caldav::CalDavProvider::new(found.calendar_home.clone(), username, password)?;
-        let calendars = provider.list_calendars().await?;
+        let discovery = async {
+            let found = calendar_caldav::discover(&server, username, password).await?;
+            let provider = calendar_caldav::CalDavProvider::new(
+                found.calendar_home.clone(),
+                username,
+                password,
+            )?;
+            let calendars = provider.list_calendars().await?;
+            Ok::<_, SyncError>((found, calendars))
+        };
+        let (found, calendars) = tokio::select! {
+            result = discovery => result?,
+            () = cancel.notified() => return Err(SyncError::Cancelled),
+        };
 
-        let id = new_account_id();
+        let id = new_account_id("caldav");
         let config = CalDavConfig {
             server_url: server.to_string(),
             username: username.to_owned(),
@@ -321,20 +400,219 @@ impl SyncEngine {
             name: format!("{username} @ {}", server.host_str().unwrap_or("server")),
             provider: ProviderKind::Caldav,
         };
-        self.set_secret(&id, password).await?;
-        let specs: Vec<_> = calendars.iter().map(spec).collect();
         let config = serde_json::to_value(&config).map_err(|e| SyncError::Config(e.to_string()))?;
+        self.save_new_account(&account, &config, &calendars, password)
+            .await?;
+        Ok(id)
+    }
+
+    /// Signs in to Google in the browser and adds the account with its
+    /// calendars. Tokens go to the credential store only.
+    pub async fn add_google_account(
+        &self,
+        client_id: &str,
+        client_secret: Option<&str>,
+        open_browser: BrowserOpener,
+        cancel: &tokio::sync::Notify,
+    ) -> Result<String, SyncError> {
+        self.add_oauth_account(
+            ProviderKind::Google,
+            client_id,
+            client_secret,
+            open_browser,
+            cancel,
+            None,
+        )
+        .await
+    }
+
+    /// Signs in to Microsoft (personal or work/school) and adds the account.
+    pub async fn add_microsoft_account(
+        &self,
+        client_id: &str,
+        open_browser: BrowserOpener,
+        cancel: &tokio::sync::Notify,
+    ) -> Result<String, SyncError> {
+        self.add_oauth_account(
+            ProviderKind::Microsoft,
+            client_id,
+            None,
+            open_browser,
+            cancel,
+            None,
+        )
+        .await
+    }
+
+    /// OAuth client settings for an account kind.
+    fn oauth_client_for(
+        kind: ProviderKind,
+        client_id: &str,
+        client_secret: Option<&str>,
+    ) -> Result<(calendar_oauth::OAuthClient, Url), SyncError> {
+        Ok(match kind {
+            ProviderKind::Google => (
+                calendar_google::oauth_client(client_id, client_secret),
+                Url::parse(calendar_google::API_BASE).expect("valid"),
+            ),
+            ProviderKind::Microsoft => (
+                calendar_microsoft::oauth_client(client_id),
+                Url::parse(calendar_microsoft::API_BASE).expect("valid"),
+            ),
+            other => {
+                return Err(SyncError::Config(format!(
+                    "{} accounts do not sign in with OAuth",
+                    other.as_str()
+                )));
+            }
+        })
+    }
+
+    /// The stored secret of an OAuth account kind.
+    fn oauth_secret(
+        kind: ProviderKind,
+        tokens: calendar_oauth::Tokens,
+        client_secret: Option<String>,
+    ) -> Result<String, SyncError> {
+        let json = match kind {
+            ProviderKind::Microsoft => {
+                serde_json::to_string(&calendar_microsoft::GraphSecret { tokens })
+            }
+            _ => serde_json::to_string(&calendar_google::GoogleSecret {
+                tokens,
+                client_secret,
+            }),
+        };
+        json.map_err(|e| SyncError::Config(e.to_string()))
+    }
+
+    /// Adds an OAuth account (Google or Microsoft): browser sign-in, then
+    /// the account's address and calendars. `endpoints` replaces the OAuth
+    /// and API endpoints (tests).
+    pub async fn add_oauth_account(
+        &self,
+        kind: ProviderKind,
+        client_id: &str,
+        client_secret: Option<&str>,
+        open_browser: BrowserOpener,
+        cancel: &tokio::sync::Notify,
+        endpoints: Option<(calendar_oauth::OAuthClient, Url)>,
+    ) -> Result<String, SyncError> {
+        let client_id = client_id.trim();
+        if client_id.is_empty() {
+            return Err(SyncError::Config("enter the OAuth client ID".into()));
+        }
+        let client_secret = client_secret.map(str::trim).filter(|s| !s.is_empty());
+        let (client, api) = match endpoints {
+            Some(e) => e,
+            None => Self::oauth_client_for(kind, client_id, client_secret)?,
+        };
+        let tokens = calendar_oauth::authorize(&client, &*open_browser, cancel).await?;
+        let source = Arc::new(calendar_oauth::TokenSource::new(client, tokens.clone()));
+        let (email, calendars, label) = match kind {
+            ProviderKind::Microsoft => {
+                let provider = calendar_microsoft::GraphProvider::new(source, api)?;
+                (
+                    provider.account_email().await?,
+                    provider.list_calendars().await?,
+                    "Microsoft",
+                )
+            }
+            _ => {
+                let provider = calendar_google::GoogleProvider::new(source, api)?;
+                (
+                    provider.account_email().await?,
+                    provider.list_calendars().await?,
+                    "Google",
+                )
+            }
+        };
+        if self
+            .store
+            .remote_accounts()
+            .await?
+            .iter()
+            .any(|a| a.account.provider == kind && a.config["email"] == email)
+        {
+            return Err(SyncError::Config(format!("{email} is already added")));
+        }
+        let id = new_account_id(kind.as_str());
+        let account = Account {
+            id: id.clone(),
+            name: format!("{email} ({label})"),
+            provider: kind,
+        };
+        let config = serde_json::to_value(OAuthConfig {
+            client_id: client_id.to_owned(),
+            email,
+        })
+        .map_err(|e| SyncError::Config(e.to_string()))?;
+        let secret = Self::oauth_secret(kind, tokens, client_secret.map(str::to_owned))?;
+        self.save_new_account(&account, &config, &calendars, &secret)
+            .await?;
+        Ok(id)
+    }
+
+    /// Signs in again to an OAuth account whose sign-in expired or was
+    /// revoked. Queued changes are kept and sync resumes.
+    pub async fn sign_in_again(
+        &self,
+        account_id: &str,
+        open_browser: BrowserOpener,
+        cancel: &tokio::sync::Notify,
+    ) -> Result<(), SyncError> {
+        let account = self
+            .store
+            .remote_accounts()
+            .await?
+            .into_iter()
+            .find(|a| a.account.id == account_id)
+            .ok_or_else(|| SyncError::Config("the account no longer exists".into()))?;
+        let kind = account.account.provider;
+        let config: OAuthConfig = serde_json::from_value(account.config.clone())
+            .map_err(|_| SyncError::Provider(damaged()))?;
+        let client_secret = match kind {
+            ProviderKind::Google => self
+                .secret(account_id)
+                .await?
+                .and_then(|s| serde_json::from_str::<calendar_google::GoogleSecret>(&s).ok())
+                .and_then(|s| s.client_secret),
+            _ => None,
+        };
+        let (client, _) =
+            Self::oauth_client_for(kind, &config.client_id, client_secret.as_deref())?;
+        let tokens = calendar_oauth::authorize(&client, &*open_browser, cancel).await?;
+        let secret = Self::oauth_secret(kind, tokens, client_secret)?;
+        self.set_secret(account_id, &secret).await?;
+        self.store
+            .set_account_status(account_id, None, None, false)
+            .await?;
+        self.record_pass(account_id, true);
+        Ok(())
+    }
+
+    /// Stores a new account: secret first, then the database rows; the
+    /// secret is removed again if the rows cannot be written.
+    async fn save_new_account(
+        &self,
+        account: &Account,
+        config: &serde_json::Value,
+        calendars: &[RemoteCalendar],
+        secret: &str,
+    ) -> Result<(), SyncError> {
+        self.set_secret(&account.id, secret).await?;
+        let specs: Vec<_> = calendars.iter().map(spec).collect();
         if let Err(e) = self
             .store
-            .create_remote_account(&account, &config, &specs)
+            .create_remote_account(account, config, &specs)
             .await
         {
             let creds = Arc::clone(&self.credentials);
-            let cleanup = id.clone();
+            let cleanup = account.id.clone();
             let _ = tokio::task::spawn_blocking(move || creds.delete(&cleanup)).await;
             return Err(e.into());
         }
-        Ok(id)
+        Ok(())
     }
 
     /// Removes an account, its local data and its stored password.
@@ -406,7 +684,7 @@ impl SyncEngine {
         match &result {
             Ok(report) => {
                 self.store
-                    .set_account_status(account_id, None, Some(now_ms()))
+                    .set_account_status(account_id, None, Some(now_ms()), false)
                     .await?;
                 (self.listener)(SyncEvent::Synced {
                     account_id: account_id.to_owned(),
@@ -416,9 +694,16 @@ impl SyncEngine {
             Err(e) => {
                 let offline = matches!(e, SyncError::Provider(p) if p.is_transient())
                     || matches!(e, SyncError::TimedOut);
-                let message = user_message(e);
+                let oauth = self.is_oauth(account_id).await;
+                let needs_sign_in =
+                    oauth && matches!(e, SyncError::Provider(ProviderError::Unauthorized));
+                let message = if needs_sign_in {
+                    "The sign-in has expired or was revoked. Sign in again to resume syncing; nothing is lost.".to_owned()
+                } else {
+                    user_message(e)
+                };
                 self.store
-                    .set_account_status(account_id, Some(&message), None)
+                    .set_account_status(account_id, Some(&message), None, needs_sign_in)
                     .await?;
                 (self.listener)(SyncEvent::Failed {
                     account_id: account_id.to_owned(),
@@ -428,6 +713,18 @@ impl SyncEngine {
             }
         }
         result
+    }
+
+    async fn is_oauth(&self, account_id: &str) -> bool {
+        self.store.remote_accounts().await.is_ok_and(|accounts| {
+            accounts.iter().any(|a| {
+                a.account.id == account_id
+                    && matches!(
+                        a.account.provider,
+                        ProviderKind::Google | ProviderKind::Microsoft
+                    )
+            })
+        })
     }
 
     async fn run(&self, account_id: &str) -> Result<SyncReport, SyncError> {
@@ -442,11 +739,24 @@ impl SyncEngine {
             SyncError::Credentials("the password is missing from the keyring".into())
         })?;
         let provider = (self.providers)(&account, &password)?;
+        let result = self.pass(account_id, provider.as_ref()).await;
+        // Rotated OAuth tokens must be kept even if the pass failed.
+        if let Some(secret) = provider.take_updated_secret() {
+            self.set_secret(account_id, &secret).await?;
+        }
+        result
+    }
+
+    async fn pass(
+        &self,
+        account_id: &str,
+        provider: &dyn CalendarProvider,
+    ) -> Result<SyncReport, SyncError> {
         let mut report = SyncReport::default();
 
         // 1. Upload first, so server changes never silently replace queued edits.
         for op in self.store.due_operations(account_id, now_ms()).await? {
-            self.push(provider.as_ref(), &op, &mut report).await?;
+            self.push(provider, &op, &mut report).await?;
         }
 
         // 2. Calendar list (new, renamed, removed, permissions).
@@ -482,7 +792,8 @@ impl SyncEngine {
             };
             // Parsing is CPU work on untrusted input: off the async workers.
             let upserted = changes.upserted;
-            let objects = tokio::task::spawn_blocking(move || parse_objects(upserted))
+            let codec = provider.codec();
+            let objects = tokio::task::spawn_blocking(move || read_objects(&*codec, upserted))
                 .await
                 .map_err(|_| SyncError::Task)?;
             let applied = self
@@ -583,20 +894,10 @@ impl SyncEngine {
             // Deleted locally before anything was sent.
             return Ok(Ok(()));
         }
-        let base = if obj.base_ical.trim().is_empty() {
-            None
-        } else {
-            parse(&obj.base_ical).ok()
-        };
-        let ical = write_object(
-            base.as_ref(),
-            &obj.uid,
-            obj.content.master.as_ref(),
-            &obj.content.overrides,
-            &obj.renamed,
-            Utc::now(),
-        )
-        .to_ics();
+        let base = Some(obj.base_ical.as_str()).filter(|b| !b.trim().is_empty());
+        let payload = provider
+            .codec()
+            .write(base, &obj.uid, &obj.content, &obj.renamed);
         let precondition = if op.force {
             Precondition::Overwrite
         } else {
@@ -619,21 +920,34 @@ impl SyncEngine {
                 },
             }
         };
-        let written = match provider.put_object(&op.href, &ical, &precondition).await {
+        let written = match provider.put_object(&op.href, &payload, &precondition).await {
             Ok(w) => w,
             Err(e) => return Ok(Err(e)),
         };
-        // Without an ETag the server may have changed the data it stored
-        // (RFC 4791 §5.3.4): read back its version and copy.
-        let (etag, stored) = match written.etag {
-            Some(etag) => (Some(etag), ical),
-            None => match provider.get_object(&op.href).await {
-                Ok(Some(current)) => (current.etag, current.ical),
-                _ => (None, ical),
+        // Providers that assign ids on create report where the object is.
+        let op = if written.href != op.href {
+            self.store
+                .rename_object(&op.calendar_id, &op.href, &written.href)
+                .await?;
+            PendingOp {
+                href: written.href.clone(),
+                ..op.clone()
+            }
+        } else {
+            op.clone()
+        };
+        let (etag, stored) = match (written.etag, written.data) {
+            (etag, Some(data)) => (etag, data),
+            // Without an ETag the server may have changed the data it
+            // stored (RFC 4791 §5.3.4): read back its version and copy.
+            (None, None) => match provider.get_object(&op.href).await {
+                Ok(Some(current)) => (current.etag, current.data),
+                _ => (None, payload),
             },
+            (etag, None) => (etag, payload),
         };
         self.store
-            .complete_put(op, etag.as_deref(), &stored)
+            .complete_put(&op, etag.as_deref(), &stored)
             .await?;
         Ok(Ok(()))
     }
@@ -671,8 +985,9 @@ impl SyncEngine {
         let mut out = Vec::new();
         for account in self.store.remote_accounts().await? {
             let account_id = account.account.id;
+            let codec = codec_for(account.account.provider);
             for p in self.store.problem_operations(&account_id).await? {
-                out.push(describe(&account_id, p));
+                out.push(describe(&*codec, &account_id, p));
             }
         }
         Ok(out)
@@ -692,13 +1007,13 @@ impl SyncEngine {
     }
 }
 
-fn describe(account_id: &str, p: ProblemOperation) -> SyncProblem {
+fn describe(codec: &dyn ObjectCodec, account_id: &str, p: ProblemOperation) -> SyncProblem {
     let deletion = p.kind == OpKind::Delete;
     let title = p
         .title
         .clone()
         .filter(|t| !t.is_empty())
-        .or_else(|| summary(&p.base_ical))
+        .or_else(|| summary(codec, &p.base_ical))
         .unwrap_or_else(|| "Untitled event".into());
     let message = match (p.conflict, deletion) {
         (true, true) => "You deleted this event, but it was changed on the server.".to_owned(),
@@ -734,5 +1049,8 @@ pub fn user_message(e: &SyncError) -> String {
         SyncError::Config(m) => m.clone(),
         SyncError::TimedOut => "Synchronization took too long and will be retried.".into(),
         SyncError::Task => "Synchronization failed unexpectedly and will be retried.".into(),
+        SyncError::Cancelled => "Cancelled.".into(),
+        SyncError::SignIn(calendar_oauth::OAuthError::Cancelled) => "Cancelled.".into(),
+        SyncError::SignIn(e) => format!("Sign-in failed: {e}."),
     }
 }

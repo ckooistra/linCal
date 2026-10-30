@@ -15,6 +15,9 @@ keyring = ["dep:keyring"]
 [dependencies]
 calendar-caldav = { path = "../calendar-caldav" }
 calendar-core = { path = "../calendar-core" }
+calendar-google = { path = "../calendar-google" }
+calendar-microsoft = { path = "../calendar-microsoft" }
+calendar-oauth = { path = "../calendar-oauth" }
 calendar-ical = { path = "../calendar-ical" }
 calendar-provider-api = { path = "../calendar-provider-api" }
 calendar-storage = { path = "../calendar-storage" }
@@ -28,5 +31,8 @@ url = "2"
 
 [dev-dependencies]
 async-trait = "0.1"
+calendar-google = { path = "../calendar-google", features = ["testing"] }
+calendar-microsoft = { path = "../calendar-microsoft", features = ["testing"] }
+calendar-oauth = { path = "../calendar-oauth" }
 chrono-tz = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }

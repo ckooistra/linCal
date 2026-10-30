@@ -20,7 +20,9 @@
     ontheme: (preference: ThemePreference) => void;
     onfailnext: () => void;
     /** Account actions; omitted in the browser preview. */
-    onaddaccount?: () => void;
+    onaddaccount?: (kind: "caldav" | "google" | "microsoft") => void;
+    /** Renew an expired OAuth sign-in. */
+    onsignin?: (accountId: string) => void;
     onremoveaccount?: (accountId: string) => void;
     onsyncnow?: () => void;
     /** Opens the list of failed and conflicting changes. */
@@ -45,6 +47,7 @@
     onremoveaccount,
     onsyncnow,
     onreviewproblems,
+    onsignin,
   }: Props = $props();
 
   function ago(ms: number): string {
@@ -115,6 +118,9 @@
           {#if sync.review && onreviewproblems}
             <button type="button" class="link" onclick={onreviewproblems}>Review…</button>
           {/if}
+          {#if calendars.statuses[account.id]?.needsSignIn && onsignin}
+            <button type="button" class="link" onclick={() => onsignin(account.id)}>Sign in again…</button>
+          {/if}
         </p>
       {/if}
       <ul>
@@ -145,7 +151,9 @@
 
   {#if onaddaccount}
     <section class="accounts-actions">
-      <button type="button" onclick={onaddaccount}>Add CalDAV account…</button>
+      <button type="button" onclick={() => onaddaccount("caldav")}>Add CalDAV account…</button>
+      <button type="button" onclick={() => onaddaccount("google")}>Add Google account…</button>
+      <button type="button" onclick={() => onaddaccount("microsoft")}>Add Microsoft account…</button>
       {#if onsyncnow && Object.values(calendars.statuses).some((s) => s.remote)}
         <button type="button" onclick={onsyncnow} title="Sync all accounts now">Sync now</button>
       {/if}

@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/svelte";
 import AddAccountDialog from "../components/AddAccountDialog.svelte";
 import Sidebar from "../components/Sidebar.svelte";
 import EventEditor from "../components/EventEditor.svelte";
+import OAuthAccountDialog from "../components/OAuthAccountDialog.svelte";
 import { CalendarsStore } from "../stores/calendars.svelte";
 import { simulatedCalendars } from "../services/mock/generator";
 import { parseIsoDate } from "../services/time";
@@ -59,8 +60,8 @@ describe("Sidebar sync status", () => {
     const onremoveaccount = vi.fn();
     const onaddaccount = vi.fn();
     calendars.setStatuses([
-      { accountId: "acct-sim", remote: false, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0, importFailures: 0, approximated: 0 },
-      { accountId: "dav", remote: true, lastSyncedAt: Date.now(), error: null, pending: 2, failed: 0, conflicts: 0, importFailures: 0, approximated: 0 },
+      { accountId: "acct-sim", remote: false, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0, importFailures: 0, approximated: 0, needsSignIn: false },
+      { accountId: "dav", remote: true, lastSyncedAt: Date.now(), error: null, pending: 2, failed: 0, conflicts: 0, importFailures: 0, approximated: 0, needsSignIn: false },
     ]);
     render(Sidebar, props(calendars, { onremoveaccount, onaddaccount, onsyncnow: noop }));
     expect(screen.getByText("2 changes waiting to sync")).toBeTruthy();
@@ -68,13 +69,17 @@ describe("Sidebar sync status", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     expect(onremoveaccount).toHaveBeenCalledWith("dav");
     await fireEvent.click(screen.getByRole("button", { name: "Add CalDAV account…" }));
-    expect(onaddaccount).toHaveBeenCalled();
+    expect(onaddaccount).toHaveBeenCalledWith("caldav");
+    await fireEvent.click(screen.getByRole("button", { name: "Add Google account…" }));
+    expect(onaddaccount).toHaveBeenCalledWith("google");
+    await fireEvent.click(screen.getByRole("button", { name: "Add Microsoft account…" }));
+    expect(onaddaccount).toHaveBeenCalledWith("microsoft");
     expect(screen.getByRole("button", { name: "Sync now" })).toBeTruthy();
   });
 
   it("shows syncing, offline and conflict states", async () => {
     const calendars = store();
-    const base = { accountId: "dav", remote: true, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0, importFailures: 0, approximated: 0 };
+    const base = { accountId: "dav", remote: true, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0, importFailures: 0, approximated: 0, needsSignIn: false };
     calendars.setStatuses([{ ...base, error: "Offline: the server could not be reached. Changes are kept and will sync later." }]);
     const { rerender } = render(Sidebar, props(calendars));
     expect(screen.getByText(/^Offline/).className).toContain("warn");
@@ -85,6 +90,11 @@ describe("Sidebar sync status", () => {
     await rerender(props(calendars, { onreviewproblems }));
     await fireEvent.click(screen.getByRole("button", { name: "Review…" }));
     expect(onreviewproblems).toHaveBeenCalled();
+    const onsignin = vi.fn();
+    calendars.setStatuses([{ ...base, error: "The sign-in has expired.", needsSignIn: true }]);
+    await rerender(props(calendars, { onsignin }));
+    await fireEvent.click(screen.getByRole("button", { name: "Sign in again…" }));
+    expect(onsignin).toHaveBeenCalledWith("dav");
     calendars.setStatuses([{ ...base, lastSyncedAt: Date.now(), importFailures: 2 }]);
     await rerender(props(calendars));
     expect(screen.getByText(/2 server events could not be read/).className).toContain("warn");
@@ -197,5 +207,69 @@ describe("EventEditor keeps untouched times exactly (audit F09)", () => {
     expect(onsave).toHaveBeenCalledWith(
       expect.objectContaining({ title: "Night shift (renamed)", timing: event.timing }),
     );
+  });
+});
+
+describe("EventEditor notices newer versions", () => {
+  it("offers to show a version changed elsewhere", async () => {
+    const start = parseIsoDate("2026-06-15").getTime() + 9 * 3_600_000;
+    const event: CalendarEvent = {
+      id: "e",
+      calendarId: "cal-work",
+      title: "Review",
+      description: "",
+      location: "",
+      timing: { kind: "timed", start, end: start + 3_600_000, timeZone: "Europe/Berlin" },
+      seriesId: null,
+      recurrenceId: null,
+      rrule: null,
+      syncStatus: "synced",
+      revision: 1,
+    };
+    const onshownewer = vi.fn();
+    render(EventEditor, {
+      event,
+      timing: event.timing,
+      calendars: simulatedCalendars(),
+      defaultCalendarId: null,
+      readOnly: false,
+      onsave: () => null,
+      ondelete: noop,
+      onclose: noop,
+      newer: true,
+      onshownewer,
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Show the new version" }));
+    expect(onshownewer).toHaveBeenCalled();
+  });
+});
+
+describe("OAuthAccountDialog", () => {
+  it("requires a client ID, submits, and cancels a sign-in in progress", async () => {
+    let finish!: (v: string | null) => void;
+    const onsubmit = vi.fn(() => new Promise<string | null>((r) => (finish = r)));
+    const oncancel = vi.fn();
+    const onclose = vi.fn();
+    render(OAuthAccountDialog, { provider: "google", builtInClientId: null, onsubmit, onclose, oncancel });
+    await fireEvent.click(screen.getByRole("button", { name: "Sign in with Google" }));
+    expect(onsubmit).not.toHaveBeenCalled();
+    await fireEvent.input(screen.getByLabelText("OAuth client ID"), { target: { value: " id.apps " } });
+    await fireEvent.click(screen.getByRole("button", { name: "Sign in with Google" }));
+    expect(onsubmit).toHaveBeenCalledWith("id.apps", null);
+    expect(screen.getByRole("status").textContent).toContain("browser");
+    await fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(oncancel).toHaveBeenCalled();
+    expect(onclose).toHaveBeenCalled();
+    finish(null);
+  });
+});
+
+describe("OAuthAccountDialog for Microsoft", () => {
+  it("uses the built-in client ID and asks for no secret", async () => {
+    const onsubmit = vi.fn(async () => null);
+    render(OAuthAccountDialog, { provider: "microsoft", builtInClientId: "built-in-id", onsubmit, onclose: noop });
+    expect(screen.queryByLabelText(/Client secret/)).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
+    expect(onsubmit).toHaveBeenCalledWith("built-in-id", null);
   });
 });

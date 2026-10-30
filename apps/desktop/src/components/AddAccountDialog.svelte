@@ -1,20 +1,29 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { modal } from "../services/modal";
 
   interface Props {
     /** Resolves to an error message, or null on success. */
     onsubmit: (serverUrl: string, username: string, password: string) => Promise<string | null>;
     onclose: () => void;
+    /** Stops a connection attempt in progress (the dialog then closes). */
+    oncancel?: () => void;
   }
 
-  let { onsubmit, onclose }: Props = $props();
+  let { onsubmit, onclose, oncancel }: Props = $props();
+
+  /** Closing while connecting cancels the attempt. */
+  function close() {
+    if (busy) oncancel?.();
+    onclose();
+  }
 
   let serverUrl = $state("");
   let username = $state("");
   let password = $state("");
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let cancelButton: HTMLButtonElement | undefined = $state();
   let first: HTMLInputElement;
 
   async function submit(e: SubmitEvent) {
@@ -26,6 +35,8 @@
     }
     busy = true;
     error = null;
+    // The fields are disabled while busy: keep focus (and Escape) in the dialog.
+    void tick().then(() => cancelButton?.focus());
     try {
       error = await onsubmit(serverUrl.trim(), username.trim(), password);
     } finally {
@@ -36,7 +47,7 @@
   onMount(() => first.focus());
 </script>
 
-<div class="backdrop" role="presentation" onmousedown={(e) => e.target === e.currentTarget && !busy && onclose()}>
+<div class="backdrop" role="presentation" onmousedown={(e) => e.target === e.currentTarget && !busy && close()}>
   <div
     class="dialog"
     role="dialog"
@@ -45,10 +56,10 @@
     tabindex="-1"
     use:modal
     onkeydown={(e) => {
-      if (e.key === "Escape" && !busy) {
+      if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        onclose();
+        close();
       }
     }}
   >
@@ -86,7 +97,7 @@
       <div class="actions">
         {#if busy}<span class="status" role="status">Connecting…</span>{/if}
         <span class="spacer"></span>
-        <button type="button" onclick={onclose} disabled={busy}>Cancel</button>
+        <button type="button" bind:this={cancelButton} onclick={close}>Cancel</button>
         <button type="submit" class="primary" disabled={busy}>Connect</button>
       </div>
     </form>

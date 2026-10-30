@@ -107,6 +107,8 @@ export interface AccountStatus {
   importFailures: number;
   /** Server events shown only approximately (e.g. unknown time zone). */
   approximated: number;
+  /** An OAuth sign-in expired or was revoked. */
+  needsSignIn: boolean;
 }
 
 /** How to settle a change the server refused or that conflicts. */

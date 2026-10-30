@@ -28,10 +28,24 @@
     onclose: () => void;
     /** Resolve a sync conflict or failure for this event. */
     onresolve?: (resolution: Resolution) => void;
+    /** The event changed (e.g. through sync) since the editor opened. */
+    newer?: boolean;
+    onshownewer?: () => void;
   }
 
-  let { event, timing, calendars, defaultCalendarId, readOnly, onsave, ondelete, onclose, onresolve }: Props =
-    $props();
+  let {
+    event,
+    timing,
+    calendars,
+    defaultCalendarId,
+    readOnly,
+    onsave,
+    ondelete,
+    onclose,
+    onresolve,
+    newer = false,
+    onshownewer,
+  }: Props = $props();
 
   const syncIssue = $derived(
     event?.syncStatus === "conflict" ? "conflict" : event?.syncStatus === "sync-failed" ? "failed" : null,
@@ -212,6 +226,14 @@
   >
     <form onsubmit={submit} novalidate>
       <h2 id="editor-title">{heading}</h2>
+      {#if newer && onshownewer}
+        <div class="banner info" role="status">
+          <p>This event was changed elsewhere while you had it open. Saving now keeps your version.</p>
+          <div class="banner-actions">
+            <button type="button" onclick={onshownewer}>Show the new version</button>
+          </div>
+        </div>
+      {/if}
       {#if syncIssue && onresolve}
         <div class="banner" role="alert">
           <p>
@@ -372,6 +394,9 @@
     border-radius: 6px;
     padding: 0.5rem 0.75rem;
     margin: 0 0 0.75rem;
+  }
+  .banner.info {
+    border-color: var(--uc-accent);
   }
   .banner p {
     margin: 0 0 0.5rem;

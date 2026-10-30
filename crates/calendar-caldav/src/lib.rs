@@ -11,11 +11,13 @@ pub mod xml;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use calendar_core::{ObjectContent, OccurrenceKey};
 use calendar_provider_api::{
-    CalendarProvider, Capabilities, ChangeSet, Precondition, ProviderError, ProviderResult,
-    RemoteCalendar, RemoteObject, WriteResult,
+    CalendarProvider, Capabilities, ChangeSet, ObjectCodec, Precondition, ProviderError,
+    ProviderResult, ReadObject, RemoteCalendar, RemoteObject, WriteResult,
 };
 use reqwest::{Method, StatusCode};
+use std::sync::Arc;
 use url::Url;
 
 use client::{Client, method};
@@ -23,6 +25,43 @@ use xml::{APPLE, CALDAV, CALSERVER, DAV, Multistatus, parse_multistatus};
 
 /// Objects fetched per calendar-multiget request.
 const MULTIGET_BATCH: usize = 50;
+
+/// CalDAV objects are iCalendar text: read and written with `calendar-ical`,
+/// editing the stored server copy in place.
+pub struct ICalendarCodec;
+
+impl ObjectCodec for ICalendarCodec {
+    fn read(&self, data: &str) -> Result<ReadObject, String> {
+        let cal = calendar_ical::parse(data).map_err(|e| e.to_string())?;
+        let mut events = calendar_ical::read_events(&cal).map_err(|e| e.to_string())?;
+        let warnings = std::mem::take(&mut events.warnings);
+        Ok(ReadObject {
+            content: events.into_content(),
+            warnings,
+        })
+    }
+
+    fn write(
+        &self,
+        base: Option<&str>,
+        uid: &str,
+        content: &ObjectContent,
+        renamed: &[(OccurrenceKey, OccurrenceKey)],
+    ) -> String {
+        let base = base
+            .filter(|b| !b.trim().is_empty())
+            .and_then(|b| calendar_ical::parse(b).ok());
+        calendar_ical::write_object(
+            base.as_ref(),
+            uid,
+            content.master.as_ref(),
+            &content.overrides,
+            renamed,
+            chrono::Utc::now(),
+        )
+        .to_ics()
+    }
+}
 
 /// Result of account discovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,7 +330,7 @@ impl CalDavProvider {
                 out.push(RemoteObject {
                     href: resolve(&base, &r.href)?.to_string(),
                     etag: r.prop(DAV, "getetag").map(|p| p.text.clone()),
-                    ical: data.text.clone(),
+                    data: data.text.clone(),
                 });
             }
         }
@@ -301,6 +340,10 @@ impl CalDavProvider {
 
 #[async_trait]
 impl CalendarProvider for CalDavProvider {
+    fn codec(&self) -> Arc<dyn ObjectCodec> {
+        Arc::new(ICalendarCodec)
+    }
+
     async fn list_calendars(&self) -> ProviderResult<Vec<RemoteCalendar>> {
         let (base, ms) = propfind(
             &self.client,
@@ -430,7 +473,7 @@ impl CalendarProvider for CalDavProvider {
     async fn put_object(
         &self,
         href: &str,
-        ical: &str,
+        payload: &str,
         precondition: &Precondition,
     ) -> ProviderResult<WriteResult> {
         let url = Url::parse(href)
@@ -442,15 +485,18 @@ impl CalendarProvider for CalDavProvider {
         };
         let reply = self
             .client
-            .send(method("PUT"), &url, &headers, Some(ical.to_owned()), &[])
+            .send(method("PUT"), &url, &headers, Some(payload.to_owned()), &[])
             .await?;
         let etag = reply
             .headers
             .get("ETag")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
+        // With an ETag the server stored the payload as sent (RFC 4791
+        // §5.3.4); without one the engine reads the object back.
         Ok(WriteResult {
             href: url.to_string(),
+            data: etag.is_some().then(|| payload.to_owned()),
             etag,
         })
     }
@@ -466,7 +512,7 @@ impl CalendarProvider for CalDavProvider {
                     .get("ETag")
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned),
-                ical: reply.body,
+                data: reply.body,
             })),
             Err(ProviderError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),

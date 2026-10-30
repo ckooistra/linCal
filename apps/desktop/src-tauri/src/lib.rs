@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use calendar_storage::Store;
 use calendar_sync::{
-    CredentialStore, KeyringCredentials, MemoryCredentials, SyncEngine, caldav_factory,
+    CredentialStore, KeyringCredentials, MemoryCredentials, SyncEngine, default_factory,
 };
 use tauri::{Emitter, Manager};
 
@@ -60,6 +60,7 @@ fn open_store(app: &tauri::App) -> Result<Store, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let store = open_store(app);
             let sync = match &store {
@@ -68,7 +69,7 @@ pub fn run() {
                     let engine = Arc::new(SyncEngine::new(
                         store.clone(),
                         credentials(),
-                        caldav_factory(),
+                        default_factory(),
                         Arc::new(move |event| {
                             let _ = handle.emit("sync-event", event);
                         }),
@@ -78,7 +79,11 @@ pub fn run() {
                     if !bench::enabled() {
                         tauri::async_runtime::spawn(run);
                     }
-                    Some(Sync { engine, scheduler })
+                    Some(Sync {
+                        engine,
+                        scheduler,
+                        adding: std::sync::Mutex::new(None),
+                    })
                 }
                 Err(reason) => {
                     eprintln!("[storage] could not open database: {reason}");
@@ -100,6 +105,11 @@ pub fn run() {
             commands::set_setting,
             commands::load_simulated_dataset,
             commands::add_caldav_account,
+            commands::cancel_add_account,
+            commands::oauth_client_id,
+            commands::add_google_account,
+            commands::add_microsoft_account,
+            commands::sign_in_again,
             commands::remove_account,
             commands::sync_now,
             commands::account_statuses,

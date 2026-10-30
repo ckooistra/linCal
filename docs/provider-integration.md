@@ -2,7 +2,10 @@
 
 > **Status:**
 > - **CalDAV:** implemented (Milestone 3) in `crates/calendar-caldav`.
-> - **Google and Microsoft:** Milestone 4.
+> - **Google Calendar and Microsoft Graph:** implemented (Milestone 4) in
+>   `crates/calendar-google` and `crates/calendar-microsoft`, with OAuth in
+>   `crates/calendar-oauth`. Tested against stateful API fakes; a live check
+>   needs an OAuth client registration (below).
 
 ## Boundaries
 
@@ -17,12 +20,18 @@ Defined in `crates/calendar-provider-api`.
 ```rust
 #[async_trait]
 pub trait CalendarProvider: Send + Sync {
+    /// Reads and writes this provider's raw object data (iCalendar or JSON).
+    fn codec(&self) -> Arc<dyn ObjectCodec>;
+    /// Rotated OAuth tokens to store, if any (taken once).
+    fn take_updated_secret(&self) -> Option<String> { None }
     async fn list_calendars(&self) -> ProviderResult<Vec<RemoteCalendar>>;
     /// Changes since `cursor` (None = full listing). `known` = (href, etag) the client holds,
     /// so providers without cursors can download only what differs and report deletions.
     async fn fetch_changes(&self, calendar: &RemoteCalendar, cursor: Option<&str>,
                            known: &[(String, Option<String>)]) -> ProviderResult<ChangeSet>;
-    async fn put_object(&self, href: &str, ical: &str, precondition: &Precondition)
+    /// Payload from `ObjectCodec::write`. The result may carry a new href
+    /// (server-assigned ids) and the server's copy.
+    async fn put_object(&self, href: &str, payload: &str, precondition: &Precondition)
         -> ProviderResult<WriteResult>;   // Precondition::Create | Version(etag) | Overwrite
     /// One object, or None if it does not exist (used when a version is unknown).
     async fn get_object(&self, href: &str) -> ProviderResult<Option<RemoteObject>>;
@@ -30,19 +39,17 @@ pub trait CalendarProvider: Send + Sync {
 }
 ```
 
-Providers exchange **calendar object resources**: an iCalendar object per item, with an `href` and an opaque `etag`.
+Providers exchange **objects**: one event or one recurring series per remote item, with an `href`, an opaque `etag` and raw `data` in the provider's own format. Each provider's `ObjectCodec` turns that data into `calendar-core` content and back, so the sync engine, the offline queue, conflict handling and the review dialog are the same for every provider. The decisions behind this are in [ADR 0005](decisions/0005-google-and-microsoft.md).
 
-- **CalDAV and ICS** are natively like this.
-- **JSON APIs** (Google, Graph) will map their events to iCalendar objects inside their adapter. The sync engine, the offline queue and conflict handling then stay identical for every provider.
-- **Implication for Milestone 4:** those adapters need a careful JSON ⇄ iCalendar mapping, including their recurrence exceptions. Their opaque version tokens (Google `etag`, Graph `changeKey`) take the place of ETags.
-
-**Open contract questions to settle before Milestone 4** (from the October 2026 audit, F21):
-
-- **Native-data preservation.** Google and Graph fields with no iCalendar equivalent need a reversible envelope, for example an `X-` property or a side table, or they are lost on upload.
-- **Identity.** Google separates its event `id` from `iCalUID`, and providers assign ids on create. `put_object` addressed by a client-made href doesn't fit, so creates need to return the provider's identity.
-- **Scoped cursors.** Graph `calendarView/delta` tracks one calendar *and* one date window and follows opaque `nextLink`/`deltaLink` pages. One `sync_token` per calendar is not enough.
-- **Capabilities.** Per-operation support (create/update/delete, recurrence edits, attendees) should reach the UI.
-- **Authentication lifecycle.** OAuth token refresh and revocation, instead of one password string.
+| | CalDAV | Google Calendar | Microsoft Graph |
+|---|---|---|---|
+| Object | one iCalendar resource | a series: master + exceptions (`events.list?iCalUID=`) | one instance (single event, occurrence or exception) |
+| Version | ETag | hash of the members' ETags | `@odata.etag` |
+| Cursor | sync-token, or ETag comparison | `syncToken` (410 → full sync) | window + `calendarView/delta` link (410 or window moved → full listing) |
+| Writes | edit the stored iCalendar in place, `PUT` with `If-Match` | `PATCH` only changed fields per member, with `If-Match` | `PATCH` only changed fields, with `If-Match` |
+| Create identity | client href | client-chosen id (retry → 409) | server id; `transactionId` makes retries safe; href renamed |
+| Recurrence | full (RRULE/RDATE/EXDATE, overrides) | full (RFC 5545 lines + exceptions) | per occurrence only: whole-series edits and new repeating events are refused (shown "approximately") |
+| Unmodelled data (attendees, alarms, conferencing…) | preserved in the stored resource | untouched on the server | untouched on the server |
 
 `ProviderError` classifies failures so the engine can choose between retry with backoff, conflict, re-authentication and reporting:
 
@@ -63,11 +70,32 @@ Providers exchange **calendar object resources**: an iCalendar object per item, 
 | Provider | Mechanism | Notes |
 |---|---|---|
 | CalDAV (Nextcloud, Fastmail, Radicale, Baïkal, iCloud) | Basic auth over TLS with app passwords | Discovery via `.well-known/caldav` and principal/home-set lookup. No Nextcloud-specific assumptions. HTTPS is required except for `localhost`. A calendar home on another host is accepted only within the same domain and over HTTPS. Addresses with embedded credentials are refused. |
-| Google Calendar | OAuth 2.0 installed-app flow with PKCE, loopback redirect | Users or distributors register their own OAuth client. No client secret is treated as confidential. |
-| Microsoft Graph | OAuth 2.0 public client with PKCE (MSAL-style) | Personal and work/school accounts, subject to tenant policy. |
+| Google Calendar | OAuth 2.0 installed-app flow with PKCE, loopback redirect `http://127.0.0.1:<port>` | Users or distributors register their own OAuth client. No client secret is built in; Google's desktop-client "secret" is non-confidential and, if entered, is kept in the keyring. |
+| Microsoft Graph | OAuth 2.0 public client with PKCE, loopback redirect `http://localhost:<port>` | Personal and work/school accounts (`/common`), subject to tenant policy. Scopes `offline_access User.Read Calendars.ReadWrite`. |
 | ICS subscription | Optional HTTP auth | Read-only. Uses ETag / Last-Modified. |
 
 Tokens and passwords live **only** in the OS secret store: the Secret Service API (KWallet / GNOME Keyring) on Linux, via the `keyring` crate or equivalent. Nothing secret goes into SQLite or logs.
+
+An expired or revoked OAuth sign-in shows **Sign in again…** next to the account. Queued changes are kept and sync resumes after signing in.
+
+## Registering OAuth clients
+
+The app never ships a confidential secret. You (or whoever distributes a build) register a client once. Then either enter its ID in the **Add … account** dialog, or build it in with `UC_GOOGLE_CLIENT_ID=… UC_MICROSOFT_CLIENT_ID=… npm run tauri build`.
+
+**Google**
+
+1. In the Google Cloud console, create a project and enable the **Google Calendar API**.
+2. Configure the OAuth consent screen. While the app is in testing, add your own address as a test user.
+3. Under *Credentials*, create an **OAuth client ID** of type **Desktop app**.
+4. Enter the client ID, and the client secret Google shows, in **Add Google account…**. Google documents desktop secrets as non-confidential; it is stored in the keyring, not the database.
+
+**Microsoft**
+
+1. In the Microsoft Entra admin center, go to *App registrations* → *New registration*.
+2. Under supported account types, choose *Accounts in any organizational directory and personal Microsoft accounts*.
+3. Under *Authentication*, add the platform **Mobile and desktop applications** with the redirect URI `http://localhost`, and enable *Allow public client flows*.
+4. Under *API permissions*, add the delegated Microsoft Graph permissions `Calendars.ReadWrite`, `User.Read` and `offline_access`.
+5. Enter the *Application (client) ID* in **Add Microsoft account…**. No secret is used.
 
 ## Adding a provider
 

@@ -15,9 +15,12 @@ This describes the code after **Milestone 3** (CalDAV sync) and the boundaries t
 ```text
 crates/
 ├── calendar-ical/            Lossless iCalendar content model, values, VEVENT ⇄ EventContent
-├── calendar-provider-api/    CalendarProvider trait: objects (href + ETag + iCalendar), ChangeSet, errors
-├── calendar-caldav/          CalDAV provider: discovery, PROPFIND/REPORT, sync-collection, multiget, PUT/DELETE
-├── calendar-sync/            SyncEngine (push → calendars → pull), scheduler, CredentialStore (keyring / memory)
+├── calendar-provider-api/    CalendarProvider + ObjectCodec traits: objects (href + version + raw data), ChangeSet, errors
+├── calendar-caldav/          CalDAV provider + iCalendar codec: discovery, PROPFIND/REPORT, sync-collection, multiget, PUT/DELETE
+├── calendar-oauth/           OAuth 2.0 for installed apps: PKCE, loopback redirect, token refresh
+├── calendar-google/          Google Calendar API v3 provider + JSON codec (series = master + exceptions)
+├── calendar-microsoft/       Microsoft Graph provider + JSON codec (calendarView delta over a moving window)
+├── calendar-sync/            SyncEngine (push → calendars → pull), scheduler, account sign-in, CredentialStore (keyring / memory)
 ├── calendar-core/            No I/O, no Tauri
 │   ├── model.rs              Account, Calendar, CalendarEvent, EventTiming, Recurrence, SeriesLink, Occurrence, SyncStatus
 │   ├── timing.rs             Instants for zoned/floating/all-day timings, DST-gap/overlap resolution, validation
@@ -55,7 +58,8 @@ None of the engine crates depend on Tauri (`cargo tree -p calendar-sync | grep t
 
 Dependency direction:
 
-- `calendar-sync` → `calendar-caldav` → `calendar-provider-api`
+- `calendar-sync` → `calendar-caldav` / `calendar-google` / `calendar-microsoft` → `calendar-provider-api`
+- `calendar-google`, `calendar-microsoft` → `calendar-oauth`, and → `calendar-ical` (Google reuses its recurrence reading)
 - `calendar-sync` → `calendar-ical` → `calendar-core`
 - `calendar-sync` → `calendar-storage` → `calendar-core`
 
@@ -179,12 +183,6 @@ Each decodes its arguments and calls one storage method. Errors reach the UI as 
 
 The database opens in `setup`. If it can't be opened, the app still starts and shows the reason. Benchmark runs (`UC_BENCH=1`) use a temporary database, and `UC_DATA_DIR` overrides the location for testing.
 
-The capability file grants only `core:default`. The CSP restricts everything to `self`, plus inline styles for SVAR.
+The capability file grants only `core:default` and the window controls; the opener plugin, which opens the browser for OAuth sign-in, is called from Rust only. The CSP restricts everything to `self`, plus inline styles for SVAR.
 
 The sync engine runs on Tauri's Tokio runtime. Progress reaches the UI as `sync-event` events: `syncing`, `synced` (with a `changed` flag) and `failed` (with an `offline` flag).
-
-## Planned crates (Milestone 4+)
-
-| Crate | Responsibility |
-|---|---|
-| `calendar-google`, `calendar-microsoft` | Provider adapters mapping their JSON APIs to calendar objects |

@@ -124,6 +124,31 @@ export async function addCaldavAccount(serverUrl: string, username: string, pass
   return invoke<string>("add_caldav_account", { serverUrl, username, password });
 }
 
+/** OAuth client ID built into this app for a provider, if any (never a secret). */
+export async function oauthClientId(provider: "google" | "microsoft"): Promise<string | null> {
+  return invoke<string | null>("oauth_client_id", { provider });
+}
+
+/** Signs in to Microsoft in the system browser; resolves to the new account id. */
+export async function addMicrosoftAccount(clientId: string): Promise<string> {
+  return invoke<string>("add_microsoft_account", { clientId });
+}
+
+/** Signs in to Google in the system browser; resolves to the new account id. */
+export async function addGoogleAccount(clientId: string, clientSecret: string | null): Promise<string> {
+  return invoke<string>("add_google_account", { clientId, clientSecret });
+}
+
+/** Renews an expired or revoked sign-in. */
+export async function signInAgain(accountId: string): Promise<void> {
+  await invoke("sign_in_again", { accountId });
+}
+
+/** Stops an account setup that is still connecting. */
+export async function cancelAddAccount(): Promise<void> {
+  await invoke("cancel_add_account");
+}
+
 export async function removeAccount(accountId: string): Promise<void> {
   await invoke("remove_account", { accountId });
 }

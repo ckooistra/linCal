@@ -55,6 +55,9 @@ struct Fake(Arc<Server>);
 
 #[async_trait]
 impl CalendarProvider for Fake {
+    fn codec(&self) -> Arc<dyn calendar_provider_api::ObjectCodec> {
+        Arc::new(calendar_caldav::ICalendarCodec)
+    }
     async fn list_calendars(&self) -> ProviderResult<Vec<RemoteCalendar>> {
         self.0.check()?;
         Ok(vec![RemoteCalendar {
@@ -85,7 +88,7 @@ impl CalendarProvider for Fake {
                 .map(|(h, (e, i))| RemoteObject {
                     href: h.clone(),
                     etag: Some(e.clone()),
-                    ical: i.clone(),
+                    data: i.clone(),
                 })
                 .collect(),
             deleted: known
@@ -127,6 +130,7 @@ impl CalendarProvider for Fake {
         let etag = self.0.objects.lock().unwrap()[href].0.clone();
         Ok(WriteResult {
             href: href.into(),
+            data: None,
             etag: (!*self.0.no_etag.lock().unwrap()).then_some(etag),
         })
     }
@@ -141,7 +145,7 @@ impl CalendarProvider for Fake {
             .map(|(e, i)| RemoteObject {
                 href: href.into(),
                 etag: Some(e.clone()),
-                ical: i.clone(),
+                data: i.clone(),
             }))
     }
     async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()> {

@@ -22,7 +22,11 @@
 | `url` | 2.x | MIT OR Apache-2.0 | URL handling |
 | `async-trait` | 0.1 | MIT OR Apache-2.0 | Object-safe async provider trait |
 | `keyring` (zbus Secret Service store) | 4.2 | MIT OR Apache-2.0 (`zbus`: MIT) | OS credential storage |
-| Dev: `wiremock` | 0.6 | MIT/Apache-2.0 | Mock CalDAV server in tests |
+| `tauri-plugin-opener` | 2.7 | Apache-2.0 OR MIT | Opens the system browser for OAuth sign-in (called from Rust only; no frontend permission). Pulls in `open` 5.4, `is-wsl`, `is-docker` (MIT) |
+| `sha2` | 0.10 | MIT OR Apache-2.0 | PKCE S256 code challenge (already in the tree via other crates) |
+| `base64` | 0.21 | MIT OR Apache-2.0 | PKCE / state encoding (already in the tree) |
+| `getrandom` | 0.2 | MIT OR Apache-2.0 | OS randomness for PKCE verifiers and OAuth state (already in the tree) |
+| `wiremock` (dev, and the optional `testing` feature of `calendar-google` / `calendar-microsoft`) | 0.6 | MIT/Apache-2.0 | Mock CalDAV server and stateful Google/Graph fakes in tests; never in release builds |
 | Dev tool (not shipped): Radicale | 3.9 | GPL-3.0 | Local CalDAV server for end-to-end tests (`scripts/dev-radicale.sh`) |
 | Dev: `svelte` 5.57, `vite` 8.3, `@sveltejs/vite-plugin-svelte` 7.3, `typescript` 6.0, `svelte-check` 4.7, `vitest` 5.0, `jsdom` 30, `@testing-library/svelte` 5.4, `@tauri-apps/cli` 2.12 | | MIT / Apache-2.0 | Build and test tooling |
 

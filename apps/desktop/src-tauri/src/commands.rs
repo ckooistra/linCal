@@ -17,6 +17,8 @@ use tauri::State;
 pub struct Sync {
     pub engine: Arc<SyncEngine>,
     pub scheduler: SchedulerHandle,
+    /// Cancels the account setup in progress, if any.
+    pub adding: std::sync::Mutex<Option<Arc<calendar_sync::CancelSignal>>>,
 }
 
 /// Database handle (or why it could not be opened) and the sync engine.
@@ -64,6 +66,11 @@ impl From<SyncError> for CommandError {
             SyncError::Config(_) => "invalid",
             SyncError::TimedOut => "offline",
             SyncError::Task => "internal",
+            SyncError::Cancelled => "cancelled",
+            SyncError::SignIn(calendar_oauth_error) => match calendar_oauth_error {
+                calendar_sync::OAuthError::Cancelled => "cancelled",
+                _ => "sign-in",
+            },
         };
         Self {
             code,
@@ -297,12 +304,124 @@ pub async fn add_caldav_account(
             message: "Enter a user name and password.".into(),
         });
     }
-    let id = sync
+    let cancel = Arc::new(calendar_sync::CancelSignal::new());
+    *sync.adding.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&cancel));
+    let result = sync
         .engine
-        .add_caldav_account(&server_url, username.trim(), &password)
-        .await?;
+        .add_caldav_account_cancellable(&server_url, username.trim(), &password, &cancel)
+        .await;
+    sync.adding.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let id = result?;
     sync.scheduler.trigger();
     Ok(id)
+}
+
+/// OAuth client ids built into this binary by its distributor
+/// (`UC_GOOGLE_CLIENT_ID` / `UC_MICROSOFT_CLIENT_ID` at build time), if any.
+/// Client ids are not secrets; no client secret is ever built in.
+const BUILT_IN_GOOGLE_CLIENT_ID: Option<&str> = option_env!("UC_GOOGLE_CLIENT_ID");
+const BUILT_IN_MICROSOFT_CLIENT_ID: Option<&str> = option_env!("UC_MICROSOFT_CLIENT_ID");
+
+/// The built-in client id for "google" or "microsoft", if any.
+#[tauri::command]
+pub fn oauth_client_id(provider: String) -> Option<String> {
+    match provider.as_str() {
+        "google" => BUILT_IN_GOOGLE_CLIENT_ID,
+        "microsoft" => BUILT_IN_MICROSOFT_CLIENT_ID,
+        _ => None,
+    }
+    .filter(|id| !id.is_empty())
+    .map(str::to_owned)
+}
+
+fn browser(app: &tauri::AppHandle) -> calendar_sync::BrowserOpener {
+    let app = app.clone();
+    Arc::new(move |url: &str| {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .open_url(url, None::<&str>)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Starts a cancellable account operation (one at a time).
+fn begin_adding(sync: &Sync) -> Arc<calendar_sync::CancelSignal> {
+    let cancel = Arc::new(calendar_sync::CancelSignal::new());
+    *sync.adding.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&cancel));
+    cancel
+}
+
+/// Signs in to Google in the system browser and adds the account.
+#[tauri::command]
+pub async fn add_google_account(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    client_id: String,
+    client_secret: Option<String>,
+) -> CommandResult<String> {
+    let sync = state.sync()?;
+    let cancel = begin_adding(sync);
+    let result = sync
+        .engine
+        .add_google_account(&client_id, client_secret.as_deref(), browser(&app), &cancel)
+        .await;
+    sync.adding.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let id = result?;
+    sync.scheduler.trigger();
+    Ok(id)
+}
+
+/// Signs in to Microsoft in the system browser and adds the account.
+#[tauri::command]
+pub async fn add_microsoft_account(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    client_id: String,
+) -> CommandResult<String> {
+    let sync = state.sync()?;
+    let cancel = begin_adding(sync);
+    let result = sync
+        .engine
+        .add_microsoft_account(&client_id, browser(&app), &cancel)
+        .await;
+    sync.adding.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let id = result?;
+    sync.scheduler.trigger();
+    Ok(id)
+}
+
+/// Renews an expired or revoked OAuth sign-in.
+#[tauri::command]
+pub async fn sign_in_again(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+) -> CommandResult<()> {
+    let sync = state.sync()?;
+    let cancel = begin_adding(sync);
+    let result = sync
+        .engine
+        .sign_in_again(&account_id, browser(&app), &cancel)
+        .await;
+    sync.adding.lock().unwrap_or_else(|e| e.into_inner()).take();
+    result?;
+    sync.scheduler.trigger();
+    Ok(())
+}
+
+/// Stops an account setup that is still connecting.
+#[tauri::command]
+pub async fn cancel_add_account(state: State<'_, AppState>) -> CommandResult<()> {
+    if let Some(cancel) = state
+        .sync()?
+        .adding
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
+        cancel.notify_one();
+    }
+    Ok(())
 }
 
 #[tauri::command]
