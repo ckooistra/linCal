@@ -34,6 +34,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 ### Calendar
 
 - Tauri 2 desktop shell with a Svelte 5 + TypeScript (strict) + Vite frontend.
+- Week and day views show the full day (opening at 07:00) or, with the **Work hours / 24 h** toggle, just 08:00–18:00. The choice is remembered.
 - Month, week and day views powered by the MIT-licensed [SVAR Svelte Calendar](https://github.com/svar-widgets/calendar), kept behind an adapter so it can be replaced.
 - Multiple simulated accounts and calendars, including read-only ones. Each calendar has a colour picker and a visibility toggle.
 - Event creation and editing (click, drag-to-create, or **N**), drag/resize to move events, and timed and all-day events.
@@ -54,6 +55,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   | `N` | New event |
   | `M` / `W` / `D` | Month / week / day view |
   | `J` / `K` | Next / previous |
+  | `H` | Week/day: toggle working hours (08–18) / full day |
   | `Ctrl+F` | Search |
   | `Esc` | Close dialog |
   | `Ctrl+Shift+P` | Toggle performance panel |

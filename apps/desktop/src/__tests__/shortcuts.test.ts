@@ -13,6 +13,7 @@ describe("resolveShortcut", () => {
     ["w", "view-week"],
     ["d", "view-day"],
     ["T", "today"],
+    ["h", "toggle-hours"],
   ])("maps %s to %s", (k, action) => {
     expect(resolveShortcut(key(k))).toBe(action);
   });

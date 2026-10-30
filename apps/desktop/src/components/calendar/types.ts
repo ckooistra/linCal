@@ -26,3 +26,15 @@ export interface MoveRequest {
   id: EventId;
   timing: EventTiming;
 }
+
+/** Time range of the week/day grid. */
+export type DayHours = "work" | "full";
+
+export const DAY_HOURS: Record<DayHours, { startHour: number; endHour: number }> = {
+  work: { startHour: 8, endHour: 18 },
+  full: { startHour: 0, endHour: 24 },
+};
+
+export function parseDayHours(value: unknown): DayHours {
+  return value === "work" ? "work" : "full";
+}

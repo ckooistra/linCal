@@ -6,7 +6,9 @@
     CalendarViewState,
     EditorRequest,
     MoveRequest,
+    DayHours,
   } from "./components/calendar/types";
+  import { parseDayHours } from "./components/calendar/types";
   import AddAccountDialog from "./components/AddAccountDialog.svelte";
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
   import EventEditor from "./components/EventEditor.svelte";
@@ -237,6 +239,16 @@
     void backend.saveSetting("systemTitleBar", on);
   }
 
+  // Week/day grid: working hours or the full day (remembered).
+  let dayHours = $state<DayHours>(parseDayHours(initialSettings.dayHours));
+  function setDayHours(hours: DayHours) {
+    if (hours === dayHours) return;
+    void measureInteraction("toggle-hours", () => {
+      dayHours = hours;
+    });
+    void backend.saveSetting("dayHours", hours);
+  }
+
   function setThemePreference(preference: ThemePreference) {
     themePreference = preference;
     void backend.saveSetting("theme", preference);
@@ -342,6 +354,9 @@
         return;
       case "toggle-perf":
         perfOpen = !perfOpen;
+        return;
+      case "toggle-hours":
+        if (viewState.view !== "month") setDayHours(dayHours === "work" ? "full" : "work");
         return;
     }
   }
@@ -528,6 +543,8 @@
       view={viewState.view}
       loading={store.loading}
       search={searchText}
+      hours={dayHours}
+      onhours={setDayHours}
       bind:searchInput
       onnavigate={navigate}
       onview={setView}
@@ -542,6 +559,7 @@
         initialView="month"
         initialDate={new Date()}
         search={searchQuery}
+        hours={dayHours}
         onready={(c) => (controller = c)}
         onstatechange={(s) => (viewState = s)}
         oneditor={(request) => void measureInteraction("open-editor", () => openEditor(request))}

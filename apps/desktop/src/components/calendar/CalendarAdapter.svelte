@@ -26,7 +26,14 @@
     toSvarEvent,
     type SvarEvent,
   } from "./svarMapping";
-  import type { CalendarViewController, CalendarViewState, EditorRequest, MoveRequest } from "./types";
+  import {
+    DAY_HOURS,
+    type CalendarViewController,
+    type CalendarViewState,
+    type DayHours,
+    type EditorRequest,
+    type MoveRequest,
+  } from "./types";
 
   interface Props {
     store: EventStore;
@@ -36,6 +43,8 @@
     initialDate: Date;
     /** Case-insensitive title filter; empty shows everything. */
     search: string;
+    /** Week/day time grid: working hours only, or the whole day. */
+    hours: DayHours;
     onready: (controller: CalendarViewController) => void;
     onstatechange: (state: CalendarViewState) => void;
     oneditor: (request: EditorRequest) => void;
@@ -50,6 +59,7 @@
     initialView,
     initialDate,
     search,
+    hours,
     onready,
     onstatechange,
     oneditor,
@@ -57,10 +67,35 @@
     onreject,
   }: Props = $props();
 
-  // Snapshot initial props: SVAR re-initialises if these ever change.
-  const startView = untrack(() => initialView);
-  const startDate = untrack(() => initialDate);
   const noEvents: SvarEvent[] = [];
+
+  /** Hour shown at the top when week/day view opens in full-day mode. */
+  const MORNING_HOUR = 7;
+  const viewsFor = (h: DayHours) => {
+    const sections = { timeGrid: { yScale: { ...DAY_HOURS[h], ui: { minUnitHeight: 60 } } } };
+    return [{ id: "day", sections }, { id: "week", sections }, "month"];
+  };
+  // SVAR reads its view configuration only when created, so a change of
+  // hours re-creates it (keyed below) at the current view and date.
+  const views = $derived(viewsFor(hours));
+  // Where the current SVAR instance is; a re-created instance opens here.
+  // Deliberately not reactive: it is only read when SVAR is (re)created.
+  const last: { view: CalendarViewKind; date: Date } = untrack(() => ({ view: initialView, date: initialDate }));
+  /** Bumped per SVAR instance so filters are re-applied to a new one. */
+  let instance = $state(0);
+  let root: HTMLDivElement;
+
+  /** Scrolls the time grid so MORNING_HOUR is at the top (full-day mode). */
+  function scrollToMorning(): void {
+    if (untrack(() => hours) !== "full") return;
+    const scroller = root?.querySelector<HTMLElement>(".wx-sections");
+    const sections = scroller?.querySelectorAll<HTMLElement>(".wx-section");
+    const grid = sections?.[sections.length - 1];
+    if (!scroller || !grid) return;
+    const header = scroller.querySelector<HTMLElement>(".wx-x-headers-row")?.offsetHeight ?? 0;
+    const gridTop = grid.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+    scroller.scrollTop = Math.max(0, gridTop + (grid.offsetHeight * MORNING_HOUR) / 24 - header);
+  }
 
   /** Marks actions issued by this adapter so the intercepts let them through. */
   const INTERNAL = Symbol("uc-internal");
@@ -70,7 +105,9 @@
   let visibleRange: DateRange | null = null;
   let providedWindow: DateRange | null = null;
   let wantedWindow: DateRange | null = null;
-  const unsubscribers: (() => void)[] = [];
+  /** Subscriptions to the current SVAR instance's state. */
+  let unsubscribers: (() => void)[] = [];
+  const unsubscribeStore = untrack(() => store).subscribe((change) => applyChange(change));
 
   const colorCss = $derived(calendarColorCss(calendars.calendars));
 
@@ -206,10 +243,14 @@
     });
   }
 
-  function mount(instance: CalendarInstanceApi): void {
-    init(instance);
-    const state = instance.getReactiveState();
-    let view: CalendarViewKind = startView;
+  function mount(svar: CalendarInstanceApi): void {
+    for (const unsubscribe of unsubscribers) unsubscribe();
+    unsubscribers = [];
+    providedWindow = null;
+    wantedWindow = null;
+    init(svar);
+    const state = svar.getReactiveState();
+    let view: CalendarViewKind = last.view;
     let label = "";
     let range: DateRange = { start: 0, end: 0 };
     const publish = () => onstatechange({ view, label, range });
@@ -218,8 +259,12 @@
       s.subscribe(fn) as unknown as () => void;
     unsubscribers.push(
       watch(state.currentView, (v) => {
-        if (isViewKind(v)) view = v;
+        if (isViewKind(v)) view = last.view = v;
         publish();
+        if (v === "week" || v === "day") {
+          // After SVAR has rendered the new view.
+          requestAnimationFrame(() => requestAnimationFrame(scrollToMorning));
+        }
       }),
       watch(state.rangeLabel, (v) => {
         label = v;
@@ -229,8 +274,14 @@
         range = { start: v.start.getTime(), end: v.end.getTime() };
         publish();
       }),
-      store.subscribe(applyChange),
+      watch(state.currentDate, (v) => {
+        last.date = v;
+      }),
     );
+    if (last.view === "week" || last.view === "day") {
+      requestAnimationFrame(() => requestAnimationFrame(scrollToMorning));
+    }
+    instance++;
     // The initial request-data fires before init(); load the first range now.
     void syncRange(range);
     onready({
@@ -243,6 +294,7 @@
 
   // Visibility and search are SVAR view filters: they only re-run layout.
   $effect(() => {
+    void instance;
     const hidden = calendars.hidden;
     exec("filter-events", {
       tag: "visibility",
@@ -251,6 +303,7 @@
   });
 
   $effect(() => {
+    void instance;
     const query = search.trim().toLowerCase();
     exec("filter-events", {
       tag: "search",
@@ -260,6 +313,7 @@
 
   onDestroy(() => {
     for (const unsubscribe of unsubscribers) unsubscribe();
+    unsubscribeStore();
     api = null;
   });
 
@@ -276,16 +330,19 @@
   <WillowDark fonts={false}>{#snippet children()}{/snippet}</WillowDark>
 </div>
 
-<div class="adapter wx-theme" class:wx-willow-theme={theme === "light"} class:wx-willow-dark-theme={theme === "dark"}>
+<div bind:this={root} class="adapter wx-theme" class:wx-willow-theme={theme === "light"} class:wx-willow-dark-theme={theme === "dark"}>
   {@html `<style>${colorCss}</style>`}
-  <Calendar
-    events={noEvents}
-    view={startView}
-    date={startDate}
-    toolbar={null}
-    {eventCss}
-    init={mount}
-  />
+  {#key hours}
+    <Calendar
+      events={noEvents}
+      view={last.view}
+      date={last.date}
+      toolbar={null}
+      {views}
+      {eventCss}
+      init={mount}
+    />
+  {/key}
 </div>
 
 <style>

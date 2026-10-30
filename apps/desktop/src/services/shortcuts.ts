@@ -7,7 +7,8 @@ export type ShortcutAction =
   | "search"
   | "previous"
   | "next"
-  | "toggle-perf";
+  | "toggle-perf"
+  | "toggle-hours";
 
 /** True when keyboard input is going into a text field and shortcuts must not fire. */
 export function isEditableTarget(target: EventTarget | null): boolean {
@@ -49,6 +50,8 @@ export function resolveShortcut(e: KeyInput): ShortcutAction | null {
       return "next";
     case "k":
       return "previous";
+    case "h":
+      return "toggle-hours";
     default:
       return null;
   }

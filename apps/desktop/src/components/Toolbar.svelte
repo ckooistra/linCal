@@ -1,11 +1,14 @@
 <script lang="ts">
   import type { CalendarViewKind } from "../types/calendar";
+  import type { DayHours } from "./calendar/types";
 
   interface Props {
     label: string;
     view: CalendarViewKind;
     loading: boolean;
     search: string;
+    hours: DayHours;
+    onhours: (hours: DayHours) => void;
     onnavigate: (direction: "previous" | "next" | "today") => void;
     onview: (view: CalendarViewKind) => void;
     onnew: () => void;
@@ -18,6 +21,8 @@
     view,
     loading,
     search,
+    hours,
+    onhours,
     onnavigate,
     onview,
     onnew,
@@ -57,6 +62,15 @@
         }
       }}
     />
+    {#if view !== "month"}
+      <button
+        type="button"
+        class="hours"
+        aria-pressed={hours === "work"}
+        title={hours === "work" ? "Showing working hours (08–18). Show the full day (H)" : "Showing the full day. Show working hours only (H)"}
+        onclick={() => onhours(hours === "work" ? "full" : "work")}>{hours === "work" ? "Work hours" : "24 h"}</button
+      >
+    {/if}
     <div class="segmented" role="group" aria-label="View">
       {#each views as v (v.id)}
         <button
@@ -106,6 +120,9 @@
   }
   .segmented {
     display: flex;
+  }
+  .hours {
+    min-width: 6.5rem;
   }
   .segmented button {
     border-radius: 0;
