@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { modal } from "../services/modal";
 
   interface Props {
     title: string;
@@ -22,6 +23,7 @@
     aria-labelledby="confirm-title"
     aria-describedby="confirm-message"
     tabindex="-1"
+    use:modal
     onkeydown={(e) => {
       if (e.key === "Escape") {
         e.preventDefault();

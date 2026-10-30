@@ -9,6 +9,33 @@ use url::Url;
 
 const MAX_REDIRECTS: usize = 5;
 
+/// Largest response body accepted. Calendar data is text; anything larger
+/// is refused instead of being buffered without bound.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Whether `url` names this machine (where plain HTTP cannot be observed
+/// by others, e.g. a local test server).
+pub fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Credentials may only travel over TLS, except to this machine.
+pub fn check_transport(url: &Url) -> Result<(), ProviderError> {
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback(url) => Ok(()),
+        _ => Err(ProviderError::InvalidResponse(
+            "the server address must use https:// (plain http is only allowed for localhost)"
+                .into(),
+        )),
+    }
+}
+
 pub struct Reply {
     pub status: StatusCode,
     pub headers: HeaderMap,
@@ -45,6 +72,7 @@ pub fn method(name: &str) -> Method {
 
 impl Client {
     pub fn new(server: &Url, username: &str, password: &str) -> Result<Self, ProviderError> {
+        check_transport(server)?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("UniversalCalendar/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
@@ -119,7 +147,18 @@ impl Client {
                 continue;
             }
             let headers = response.headers().clone();
-            let body = response.text().await.map_err(network)?;
+            let mut response = response;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(network)? {
+                if bytes.len() + chunk.len() > MAX_BODY_BYTES {
+                    return Err(ProviderError::InvalidResponse(
+                        "the server response is too large".into(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            // CalDAV and WebDAV bodies are UTF-8 (RFC 4791 §4.1, RFC 4918 §8.1.4).
+            let body = String::from_utf8_lossy(&bytes).into_owned();
             if status.is_success() || ok.contains(&status) {
                 return Ok(Reply {
                     status,

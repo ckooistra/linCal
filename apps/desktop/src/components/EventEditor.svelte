@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import type { Calendar, CalendarEvent, EventDraft, EventTiming } from "../types/calendar";
+  import type { Calendar, CalendarEvent, EventDraft, EventTiming, Resolution } from "../types/calendar";
   import type { SeriesScope } from "../stores/events.svelte";
   import { repeatOptions } from "../services/recurrence";
   import TimeField from "./TimeField.svelte";
@@ -27,7 +27,7 @@
     ondelete: (scope: SeriesScope) => void;
     onclose: () => void;
     /** Resolve a sync conflict or failure for this event. */
-    onresolve?: (keepLocal: boolean) => void;
+    onresolve?: (resolution: Resolution) => void;
   }
 
   let { event, timing, calendars, defaultCalendarId, readOnly, onsave, ondelete, onclose, onresolve }: Props =
@@ -136,11 +136,19 @@
         return "Enter dates as YYYY-MM-DD.";
       }
     }
-    const start = combineDateTime(startDate, startTime);
-    const end = combineDateTime(endDate, endTime);
-    if (!start || !end) return "Enter dates as YYYY-MM-DD and times as HH:MM.";
+    // Fields shown as entered keep the original instant exactly: the form
+    // has minute precision, and a wall time in a DST fall-back hour names
+    // two instants. Only a field the user changed is converted again.
+    const original = untrack(() => event?.timing);
+    const kept = (date: string, time: string, which: "start" | "end"): number | null =>
+      original?.kind === "timed" && !init.allDay && date === init[`${which}Date`] && time === init[`${which}Time`]
+        ? original[which]
+        : null;
+    const start = kept(startDate, startTime, "start") ?? combineDateTime(startDate, startTime)?.getTime();
+    const end = kept(endDate, endTime, "end") ?? combineDateTime(endDate, endTime)?.getTime();
+    if (start == null || end == null) return "Enter dates as YYYY-MM-DD and times as HH:MM.";
     const zone = event?.timing.kind === "timed" ? event.timing.timeZone : localTimeZone();
-    return { kind: "timed", start: start.getTime(), end: end.getTime(), timeZone: zone };
+    return { kind: "timed", start, end, timeZone: zone };
   }
 
   function submit(e: SubmitEvent) {
@@ -212,8 +220,10 @@
               : "Your change could not be saved to the server."}
           </p>
           <div class="banner-actions">
-            <button type="button" onclick={() => onresolve(true)}>{syncIssue === "conflict" ? "Keep mine" : "Try again"}</button>
-            <button type="button" onclick={() => onresolve(false)}>
+            <button type="button" onclick={() => onresolve(syncIssue === "conflict" ? "keep-local" : "retry")}
+              >{syncIssue === "conflict" ? "Keep mine" : "Try again"}</button
+            >
+            <button type="button" onclick={() => onresolve("use-server")}>
               {syncIssue === "conflict" ? "Use server version" : "Discard my change"}
             </button>
           </div>

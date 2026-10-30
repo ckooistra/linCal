@@ -42,12 +42,46 @@ fn invalid(e: impl std::fmt::Display) -> CoreError {
     CoreError::InvalidRecurrence(e.to_string())
 }
 
+/// Whether a recurrence is an RDATE-only set (no RRULE): DTSTART plus the
+/// explicit dates.
+pub fn is_rdate_only(recurrence: &Recurrence) -> bool {
+    recurrence.rrule.trim().is_empty()
+}
+
+/// Days to skip at a time, for rules whose occurrences can be generated
+/// from a later start without changing them: no COUNT (it counts from the
+/// original start), and hourly, daily or weekly frequency, which the rule
+/// engine steps in wall-clock time. Monthly and yearly rules are cheap to
+/// iterate from the start; minutely and secondly ones are not skipped.
+fn skippable_days(rule: &RRule) -> Option<u64> {
+    if rule.get_count().is_some() {
+        return None;
+    }
+    let n = u64::from(rule.get_interval().max(1));
+    match rule.get_freq() {
+        rrule::Frequency::Weekly => Some(7 * n),
+        rrule::Frequency::Daily => Some(n),
+        // Whole days that are a multiple of the interval.
+        rrule::Frequency::Hourly => Some(n / gcd(n, 24)),
+        _ => None,
+    }
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
 /// Builds the rule set for `timing` + `recurrence`. Floating series are
 /// evaluated in `display_tz`; all-day series on UTC midnights (pure dates).
+///
+/// With `from`, the set may start later than the series (by whole rule
+/// periods) when no occurrence before `from` is needed, so old series with
+/// many occurrences are not iterated from their beginning on every query.
 fn prepare(
     timing: &EventTiming,
     recurrence: &Recurrence,
     display_tz: &Tz,
+    from: Option<DateTime<Utc>>,
 ) -> Result<Prepared, CoreError> {
     let (dt_start, kind) = match timing {
         EventTiming::Zoned {
@@ -88,18 +122,55 @@ fn prepare(
                 .with_timezone(&dt_start.timezone()),
         }
     };
+    let mut rdates: Vec<_> = recurrence.rdates.iter().map(to_set_time).collect();
+    let exdates = recurrence.exdates.iter().map(to_set_time).collect();
+    if is_rdate_only(recurrence) {
+        // RFC 5545 §3.8.5.2: DTSTART is the first instance of the set.
+        rdates.push(dt_start);
+        rdates.sort();
+        rdates.dedup();
+        let set = RRuleSet::new(dt_start)
+            .set_rdates(rdates)
+            .set_exdates(exdates);
+        return Ok(Prepared { set, kind });
+    }
     let rule: RRule<Unvalidated> = recurrence.rrule.parse().map_err(invalid)?;
+    // Validation fills in defaults (BYDAY, BYHOUR, ...) from the real start,
+    // so a later set start below generates the same occurrences.
     let rule = rule.validate(dt_start).map_err(invalid)?;
-    let set = RRuleSet::new(dt_start)
+    let mut set_start = dt_start;
+    if let (Some(from), Some(period)) = (from, skippable_days(&rule)) {
+        let local_start = dt_start.naive_local();
+        let target = from.with_timezone(&dt_start.timezone()).naive_local();
+        let gap = (target - local_start).num_days();
+        if gap > 0 {
+            let period = i64::try_from(period).unwrap_or(i64::MAX);
+            let mut skip = gap / period * period;
+            // A skipped-to wall time that does not exist (DST gap): go back.
+            while skip > 0 {
+                let candidate = local_start + Duration::days(skip);
+                if let Some(t) = dt_start
+                    .timezone()
+                    .from_local_datetime(&candidate)
+                    .earliest()
+                {
+                    set_start = t;
+                    break;
+                }
+                skip -= period;
+            }
+        }
+    }
+    let set = RRuleSet::new(set_start)
         .rrule(rule)
-        .set_rdates(recurrence.rdates.iter().map(to_set_time).collect())
-        .set_exdates(recurrence.exdates.iter().map(to_set_time).collect());
+        .set_rdates(rdates)
+        .set_exdates(exdates);
     Ok(Prepared { set, kind })
 }
 
 /// Checks that a recurrence is valid for the given timing.
 pub fn validate(timing: &EventTiming, recurrence: &Recurrence) -> Result<(), CoreError> {
-    prepare(timing, recurrence, &chrono_tz::UTC).map(|_| ())
+    prepare(timing, recurrence, &chrono_tz::UTC, None).map(|_| ())
 }
 
 impl Kind {
@@ -159,7 +230,16 @@ pub fn expand(
             Vec::new()
         });
     };
-    let prepared = prepare(&master.timing, recurrence, display_tz)?;
+    // Occurrences ending after the range start can begin up to their
+    // duration (plus zone offsets) earlier.
+    let bounds = master.timing.index_bounds();
+    let lead = (bounds.end - bounds.start) + Duration::days(2);
+    let prepared = prepare(
+        &master.timing,
+        recurrence,
+        display_tz,
+        Some(range.start - lead),
+    )?;
     let mut result = Vec::new();
     for (i, start) in prepared.set.into_iter().enumerate() {
         if i >= MAX_ITERATIONS {
@@ -199,7 +279,12 @@ pub fn has_occurrence(
     key: &OccurrenceKey,
     display_tz: &Tz,
 ) -> Result<bool, CoreError> {
-    let prepared = prepare(timing, recurrence, display_tz)?;
+    let near = match key {
+        OccurrenceKey::Instant(t) => *t,
+        OccurrenceKey::Floating(t) => t.and_utc(),
+        OccurrenceKey::Date(d) => d.and_hms_opt(0, 0, 0).expect("valid").and_utc(),
+    } - Duration::days(2);
+    let prepared = prepare(timing, recurrence, display_tz, Some(near))?;
     for start in prepared.set.into_iter().take(MAX_ITERATIONS) {
         let (candidate, _) = prepared.kind.occurrence(start);
         if std::mem::discriminant(&candidate) != std::mem::discriminant(key) {
@@ -215,14 +300,41 @@ pub fn has_occurrence(
     Ok(false)
 }
 
+/// How occurrence ids move when a whole series is moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyShift {
+    /// Wall-clock offset: for zoned series in `zone`, so an exception at
+    /// 09:00 stays at the series' local time when the move crosses a DST
+    /// change; for floating and all-day series a plain offset.
+    pub delta: Duration,
+    pub zone: Option<Tz>,
+}
+
+impl KeyShift {
+    pub fn apply(&self, key: &OccurrenceKey) -> OccurrenceKey {
+        match (key, self.zone) {
+            (OccurrenceKey::Instant(t), Some(tz)) => {
+                let local = t.with_timezone(&tz).naive_local() + self.delta;
+                OccurrenceKey::Instant(resolve_local(&tz, local))
+            }
+            _ => key.shifted(self.delta),
+        }
+    }
+
+    /// Whether ids move forward in time (for ordering renames).
+    pub fn is_forward(&self) -> bool {
+        self.delta > Duration::zero()
+    }
+}
+
 /// Result of editing a whole series through one of its occurrences.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Retimed {
     /// New timing of the series master (its first occurrence).
     pub timing: EventTiming,
-    /// How far existing occurrence ids moved; `None` when the timing kind
+    /// How existing occurrence ids move; `None` when the timing kind
     /// changed and old EXDATEs/overrides can no longer be mapped.
-    pub key_shift: Option<Duration>,
+    pub key_shift: Option<KeyShift>,
 }
 
 /// New master timing when the occurrence `key` of a series is given the
@@ -239,15 +351,21 @@ pub fn retime_series(master: &EventTiming, key: &OccurrenceKey, edited: &EventTi
                 time_zone,
             },
         ) => {
-            let delta = *new - *original;
-            let s = *start + delta;
+            // Measured in wall-clock time: moving 09:00 to 10:00 means 10:00
+            // for every occurrence, on either side of a DST change.
+            let local = |t: &DateTime<Utc>| t.with_timezone(time_zone).naive_local();
+            let delta = local(new) - local(original);
+            let s = resolve_local(time_zone, local(start) + delta);
             Some((
                 EventTiming::Zoned {
                     start: s,
                     end: s + (*end - *new),
                     time_zone: *time_zone,
                 },
-                delta,
+                KeyShift {
+                    delta,
+                    zone: Some(*time_zone),
+                },
             ))
         }
         (
@@ -262,7 +380,7 @@ pub fn retime_series(master: &EventTiming, key: &OccurrenceKey, edited: &EventTi
                     start: s,
                     end: s + (*end - *new),
                 },
-                delta,
+                KeyShift { delta, zone: None },
             ))
         }
         (
@@ -280,15 +398,15 @@ pub fn retime_series(master: &EventTiming, key: &OccurrenceKey, edited: &EventTi
                     start_date: s,
                     end_date: s + (*end_date - *new),
                 },
-                delta,
+                KeyShift { delta, zone: None },
             ))
         }
         _ => None,
     };
     match shift {
-        Some((timing, delta)) => Retimed {
+        Some((timing, shift)) => Retimed {
             timing,
-            key_shift: Some(delta),
+            key_shift: Some(shift),
         },
         None => Retimed {
             timing: edited.clone(),
@@ -303,9 +421,11 @@ pub fn index_end(
     timing: &EventTiming,
     recurrence: &Recurrence,
 ) -> Result<Option<DateTime<Utc>>, CoreError> {
-    let prepared = prepare(timing, recurrence, &chrono_tz::UTC)?;
-    let rule = &prepared.set.get_rrule()[0];
-    if rule.get_count().is_none() && rule.get_until().is_none() {
+    let prepared = prepare(timing, recurrence, &chrono_tz::UTC, None)?;
+    if let Some(rule) = prepared.set.get_rrule().first()
+        && rule.get_count().is_none()
+        && rule.get_until().is_none()
+    {
         return Ok(None);
     }
     let result = prepared.set.all(MAX_FINITE_OCCURRENCES);
@@ -574,10 +694,20 @@ mod tests {
         let edited = zoned(local(2026, 6, 8, 10, 30), 60);
         let r = retime_series(&master, &key, &edited);
         assert_eq!(r.timing, zoned(local(2026, 1, 5, 10, 30), 60));
-        assert_eq!(r.key_shift, Some(Duration::hours(1)));
+        let shift = r.key_shift.unwrap();
+        assert_eq!(shift.delta, Duration::hours(1));
         assert_eq!(
-            key.shifted(Duration::hours(1)),
+            shift.apply(&key),
             OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, 8, 10, 30)))
+        );
+        // Wall-clock: an exception on the other side of DST keeps its local time.
+        let march = zoned(local(2026, 3, 25, 9, 0), 60);
+        let first = OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 3, 25, 9, 0)));
+        let r = retime_series(&march, &first, &zoned(local(2026, 3, 24, 9, 0), 60));
+        let excluded = OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 3, 29, 9, 0)));
+        assert_eq!(
+            r.key_shift.unwrap().apply(&excluded),
+            OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 3, 28, 9, 0)))
         );
 
         let all_day = EventTiming::AllDay {
@@ -591,6 +721,84 @@ mod tests {
                 timing: all_day,
                 key_shift: None
             }
+        );
+    }
+
+    /// Keys in `r` when iterating the whole set from the series start.
+    fn keys_without_skipping(e: &CalendarEvent, r: TimeRange) -> Vec<OccurrenceKey> {
+        let prepared = prepare(&e.timing, e.recurrence.as_ref().unwrap(), &BERLIN, None).unwrap();
+        prepared
+            .set
+            .into_iter()
+            .map(|start| prepared.kind.occurrence(start))
+            .take_while(|(_, t)| t.bounds(&BERLIN).start < r.end)
+            .filter(|(_, t)| t.bounds(&BERLIN).end > r.start)
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    #[test]
+    fn skipping_ahead_generates_the_same_occurrences() {
+        for (start, rule) in [
+            (local(2024, 1, 1, 0, 15), "FREQ=HOURLY;INTERVAL=5"),
+            (local(2001, 1, 2, 9, 0), "FREQ=WEEKLY;INTERVAL=3"),
+            (
+                local(2001, 1, 2, 9, 0),
+                "FREQ=WEEKLY;BYDAY=MO,TH;INTERVAL=2",
+            ),
+            (local(2003, 3, 30, 2, 30), "FREQ=DAILY;INTERVAL=3"),
+            (local(2024, 2, 3, 1, 7), "FREQ=HOURLY;INTERVAL=7"),
+            (
+                local(2019, 7, 3, 1, 7),
+                "FREQ=HOURLY;INTERVAL=36;BYMINUTE=0,30",
+            ),
+        ] {
+            let e = series(zoned(start, 30), rule);
+            for r in [
+                range(date(2026, 3, 10), date(2026, 4, 10)),
+                range(date(2026, 10, 5), date(2026, 11, 5)),
+            ] {
+                let skipped: Vec<_> = run(&e, r)
+                    .iter()
+                    .map(|o| o.recurrence_id.unwrap())
+                    .collect();
+                assert!(!skipped.is_empty(), "{rule}");
+                assert_eq!(skipped, keys_without_skipping(&e, r), "{rule}");
+            }
+        }
+    }
+
+    #[test]
+    fn old_high_frequency_series_reach_the_requested_range() {
+        // Hourly since 2010: far more than MAX_ITERATIONS slots before 2026.
+        let e = series(zoned(local(2010, 1, 1, 0, 15), 30), "FREQ=HOURLY");
+        let occ = run(&e, range(date(2026, 6, 1), date(2026, 6, 2)));
+        assert_eq!(occ.len(), 24);
+        let rec = e.recurrence.as_ref().unwrap();
+        assert!(has_occurrence(&e.timing, rec, &occ[5].recurrence_id.unwrap(), &BERLIN).unwrap());
+    }
+
+    #[test]
+    fn rdate_only_sets_include_the_start_and_extra_dates() {
+        let mut e = series(zoned(local(2026, 6, 10, 9, 0), 30), "");
+        e.recurrence.as_mut().unwrap().rdates = vec![
+            OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 5, 1, 9, 0))),
+            OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, 11, 14, 0))),
+        ];
+        let occ = run(&e, range(date(2026, 4, 1), date(2026, 7, 1)));
+        assert_eq!(
+            starts(&occ),
+            vec![
+                local(2026, 5, 1, 9, 0),
+                local(2026, 6, 10, 9, 0),
+                local(2026, 6, 11, 14, 0)
+            ]
+        );
+        let rec = e.recurrence.as_ref().unwrap();
+        assert!(validate(&e.timing, rec).is_ok());
+        assert_eq!(
+            index_end(&e.timing, rec).unwrap(),
+            Some(resolve_local(&BERLIN, local(2026, 6, 11, 14, 30)))
         );
     }
 

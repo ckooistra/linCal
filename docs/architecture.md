@@ -130,7 +130,7 @@ Over the wire, zoned timings are `{kind: "timed", start, end, timeZone}` in epoc
 
 ### Schema
 
-The schema is defined in `crates/calendar-storage/migrations/` and has four tables: `accounts`, `calendars`, `events` and `application_settings`.
+The schema is defined in `crates/calendar-storage/migrations/`. Migration 1 creates `accounts`, `calendars`, `events` and `application_settings`; migrations 2 and 3 add the sync tables and columns listed below.
 
 The `events` table holds one-off events, series masters (`rrule`, `rdates`, `exdates`) and overrides (`series_id`, `recurrence_id`, unique together).
 
@@ -143,6 +143,12 @@ Migration 2 (Milestone 3) adds:
 - `events.remote_href`;
 - `remote_objects`: the last server copy and ETag of every object;
 - `pending_operations`: the durable queue, at most one operation per object, with a generation counter.
+
+Migration 3 (sync integrity) adds:
+
+- `remote_objects.presence`, so an object's existence on the server is tracked separately from its version;
+- `import_error` and `import_warnings`, recording objects that couldn't be read or were read only approximately;
+- `events.base_recurrence_id`, so a moved override is matched to its component in the server copy.
 
 ### Widget adapter
 

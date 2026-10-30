@@ -14,6 +14,7 @@
   import EventEditor from "./components/EventEditor.svelte";
   import PerfPanel from "./components/PerfPanel.svelte";
   import Sidebar from "./components/Sidebar.svelte";
+  import SyncProblemsDialog from "./components/SyncProblemsDialog.svelte";
   import Toasts from "./components/Toasts.svelte";
   import TitleBar from "./components/TitleBar.svelte";
   import Toolbar from "./components/Toolbar.svelte";
@@ -27,7 +28,15 @@
   import { CalendarsStore } from "./stores/calendars.svelte";
   import { EventStore, type SeriesScope } from "./stores/events.svelte";
   import { Notifications } from "./stores/notifications.svelte";
-  import type { CalendarEvent, CalendarViewKind, EventDraft, EventTiming, SyncEvent } from "./types/calendar";
+  import type {
+    CalendarEvent,
+    CalendarViewKind,
+    EventDraft,
+    EventTiming,
+    Resolution,
+    SyncEvent,
+    SyncProblem,
+  } from "./types/calendar";
 
   const BENCH_ANCHOR = "2026-06-15";
   const SEARCH_DEBOUNCE_MS = 150;
@@ -143,20 +152,47 @@
       case "failed":
         calendars.setSyncing(event.accountId, false);
         refreshStatuses();
+        // A pass can upload or fail some changes before it stops: refresh
+        // the sync status shown on events.
+        store.invalidate();
         break;
     }
+    if (problems !== null) void loadProblems();
   }
 
-  async function resolveFromEditor(keepLocal: boolean): Promise<void> {
+  async function resolveFromEditor(resolution: Resolution): Promise<void> {
     const event = editor?.event;
     if (!event) return;
     editor = null;
     try {
-      await backend.resolveConflict(event.id, keepLocal);
+      await backend.resolveConflict(event.id, resolution);
       store.invalidate();
       refreshStatuses();
     } catch (error) {
       notifications.push(error instanceof Error ? error.message : "The conflict could not be resolved.");
+    }
+  }
+
+  /** Failed/conflicting changes while the review dialog is open (null = closed). */
+  let problems = $state<SyncProblem[] | null>(null);
+  let reviewing = $state(false);
+
+  async function loadProblems(): Promise<void> {
+    try {
+      problems = await backend.syncProblems();
+    } catch (error) {
+      notifications.push(error instanceof Error ? error.message : "Sync problems could not be loaded.");
+    }
+  }
+
+  async function resolveProblem(problem: SyncProblem, resolution: Resolution): Promise<void> {
+    try {
+      await backend.resolveSyncProblem(problem.calendarId, problem.href, resolution);
+      store.invalidate();
+      refreshStatuses();
+      await loadProblems();
+    } catch (error) {
+      notifications.push(error instanceof Error ? error.message : "The change could not be resolved.");
     }
   }
 
@@ -523,6 +559,11 @@
     onaddaccount={backend.kind === "desktop" ? () => (addingAccount = true) : undefined}
     onremoveaccount={(id) => (removing = { id, name: calendars.accounts.find((a) => a.id === id)?.name ?? id })}
     onsyncnow={() => void backend.syncNow()}
+    onreviewproblems={() => {
+      reviewing = true;
+      problems = null;
+      void loadProblems();
+    }}
     ontogglecalendar={(id) => void measureInteraction("visibility-toggle", () => toggleCalendar(id))}
     oncolor={setCalendarColor}
     ondataset={(size) => void measureInteraction("dataset-load", () => switchDataset(size))}
@@ -583,13 +624,24 @@
       onsave={saveEditor}
       ondelete={deleteFromEditor}
       onclose={closeEditor}
-      onresolve={backend.kind === "desktop" ? (keep) => void resolveFromEditor(keep) : undefined}
+      onresolve={backend.kind === "desktop" ? (resolution) => void resolveFromEditor(resolution) : undefined}
     />
   {/key}
 {/if}
 
 {#if addingAccount}
   <AddAccountDialog onsubmit={addAccount} onclose={() => (addingAccount = false)} />
+{/if}
+
+{#if reviewing}
+  <SyncProblemsDialog
+    {problems}
+    onresolve={(p, r) => void resolveProblem(p, r)}
+    onclose={() => {
+      reviewing = false;
+      problems = null;
+    }}
+  />
 {/if}
 
 {#if removing}
@@ -646,12 +698,11 @@
     color: var(--uc-text-muted);
     border-top: 1px solid var(--uc-border);
   }
+  /* Narrow windows keep the sidebar (accounts, calendars, settings have no
+     other home), just narrower. */
   @media (max-width: 720px) {
     .app {
-      grid-template-columns: 1fr;
-    }
-    .app > :global(.sidebar) {
-      display: none;
+      grid-template-columns: 11rem 1fr;
     }
   }
 </style>

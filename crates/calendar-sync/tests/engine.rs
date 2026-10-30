@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::Notify;
+
 use async_trait::async_trait;
 use calendar_core::timing::resolve_local;
 use calendar_core::{EventDraft, EventTiming, SyncStatus, TimeRange};
@@ -10,7 +12,7 @@ use calendar_provider_api::{
     CalendarProvider, Capabilities, ChangeSet, Precondition, ProviderError, ProviderResult,
     RemoteCalendar, RemoteObject, WriteResult,
 };
-use calendar_storage::{RemoteCalendarSpec, Store};
+use calendar_storage::{RemoteCalendarSpec, Resolution, Store};
 use calendar_sync::{CredentialStore, MemoryCredentials, SyncEngine, SyncEvent};
 use chrono::{Duration, NaiveDate};
 
@@ -22,6 +24,10 @@ struct Server {
     objects: Mutex<HashMap<String, (String, String)>>,
     version: Mutex<u64>,
     fail: Mutex<Option<ProviderError>>,
+    /// Answer writes without an ETag (allowed by RFC 4791 §5.3.4).
+    no_etag: Mutex<bool>,
+    /// Pause writes: signal the first Notify on entry, wait for the second.
+    gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
 }
 
 impl Server {
@@ -97,6 +103,11 @@ impl CalendarProvider for Fake {
         pre: &Precondition,
     ) -> ProviderResult<WriteResult> {
         self.0.check()?;
+        let gate = self.0.gate.lock().unwrap().clone();
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
         let current = self
             .0
             .objects
@@ -116,8 +127,22 @@ impl CalendarProvider for Fake {
         let etag = self.0.objects.lock().unwrap()[href].0.clone();
         Ok(WriteResult {
             href: href.into(),
-            etag: Some(etag),
+            etag: (!*self.0.no_etag.lock().unwrap()).then_some(etag),
         })
+    }
+    async fn get_object(&self, href: &str) -> ProviderResult<Option<RemoteObject>> {
+        self.0.check()?;
+        Ok(self
+            .0
+            .objects
+            .lock()
+            .unwrap()
+            .get(href)
+            .map(|(e, i)| RemoteObject {
+                href: href.into(),
+                etag: Some(e.clone()),
+                ical: i.clone(),
+            }))
     }
     async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()> {
         self.0.check()?;
@@ -344,7 +369,7 @@ async fn concurrent_edits_become_conflicts_not_overwrites() {
 
     // Keep mine → forced upload.
     e.store
-        .resolve_operation(&e.calendar_id, &href, true)
+        .resolve_operation(&e.calendar_id, &href, Resolution::KeepLocal)
         .await
         .unwrap();
     e.engine.sync_account("acct").await.unwrap();
@@ -365,7 +390,7 @@ async fn concurrent_edits_become_conflicts_not_overwrites() {
     e.server.put_raw(&href, &ics("remote", "Server wins"));
     e.engine.sync_account("acct").await.unwrap();
     e.store
-        .resolve_operation(&e.calendar_id, &href, false)
+        .resolve_operation(&e.calendar_id, &href, Resolution::UseServer)
         .await
         .unwrap();
     e.engine.sync_account("acct").await.unwrap();
@@ -414,7 +439,11 @@ async fn offline_changes_are_kept_and_retried() {
         "not due yet"
     );
     e.store
-        .resolve_operation(&e.calendar_id, &format!("{CAL}local-1.ics"), true)
+        .resolve_operation(
+            &e.calendar_id,
+            &format!("{CAL}local-1.ics"),
+            Resolution::KeepLocal,
+        )
         .await
         .unwrap();
     assert_eq!(e.engine.sync_account("acct").await.unwrap().uploaded, 1);
@@ -476,4 +505,153 @@ fn backoff_grows_and_is_capped() {
     assert_eq!(calendar_sync::backoff(0).as_secs(), 30);
     assert_eq!(calendar_sync::backoff(1).as_secs(), 60);
     assert_eq!(calendar_sync::backoff(50).as_secs(), 3600);
+}
+
+// --- audit regressions -------------------------------------------------------
+
+/// F01: a delete made while the first upload is in flight reaches the server.
+#[tokio::test]
+async fn deleting_during_the_first_upload_deletes_on_the_server() {
+    let e = env().await;
+    e.store
+        .create_event("local-1", draft(&e.calendar_id, "Short-lived"))
+        .await
+        .unwrap();
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    *e.server.gate.lock().unwrap() = Some((Arc::clone(&entered), Arc::clone(&release)));
+    let user = async {
+        entered.notified().await;
+        e.store.delete_event("local-1").await.unwrap();
+        *e.server.gate.lock().unwrap() = None;
+        release.notify_one();
+    };
+    let (first, ()) = tokio::join!(e.engine.sync_account("acct"), user);
+    first.unwrap();
+    // The PUT landed; the queued delete follows on the next pass.
+    e.engine.sync_account("acct").await.unwrap();
+    assert!(e.server.objects.lock().unwrap().is_empty());
+    assert!(
+        e.store
+            .due_operations("acct", i64::MAX)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// F11: after a write answered without an ETag, the next edit is checked
+/// against the server's real version instead of being sent as a create.
+#[tokio::test]
+async fn writes_without_etags_are_followed_by_a_version_check() {
+    let e = env().await;
+    *e.server.no_etag.lock().unwrap() = true;
+    e.store
+        .create_event("local-1", draft(&e.calendar_id, "v1"))
+        .await
+        .unwrap();
+    assert_eq!(e.engine.sync_account("acct").await.unwrap().uploaded, 1);
+    e.store
+        .update_event("local-1", draft(&e.calendar_id, "v2"))
+        .await
+        .unwrap();
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!((report.uploaded, report.conflicts), (1, 0));
+    assert!(
+        e.server.objects.lock().unwrap()[&format!("{CAL}local-1.ics")]
+            .1
+            .contains("SUMMARY:v2")
+    );
+    assert_eq!(
+        titles(&e.store).await,
+        vec![("v2".into(), SyncStatus::Synced)]
+    );
+}
+
+/// F06: hostile data fails one object, not the pass or the process.
+#[tokio::test]
+async fn malformed_objects_do_not_stop_synchronization() {
+    let e = env().await;
+    e.server.put_raw(
+        &format!("{CAL}bad.ics"),
+        "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:bad\r\nDTSTART:20260610T090000Z\r\nDURATION:P999999999999D\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+    );
+    e.server
+        .put_raw(&format!("{CAL}good.ics"), &ics("good", "Good"));
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!((report.downloaded, report.failed_objects), (1, 1));
+    assert_eq!(
+        titles(&e.store).await,
+        vec![("Good".into(), SyncStatus::Synced)]
+    );
+    assert_eq!(e.store.import_failures("acct").await.unwrap().len(), 1);
+    // Not downloaded again until it changes.
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(report.failed_objects, 0);
+}
+
+/// F15: a failing account backs off instead of retrying every second.
+#[tokio::test]
+async fn failing_accounts_back_off() {
+    let Env {
+        store,
+        server,
+        engine,
+        events,
+        calendar_id,
+    } = env().await;
+    let engine = Arc::new(engine);
+    store
+        .create_event("local-1", draft(&calendar_id, "Waiting"))
+        .await
+        .unwrap();
+    *server.fail.lock().unwrap() = Some(ProviderError::Unauthorized);
+    engine.sync_all(true).await.unwrap();
+    let passes = || {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, SyncEvent::Syncing { .. }))
+            .count()
+    };
+    assert_eq!(passes(), 1);
+    // A timed pass skips the account; the next retry is not "now".
+    engine.sync_all(false).await.unwrap();
+    assert_eq!(passes(), 1);
+    let next = engine.next_retry_ms().await.unwrap().unwrap();
+    assert!(next > chrono::Utc::now().timestamp_millis() + 20_000);
+    // A user-requested pass still tries, and success clears the backoff.
+    *server.fail.lock().unwrap() = None;
+    engine.sync_all(true).await.unwrap();
+    assert_eq!(passes(), 2);
+    assert!(engine.next_retry_ms().await.unwrap().is_none());
+}
+
+/// F10: a conflicting deletion is listed and can be resolved without an event.
+#[tokio::test]
+async fn conflicting_deletions_are_listed_and_resolvable() {
+    let e = env().await;
+    let href = format!("{CAL}remote.ics");
+    e.server.put_raw(&href, &ics("remote", "Shared"));
+    e.engine.sync_account("acct").await.unwrap();
+    e.store
+        .delete_event(&format!("{}/remote", e.calendar_id))
+        .await
+        .unwrap();
+    // Someone else edits it before our delete arrives.
+    e.server.put_raw(&href, &ics("remote", "Shared, edited"));
+    assert_eq!(e.engine.sync_account("acct").await.unwrap().conflicts, 1);
+    let problems = e.engine.problems().await.unwrap();
+    assert_eq!(problems.len(), 1);
+    assert!(problems[0].deletion && problems[0].conflict);
+    assert_eq!(problems[0].title, "Shared");
+    e.engine
+        .resolve(&e.calendar_id, &href, Resolution::UseServer)
+        .await
+        .unwrap();
+    e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(
+        titles(&e.store).await,
+        vec![("Shared, edited".into(), SyncStatus::Synced)]
+    );
 }

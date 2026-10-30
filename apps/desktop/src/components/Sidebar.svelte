@@ -23,6 +23,8 @@
     onaddaccount?: () => void;
     onremoveaccount?: (accountId: string) => void;
     onsyncnow?: () => void;
+    /** Opens the list of failed and conflicting changes. */
+    onreviewproblems?: () => void;
   }
 
   let {
@@ -42,6 +44,7 @@
     onaddaccount,
     onremoveaccount,
     onsyncnow,
+    onreviewproblems,
   }: Props = $props();
 
   function ago(ms: number): string {
@@ -53,15 +56,34 @@
   }
 
   /** One-line sync summary for a remote account. */
-  function summary(accountId: string): { text: string; tone: "ok" | "busy" | "warn" | "error" } | null {
+  type Summary = { text: string; tone: "ok" | "busy" | "warn" | "error"; review?: boolean };
+
+  /** The status line, with a review link whenever changes need the user. */
+  function summary(accountId: string): Summary | null {
+    const line = statusLine(accountId);
+    const st = calendars.statuses[accountId];
+    return line && st && st.conflicts + st.failed > 0 ? { ...line, review: true } : line;
+  }
+
+  function statusLine(accountId: string): Summary | null {
     const st = calendars.statuses[accountId];
     if (!st?.remote) return null;
     if (calendars.syncing.has(accountId)) return { text: "Syncing…", tone: "busy" };
-    if (st.conflicts) return { text: `${st.conflicts} conflict${st.conflicts > 1 ? "s" : ""} to resolve`, tone: "error" };
+    if (st.conflicts)
+      return { text: `${st.conflicts} conflict${st.conflicts > 1 ? "s" : ""} to resolve`, tone: "error" };
     if (st.error) return { text: st.error, tone: st.error.startsWith("Offline") ? "warn" : "error" };
-    if (st.failed) return { text: `${st.failed} change${st.failed > 1 ? "s" : ""} could not be saved`, tone: "error" };
+    if (st.failed)
+      return { text: `${st.failed} change${st.failed > 1 ? "s" : ""} could not be saved`, tone: "error" };
     if (st.pending) return { text: `${st.pending} change${st.pending > 1 ? "s" : ""} waiting to sync`, tone: "warn" };
-    return { text: st.lastSyncedAt ? `Synced ${ago(st.lastSyncedAt)}` : "Not synced yet", tone: "ok" };
+    const synced = st.lastSyncedAt ? `Synced ${ago(st.lastSyncedAt)}` : "Not synced yet";
+    const plural = (n: number, what: string) => `${n} ${what}${n > 1 ? "s" : ""}`;
+    if (st.importFailures) {
+      return { text: `${synced}; ${plural(st.importFailures, "server event")} could not be read`, tone: "warn" };
+    }
+    if (st.approximated) {
+      return { text: `${synced}; ${plural(st.approximated, "event")} shown approximately`, tone: "ok" };
+    }
+    return { text: synced, tone: "ok" };
   }
 
   const groups = $derived(
@@ -88,7 +110,12 @@
         {/if}
       </div>
       {#if sync}
-        <p class={`sync ${sync.tone}`} role="status">{sync.text}</p>
+        <p class={`sync ${sync.tone}`} role="status">
+          {sync.text}
+          {#if sync.review && onreviewproblems}
+            <button type="button" class="link" onclick={onreviewproblems}>Review…</button>
+          {/if}
+        </p>
       {/if}
       <ul>
         {#each items as cal (cal.id)}
@@ -146,7 +173,7 @@
   <section class="settings">
     <h3>Simulation</h3>
     <label>
-      <span>Dataset (replaces all events)</span>
+      <span>Dataset (replaces simulated events only)</span>
       <select value={datasetSize} onchange={(e) => ondataset(Number(e.currentTarget.value))}>
         {#each DATASET_SIZES as size (size)}
           <option value={size}>{size.toLocaleString()} events</option>
@@ -271,5 +298,14 @@
   .settings label span {
     color: var(--uc-text-muted);
     font-size: 0.8rem;
+  }
+  .link {
+    border: none;
+    background: none;
+    padding: 0 0.2rem;
+    color: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+    font: inherit;
   }
 </style>

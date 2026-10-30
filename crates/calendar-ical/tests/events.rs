@@ -1,6 +1,6 @@
 use calendar_core::timing::resolve_local;
 use calendar_core::{EventTiming, OccurrenceKey, Recurrence};
-use calendar_ical::{EventData, parse, read_events, write_events};
+use calendar_ical::{EventData, parse, read_events, write_events, write_object};
 use chrono::{Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 const BERLIN: chrono_tz::Tz = chrono_tz::Europe::Berlin;
@@ -250,4 +250,130 @@ fn rejects_objects_without_required_fields() {
             .master
             .is_none()
     );
+}
+
+// --- audit regressions -------------------------------------------------------
+
+fn vcal(events: &str) -> String {
+    format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//t//EN\r\n{events}END:VCALENDAR\r\n")
+}
+
+/// F03: moving a series renames its overrides; their unmodelled data stays.
+#[test]
+fn moved_overrides_keep_their_unmodelled_properties() {
+    let text = vcal(concat!(
+        "BEGIN:VEVENT\r\nUID:s\r\nDTSTART;TZID=Europe/Berlin:20260601T090000\r\n",
+        "DTEND;TZID=Europe/Berlin:20260601T093000\r\nRRULE:FREQ=DAILY;COUNT=5\r\nSUMMARY:Daily\r\nEND:VEVENT\r\n",
+        "BEGIN:VEVENT\r\nUID:s\r\nRECURRENCE-ID;TZID=Europe/Berlin:20260603T090000\r\n",
+        "DTSTART;TZID=Europe/Berlin:20260603T110000\r\nDTEND;TZID=Europe/Berlin:20260603T113000\r\n",
+        "SUMMARY:Moved\r\nATTENDEE;CN=Bob:mailto:bob@example.com\r\nX-VENDOR:keep\r\n",
+        "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nEND:VALARM\r\nEND:VEVENT\r\n",
+    ));
+    let cal = parse(&text).unwrap();
+    let obj = read_events(&cal).unwrap();
+    // The whole series moves one hour later, the override with it.
+    let shift = Duration::hours(1);
+    let mut master = obj.master.clone().unwrap();
+    master.timing = master.timing.shifted(shift);
+    let mut moved = obj.overrides[0].clone();
+    let old_key = moved.recurrence_id.unwrap();
+    let new_key = old_key.shifted(shift);
+    moved.recurrence_id = Some(new_key);
+    let written = write_object(
+        Some(&cal),
+        &obj.uid,
+        Some(&master),
+        std::slice::from_ref(&moved),
+        &[(new_key, old_key)],
+        now(),
+    )
+    .to_ics();
+    for kept in [
+        "ATTENDEE;CN=Bob:mailto:bob@example.com",
+        "X-VENDOR:keep",
+        "TRIGGER:-PT5M",
+    ] {
+        assert!(written.contains(kept), "{kept} missing:\n{written}");
+    }
+    assert!(
+        written.contains("RECURRENCE-ID;TZID=Europe/Berlin:20260603T100000"),
+        "{written}"
+    );
+    assert_eq!(written.matches("BEGIN:VEVENT").count(), 2);
+}
+
+/// F04: a recurrence set given by RDATE alone survives reading and writing.
+#[test]
+fn rdate_only_recurrence_round_trips() {
+    let text = vcal(concat!(
+        "BEGIN:VEVENT\r\nUID:r\r\nDTSTART:20260610T090000Z\r\nDTEND:20260610T100000Z\r\n",
+        "RDATE:20260611T090000Z,20260501T090000Z\r\nSUMMARY:Extra dates\r\nEND:VEVENT\r\n",
+    ));
+    let cal = parse(&text).unwrap();
+    let obj = read_events(&cal).unwrap();
+    let rec = obj.master.as_ref().unwrap().recurrence.as_ref().unwrap();
+    assert_eq!(rec.rrule, "");
+    assert_eq!(rec.rdates.len(), 2);
+    let written = write_events(Some(&cal), &obj.uid, obj.master.as_ref(), &[], now()).to_ics();
+    assert!(
+        written.contains("RDATE:20260611T090000Z,20260501T090000Z"),
+        "{written}"
+    );
+    assert!(!written.contains("RRULE"), "{written}");
+    let mut renamed = obj.master.clone().unwrap();
+    renamed.title = "Renamed".into();
+    let written = write_events(Some(&cal), &obj.uid, Some(&renamed), &[], now()).to_ics();
+    assert!(
+        written.contains("RDATE:20260611T090000Z,20260501T090000Z"),
+        "{written}"
+    );
+}
+
+/// F06: absurd values are errors, not panics.
+#[test]
+fn huge_durations_are_rejected_without_panicking() {
+    for duration in [
+        "P999999999999D",
+        "P9223372036854775807W",
+        "PT9223372036854775807S",
+    ] {
+        let text = vcal(&format!(
+            "BEGIN:VEVENT\r\nUID:d\r\nDTSTART:20260610T090000Z\r\nDURATION:{duration}\r\nSUMMARY:x\r\nEND:VEVENT\r\n"
+        ));
+        let cal = parse(&text).unwrap();
+        assert!(read_events(&cal).is_err(), "{duration}");
+    }
+    let text = vcal(
+        "BEGIN:VEVENT\r\nUID:d\r\nDTSTART;VALUE=DATE:99991231\r\nDURATION:P36000D\r\nSUMMARY:x\r\nEND:VEVENT\r\n",
+    );
+    // Far in the future but representable: read, not a panic.
+    let cal = parse(&text).unwrap();
+    assert!(read_events(&cal).is_ok());
+}
+
+/// F16: a cancelled series master cancels the whole series.
+#[test]
+fn cancelled_series_yield_no_events() {
+    let text = vcal(concat!(
+        "BEGIN:VEVENT\r\nUID:c\r\nDTSTART:20260610T090000Z\r\nDTEND:20260610T100000Z\r\n",
+        "RRULE:FREQ=DAILY;COUNT=2\r\nSTATUS:CANCELLED\r\nSUMMARY:Off\r\nEND:VEVENT\r\n",
+        "BEGIN:VEVENT\r\nUID:c\r\nRECURRENCE-ID:20260611T090000Z\r\nDTSTART:20260611T120000Z\r\n",
+        "DTEND:20260611T130000Z\r\nSUMMARY:Off too\r\nEND:VEVENT\r\n",
+    ));
+    let obj = read_events(&parse(&text).unwrap()).unwrap();
+    assert!(obj.master.is_none());
+    assert!(obj.overrides.is_empty());
+}
+
+/// F16: approximations are reported, not silent.
+#[test]
+fn approximations_produce_warnings() {
+    let text = vcal(concat!(
+        "BEGIN:VEVENT\r\nUID:w\r\nDTSTART:20260601T090000Z\r\nDTEND:20260601T100000Z\r\n",
+        "RRULE:FREQ=DAILY;COUNT=9\r\nRDATE;VALUE=PERIOD:20260620T090000Z/PT3H\r\nSUMMARY:x\r\nEND:VEVENT\r\n",
+        "BEGIN:VEVENT\r\nUID:w\r\nRECURRENCE-ID;RANGE=THISANDFUTURE:20260605T090000Z\r\n",
+        "DTSTART:20260605T110000Z\r\nDTEND:20260605T120000Z\r\nSUMMARY:later\r\nEND:VEVENT\r\n",
+    ));
+    let obj = read_events(&parse(&text).unwrap()).unwrap();
+    assert_eq!(obj.warnings.len(), 2, "{:?}", obj.warnings);
 }

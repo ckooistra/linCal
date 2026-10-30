@@ -16,5 +16,7 @@ export const REPEAT_PRESETS: readonly RepeatPreset[] = [
 /** Options for a select: the presets plus, if needed, the event's own custom rule. */
 export function repeatOptions(current: string | null): RepeatPreset[] {
   if (current === null || REPEAT_PRESETS.some((p) => p.rrule === current)) return [...REPEAT_PRESETS];
-  return [...REPEAT_PRESETS, { label: `Custom (${current})`, rrule: current }];
+  // "" is a series given only by extra dates (iCalendar RDATE).
+  const label = current === "" ? "On specific dates" : `Custom (${current})`;
+  return [...REPEAT_PRESETS, { label, rrule: current }];
 }

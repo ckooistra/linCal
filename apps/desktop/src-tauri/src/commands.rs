@@ -7,7 +7,9 @@ use calendar_core::{Account, Calendar, CoreError, parse_time_zone};
 use std::sync::Arc;
 
 use calendar_storage::{AccountStatus, StorageError, Store};
-use calendar_sync::{SchedulerHandle, SyncEngine, SyncError, user_message};
+use calendar_sync::{
+    Resolution, SchedulerHandle, SyncEngine, SyncError, SyncProblem, user_message,
+};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -60,6 +62,8 @@ impl From<SyncError> for CommandError {
             SyncError::Storage(_) => "storage",
             SyncError::Credentials(_) => "credentials",
             SyncError::Config(_) => "invalid",
+            SyncError::TimedOut => "offline",
+            SyncError::Task => "internal",
         };
         Self {
             code,
@@ -170,6 +174,7 @@ pub async fn create_event(
         .store()?
         .create_event(&id, draft.to_draft(&tz)?)
         .await?;
+    state.changed(event.sync_status);
     Ok(WireEvent::from_occurrence(&event.as_occurrence(), &tz))
 }
 
@@ -318,12 +323,13 @@ pub async fn account_statuses(state: State<'_, AppState>) -> CommandResult<Vec<A
     Ok(state.store()?.account_statuses().await?)
 }
 
-/// Resolves a sync conflict or failure for the object an event belongs to.
+/// Resolves a sync conflict or failure for the object an event belongs to
+/// (from the event editor).
 #[tauri::command]
 pub async fn resolve_conflict(
     state: State<'_, AppState>,
     event_id: String,
-    keep_local: bool,
+    resolution: Resolution,
 ) -> CommandResult<()> {
     let store = state.store()?;
     let (calendar_id, href) = store
@@ -334,8 +340,28 @@ pub async fn resolve_conflict(
             message: "This event is not synchronized.".into(),
         })?;
     store
-        .resolve_operation(&calendar_id, &href, keep_local)
+        .resolve_operation(&calendar_id, &href, resolution)
         .await?;
     state.sync()?.scheduler.trigger();
+    Ok(())
+}
+
+/// Failed and conflicting changes, including deletions (which have no
+/// event left to open).
+#[tauri::command]
+pub async fn sync_problems(state: State<'_, AppState>) -> CommandResult<Vec<SyncProblem>> {
+    Ok(state.sync()?.engine.problems().await?)
+}
+
+#[tauri::command]
+pub async fn resolve_sync_problem(
+    state: State<'_, AppState>,
+    calendar_id: String,
+    href: String,
+    resolution: Resolution,
+) -> CommandResult<()> {
+    let sync = state.sync()?;
+    sync.engine.resolve(&calendar_id, &href, resolution).await?;
+    sync.scheduler.trigger();
     Ok(())
 }

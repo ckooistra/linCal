@@ -3,7 +3,7 @@
  * or an in-memory mock when the UI runs in a plain browser (preview/tests).
  * Everything above this module works against the same interface.
  */
-import type { Account, AccountStatus, Calendar, SyncEvent } from "../types/calendar";
+import type { Account, AccountStatus, Calendar, Resolution, SyncEvent, SyncProblem } from "../types/calendar";
 import {
   accountStatuses,
   addCaldavAccount,
@@ -13,9 +13,11 @@ import {
   onSyncEvent,
   removeAccount,
   resolveConflict,
+  resolveSyncProblem,
   saveSetting,
   setCalendarColor,
   syncNow,
+  syncProblems,
   type Settings,
 } from "./bridge";
 import { SourceError } from "./eventSource";
@@ -45,7 +47,10 @@ export interface Backend {
   removeAccount(accountId: string): Promise<void>;
   syncNow(): Promise<void>;
   accountStatuses(): Promise<AccountStatus[]>;
-  resolveConflict(eventId: string, keepLocal: boolean): Promise<void>;
+  resolveConflict(eventId: string, resolution: Resolution): Promise<void>;
+  /** Failed and conflicting changes, deletions included. */
+  syncProblems(): Promise<SyncProblem[]>;
+  resolveSyncProblem(calendarId: string, href: string, resolution: Resolution): Promise<void>;
   onSyncEvent(listener: (event: SyncEvent) => void): Promise<() => void>;
 }
 
@@ -95,6 +100,8 @@ async function desktopBackend(): Promise<Backend> {
     syncNow,
     accountStatuses,
     resolveConflict,
+    syncProblems,
+    resolveSyncProblem,
     onSyncEvent,
   };
 }
@@ -126,6 +133,8 @@ function previewBackend(settings: Settings): Backend {
     syncNow: async () => {},
     accountStatuses: async () => [],
     resolveConflict: desktopOnly,
+    syncProblems: async () => [],
+    resolveSyncProblem: desktopOnly,
     onSyncEvent: async () => () => {},
   };
   return backend;

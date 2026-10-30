@@ -600,11 +600,105 @@ async fn series_text_changes_reach_overrides_that_kept_the_series_value() {
     assert_eq!(got, vec!["Daily sync", "Daily sync", "Special"]);
 }
 
+/// Audit F17: moving a series across a DST change keeps exceptions at the
+/// series' local time, and narrowing a rule drops overrides outside it.
+#[tokio::test]
+async fn series_edits_respect_dst_and_rule_membership() {
+    let store = store_with_calendars().await;
+    let series = store
+        .create_event(
+            "dst",
+            draft(
+                "cal-work",
+                "Daily",
+                zoned(local(2026, 3, 25, 9, 0), 60),
+                Some("FREQ=DAILY;COUNT=10"),
+            ),
+        )
+        .await
+        .unwrap();
+    let slot = |d| resolve_local(&BERLIN, local(2026, 3, d, 9, 0));
+    store
+        .delete_occurrence(&occurrence_id(
+            &series.id,
+            &OccurrenceKey::Instant(slot(29)),
+        ))
+        .await
+        .unwrap();
+    let march = TimeRange::new(slot(1), resolve_local(&BERLIN, local(2026, 4, 30, 0, 0)));
+    assert_eq!(store.query_range(march, BERLIN).await.unwrap().len(), 9);
+    // Move the whole series one day earlier, through its first occurrence.
+    store
+        .update_series(
+            &occurrence_id(&series.id, &OccurrenceKey::Instant(slot(25))),
+            draft(
+                "cal-work",
+                "Daily",
+                zoned(local(2026, 3, 24, 9, 0), 60),
+                Some("FREQ=DAILY;COUNT=10"),
+            ),
+        )
+        .await
+        .unwrap();
+    let occ = store.query_range(march, BERLIN).await.unwrap();
+    assert_eq!(occ.len(), 9);
+    let excluded = store
+        .get_event("dst")
+        .await
+        .unwrap()
+        .unwrap()
+        .recurrence
+        .unwrap()
+        .exdates;
+    assert_eq!(excluded, vec![OccurrenceKey::Instant(slot(28))]);
+
+    // COUNT 5 -> 2 with an override on day 5: the override goes too.
+    let s = store
+        .create_event(
+            "count",
+            draft(
+                "cal-work",
+                "Short",
+                zoned(local(2026, 6, 1, 9, 0), 30),
+                Some("FREQ=DAILY;COUNT=5"),
+            ),
+        )
+        .await
+        .unwrap();
+    let day5 = OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, 5, 9, 0)));
+    store
+        .update_occurrence(
+            &occurrence_id(&s.id, &day5),
+            draft(
+                "cal-work",
+                "Moved",
+                zoned(local(2026, 6, 5, 15, 0), 30),
+                None,
+            ),
+            BERLIN,
+        )
+        .await
+        .unwrap();
+    store
+        .update_event(
+            "count",
+            draft(
+                "cal-work",
+                "Short",
+                zoned(local(2026, 6, 1, 9, 0), 30),
+                Some("FREQ=DAILY;COUNT=2"),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(titles(&store, month(2026, 6)).await, vec!["Short", "Short"]);
+}
+
 // --- synchronization -----------------------------------------------------
 
 mod sync {
     use super::*;
-    use crate::{IncomingObject, OpFailure, OpKind, RemoteCalendarSpec};
+    use crate::{IncomingObject, OpFailure, OpKind, PendingOp, RemoteCalendarSpec, Resolution};
     use calendar_core::{Account, EventContent, ObjectContent, ProviderKind};
 
     const CAL_URL: &str = "https://dav.example/cal/alice/work/";
@@ -664,6 +758,7 @@ mod sync {
             etag: Some(etag.into()),
             ical: format!("ICS {etag}"),
             content: Ok(c),
+            warnings: vec![],
         }
     }
 
@@ -894,6 +989,7 @@ mod sync {
                         etag: Some("\"1\"".into()),
                         ical: "x".into(),
                         content: Err("malformed".into()),
+                        warnings: vec![],
                     },
                     incoming("ok.ics", "\"1\"", content("ok", "Fine", None)),
                 ],
@@ -966,7 +1062,11 @@ mod sync {
             Some((cal.clone(), format!("{CAL_URL}a.ics")))
         );
         store
-            .resolve_operation(&cal, &format!("{CAL_URL}a.ics"), true)
+            .resolve_operation(
+                &cal,
+                &format!("{CAL_URL}a.ics"),
+                crate::Resolution::KeepLocal,
+            )
             .await
             .unwrap();
         let forced = store.due_operations("acct-dav", now_ms()).await.unwrap();
@@ -979,7 +1079,11 @@ mod sync {
             .await
             .unwrap();
         store
-            .resolve_operation(&cal, &format!("{CAL_URL}a.ics"), false)
+            .resolve_operation(
+                &cal,
+                &format!("{CAL_URL}a.ics"),
+                crate::Resolution::UseServer,
+            )
             .await
             .unwrap();
         assert!(
@@ -989,7 +1093,12 @@ mod sync {
                 .unwrap()
                 .is_empty()
         );
-        assert!(store.known_objects(&cal).await.unwrap().is_empty());
+        // Still compared by the next full listing, with its version unknown,
+        // so it is downloaded again (or found deleted). Audit F02.
+        assert_eq!(
+            store.known_objects(&cal).await.unwrap(),
+            vec![(format!("{CAL_URL}a.ics"), None)]
+        );
         assert_eq!(
             store.remote_calendars("acct-dav").await.unwrap()[0].sync_token,
             None
@@ -1131,5 +1240,426 @@ mod sync {
                 .await
                 .contains(&"Keep me".to_owned())
         );
+    }
+
+    // --- audit regressions -------------------------------------------------
+
+    async fn due(store: &Store) -> Vec<PendingOp> {
+        store.due_operations("acct-dav", now_ms()).await.unwrap()
+    }
+
+    /// F01: deleting an event while its first upload may be in flight keeps
+    /// the intent to delete it on the server.
+    #[tokio::test]
+    async fn deletion_during_the_first_upload_is_kept() {
+        let (store, cal) = remote_store().await;
+        store
+            .create_event(
+                "n",
+                draft(&cal, "New", zoned(local(2026, 6, 10, 9, 0), 60), None),
+            )
+            .await
+            .unwrap();
+        let op = due(&store).await.remove(0);
+        // The sync engine snapshots the object and marks it sent...
+        assert!(
+            store
+                .object_for_push(&cal, &op.href)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(store.begin_upload(&cal, &op.href).await.unwrap());
+        // ...the user deletes it while the PUT is on its way...
+        store.delete_event("n").await.unwrap();
+        // ...and the PUT succeeds.
+        store
+            .complete_put(&op, Some("\"e1\""), "ICS")
+            .await
+            .unwrap();
+        let ops = due(&store).await;
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            (ops[0].kind, ops[0].href.as_str()),
+            (OpKind::Delete, op.href.as_str())
+        );
+        let push = store
+            .object_for_push(&cal, &op.href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(push.etag.as_deref(), Some("\"e1\""));
+
+        // Deleting before anything was sent needs no request at all.
+        store
+            .create_event(
+                "m",
+                draft(&cal, "Gone", zoned(local(2026, 6, 11, 9, 0), 60), None),
+            )
+            .await
+            .unwrap();
+        let op = due(&store)
+            .await
+            .into_iter()
+            .find(|o| o.href.ends_with("m.ics"))
+            .unwrap();
+        store.delete_event("m").await.unwrap();
+        assert!(!store.begin_upload(&cal, &op.href).await.unwrap());
+        assert!(due(&store).await.iter().all(|o| !o.href.ends_with("m.ics")));
+    }
+
+    /// F02: discarding a change never leaves a falsely "synced" ghost.
+    #[tokio::test]
+    async fn using_the_server_version_leaves_no_ghosts() {
+        let (store, cal) = remote_store().await;
+        // (a) A create that never reached the server, then failed for good.
+        store
+            .create_event(
+                "n",
+                draft(
+                    &cal,
+                    "Never sent",
+                    zoned(local(2026, 6, 10, 9, 0), 60),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        let op = due(&store).await.remove(0);
+        store
+            .fail_operation(&op, "refused", OpFailure::Permanent)
+            .await
+            .unwrap();
+        store
+            .resolve_operation(&cal, &op.href, Resolution::UseServer)
+            .await
+            .unwrap();
+        assert!(titles(&store, month(2026, 6)).await.is_empty());
+        assert!(store.known_objects(&cal).await.unwrap().is_empty());
+
+        // (b) An imported event edited here and deleted on the server.
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"1\"", content("a", "Server", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        let id = format!("{cal}/a");
+        store
+            .update_event(
+                &id,
+                draft(&cal, "Mine", zoned(local(2026, 6, 1, 9, 0), 30), None),
+            )
+            .await
+            .unwrap();
+        let op = due(&store).await.remove(0);
+        store
+            .fail_operation(&op, "gone", OpFailure::Conflict)
+            .await
+            .unwrap();
+        store
+            .resolve_operation(&cal, &op.href, Resolution::UseServer)
+            .await
+            .unwrap();
+        let href = format!("{CAL_URL}a.ics");
+        assert_eq!(
+            store.known_objects(&cal).await.unwrap(),
+            vec![(href.clone(), None)]
+        );
+        // The next full listing no longer contains it: the row goes.
+        store
+            .apply_remote_changes(&cal, &[], &[href], None)
+            .await
+            .unwrap();
+        assert!(titles(&store, month(2026, 6)).await.is_empty());
+    }
+
+    /// F05: a malformed new version keeps the last good one.
+    #[tokio::test]
+    async fn malformed_updates_keep_the_last_good_version() {
+        let (store, cal) = remote_store().await;
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"1\"", content("a", "Good", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        let bad = IncomingObject {
+            href: format!("{CAL_URL}a.ics"),
+            etag: Some("\"2\"".into()),
+            ical: "garbage".into(),
+            content: Err("malformed".into()),
+            warnings: vec![],
+        };
+        let report = store
+            .apply_remote_changes(&cal, std::slice::from_ref(&bad), &[], Some("t2"))
+            .await
+            .unwrap();
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(titles(&store, month(2026, 6)).await, vec!["Good"]);
+        // The good version stays the base: an edit is checked against it.
+        assert_eq!(
+            store.known_objects(&cal).await.unwrap(),
+            vec![(format!("{CAL_URL}a.ics"), Some("\"1\"".into()))]
+        );
+        let status = store.account_statuses().await.unwrap();
+        let status = status.iter().find(|s| s.account_id == "acct-dav").unwrap();
+        assert_eq!((status.import_failures, status.approximated), (1, 0));
+        // A later good version clears the failure.
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"3\"", content("a", "Fixed", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(titles(&store, month(2026, 6)).await, vec!["Fixed"]);
+        assert!(store.import_failures("acct-dav").await.unwrap().is_empty());
+
+        // A malformed object never seen before is remembered, not refetched.
+        let mut new_bad = bad;
+        new_bad.href = format!("{CAL_URL}b.ics");
+        store
+            .apply_remote_changes(&cal, &[new_bad], &[], None)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .known_objects(&cal)
+                .await
+                .unwrap()
+                .contains(&(format!("{CAL_URL}b.ics"), Some("\"2\"".into())))
+        );
+    }
+
+    /// F10: further edits keep an unresolved conflict visible, and a failed
+    /// deletion can be resolved although no event row is left.
+    #[tokio::test]
+    async fn conflicts_survive_edits_and_deletions_can_be_resolved() {
+        let (store, cal) = remote_store().await;
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"1\"", content("a", "Server", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        let id = format!("{cal}/a");
+        let edit = |t: &str| draft(&cal, t, zoned(local(2026, 6, 1, 9, 0), 30), None);
+        store.update_event(&id, edit("Mine")).await.unwrap();
+        let op = due(&store).await.remove(0);
+        store
+            .fail_operation(&op, "changed", OpFailure::Conflict)
+            .await
+            .unwrap();
+        let again = store.update_event(&id, edit("Mine again")).await.unwrap();
+        assert_eq!(again.sync_status, SyncStatus::Conflict);
+        assert_eq!(
+            store.query_range(month(2026, 6), BERLIN).await.unwrap()[0].sync_status,
+            SyncStatus::Conflict
+        );
+
+        store.delete_event(&id).await.unwrap();
+        let op = due(&store).await.remove(0);
+        assert_eq!(op.kind, OpKind::Delete);
+        store
+            .fail_operation(&op, "changed", OpFailure::Conflict)
+            .await
+            .unwrap();
+        let problems = store.problem_operations("acct-dav").await.unwrap();
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].conflict && problems[0].kind == OpKind::Delete);
+        assert_eq!(problems[0].title, None);
+        assert_eq!(problems[0].base_ical, "ICS \"1\"");
+        // "Use server version" brings the event back on the next listing.
+        store
+            .resolve_operation(&cal, &op.href, Resolution::UseServer)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .problem_operations("acct-dav")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"2\"", content("a", "Server v2", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(titles(&store, month(2026, 6)).await, vec!["Server v2"]);
+
+        // "Try again" after a permanent failure stays conditional.
+        store.update_event(&id, edit("Retry me")).await.unwrap();
+        let op = due(&store).await.remove(0);
+        store
+            .fail_operation(&op, "HTTP 400", OpFailure::Permanent)
+            .await
+            .unwrap();
+        store
+            .resolve_operation(&cal, &op.href, Resolution::Retry)
+            .await
+            .unwrap();
+        let op = due(&store).await.remove(0);
+        assert!(!op.force);
+    }
+
+    /// F18: hrefs that differ only in a suffix get distinct rows.
+    #[tokio::test]
+    async fn similar_hrefs_do_not_collide() {
+        let (store, cal) = remote_store().await;
+        let report = store
+            .apply_remote_changes(
+                &cal,
+                &[
+                    incoming("x", "\"1\"", content("x1", "Plain", None)),
+                    incoming("x.ics", "\"1\"", content("x2", "Suffixed", None)),
+                    incoming("50%_off.ics", "\"1\"", content("x3", "Percent", None)),
+                ],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let mut got = titles(&store, month(2026, 6)).await;
+        got.sort();
+        assert_eq!(got, vec!["Percent", "Plain", "Suffixed"]);
+    }
+
+    /// F03 (storage side): moving a series records the override ids the
+    /// server copy uses, until an upload completes.
+    #[tokio::test]
+    async fn moved_overrides_remember_their_server_ids() {
+        let (store, cal) = remote_store().await;
+        let mut c = content("s", "Daily", Some("FREQ=DAILY;COUNT=5"));
+        let key = OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, 3, 9, 0)));
+        c.overrides.push(EventContent {
+            title: "Moved".into(),
+            description: String::new(),
+            location: String::new(),
+            timing: zoned(local(2026, 6, 3, 11, 0), 30),
+            recurrence: None,
+            recurrence_id: Some(key),
+        });
+        store
+            .apply_remote_changes(&cal, &[incoming("s.ics", "\"1\"", c)], &[], None)
+            .await
+            .unwrap();
+        let first = format!(
+            "{cal}/s::{}",
+            OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, 1, 9, 0)))
+        );
+        store
+            .update_series(
+                &first,
+                draft(
+                    &cal,
+                    "Daily",
+                    zoned(local(2026, 6, 1, 10, 0), 30),
+                    Some("FREQ=DAILY;COUNT=5"),
+                ),
+            )
+            .await
+            .unwrap();
+        let op = due(&store).await.remove(0);
+        let push = store
+            .object_for_push(&cal, &op.href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(push.renamed, vec![(key.shifted(Duration::hours(1)), key)]);
+        store
+            .complete_put(&op, Some("\"2\""), "ICS 2")
+            .await
+            .unwrap();
+        let push = store
+            .object_for_push(&cal, &op.href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(push.renamed.is_empty());
+    }
+
+    /// F16: objects read only approximately are counted for the UI.
+    #[tokio::test]
+    async fn approximations_are_counted() {
+        let (store, cal) = remote_store().await;
+        let mut obj = incoming("w.ics", "\"1\"", content("w", "Odd zone", None));
+        obj.warnings = vec!["unknown time zone".into()];
+        store
+            .apply_remote_changes(&cal, &[obj], &[], None)
+            .await
+            .unwrap();
+        let status = store.account_statuses().await.unwrap();
+        let status = status.iter().find(|s| s.account_id == "acct-dav").unwrap();
+        assert_eq!(status.approximated, 1);
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("w.ics", "\"2\"", content("w", "Fixed", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        let status = store.account_statuses().await.unwrap();
+        assert_eq!(
+            status
+                .iter()
+                .find(|s| s.account_id == "acct-dav")
+                .unwrap()
+                .approximated,
+            0
+        );
+    }
+
+    /// F16: RDATEs before DTSTART are found by range queries; F04: an
+    /// RDATE-only series keeps its dates through a title edit.
+    #[tokio::test]
+    async fn rdate_only_series_are_indexed_and_kept() {
+        let (store, cal) = remote_store().await;
+        let mut c = content("r", "Dates", None);
+        let early = OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 5, 4, 9, 0)));
+        c.master.as_mut().unwrap().recurrence = Some(calendar_core::Recurrence {
+            rrule: String::new(),
+            rdates: vec![early],
+            exdates: vec![],
+        });
+        store
+            .apply_remote_changes(&cal, &[incoming("r.ics", "\"1\"", c)], &[], None)
+            .await
+            .unwrap();
+        assert_eq!(titles(&store, month(2026, 5)).await, vec!["Dates"]);
+        assert_eq!(titles(&store, month(2026, 6)).await, vec!["Dates"]);
+        let id = format!("{cal}/r");
+        store
+            .update_event(
+                &id,
+                draft(
+                    &cal,
+                    "Renamed",
+                    zoned(local(2026, 6, 1, 9, 0), 30),
+                    Some(""),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(titles(&store, month(2026, 5)).await, vec!["Renamed"]);
     }
 }

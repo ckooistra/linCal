@@ -87,18 +87,25 @@ fn read_timing(
         Some(p) => Some(parse_duration(p.value.trim())?),
         None => None,
     };
+    // Values come from other software: date arithmetic must not overflow.
+    let out_of_range = || IcalError::Value("time value out of range".into());
     Ok(match start {
         Resolved::Date(start_date) => {
+            let next_day = start_date
+                .checked_add_signed(Duration::days(1))
+                .ok_or_else(out_of_range)?;
             let end_date = match (end, duration) {
                 (Some(Resolved::Date(d)), _) => d,
                 (Some(Resolved::Instant(t, tz)), _) => t.with_timezone(&tz).date_naive(),
                 (Some(Resolved::Floating(t)), _) => t.date(),
-                (None, Some(d)) => start_date + Duration::days(d.days.max(1)),
-                (None, None) => start_date + Duration::days(1),
+                (None, Some(d)) => start_date
+                    .checked_add_signed(Duration::days(d.days.max(1)))
+                    .ok_or_else(out_of_range)?,
+                (None, None) => next_day,
             };
             EventTiming::AllDay {
                 start_date,
-                end_date: end_date.max(start_date + Duration::days(1)),
+                end_date: end_date.max(next_day),
             }
         }
         Resolved::Instant(s, tz) => {
@@ -110,8 +117,14 @@ fn read_timing(
                 }
                 (None, Some(d)) => {
                     // Days are nominal (wall-clock) days; the rest is exact.
-                    let local = s.with_timezone(&tz).naive_local() + Duration::days(d.days);
-                    resolve_local(&tz, local) + Duration::seconds(d.seconds)
+                    let local = s
+                        .with_timezone(&tz)
+                        .naive_local()
+                        .checked_add_signed(Duration::days(d.days))
+                        .ok_or_else(out_of_range)?;
+                    resolve_local(&tz, local)
+                        .checked_add_signed(Duration::seconds(d.seconds))
+                        .ok_or_else(out_of_range)?
                 }
                 (None, None) => s,
             };
@@ -126,7 +139,7 @@ fn read_timing(
                 (Some(Resolved::Floating(e)), _) => e,
                 (Some(Resolved::Instant(e, tz)), _) => e.with_timezone(&tz).naive_local(),
                 (Some(Resolved::Date(d)), _) => d.and_hms_opt(0, 0, 0).expect("valid"),
-                (None, Some(d)) => s + d.exact(),
+                (None, Some(d)) => s.checked_add_signed(d.exact()).ok_or_else(out_of_range)?,
                 (None, None) => s,
             };
             EventTiming::Floating {
@@ -183,6 +196,14 @@ fn keys(
 ) -> Result<Vec<OccurrenceKey>, IcalError> {
     let mut out = Vec::new();
     for p in c.properties_named(name) {
+        if p.param("VALUE")
+            .is_some_and(|v| v.eq_ignore_ascii_case("PERIOD"))
+            || p.value.contains('/')
+        {
+            warnings.push(format!(
+                "{name} periods are shown with the series' duration"
+            ));
+        }
         for t in parse_times(p)? {
             out.push(key_for(&t, master, calendar, warnings));
         }
@@ -224,20 +245,23 @@ pub fn read_events(calendar: &Component) -> Result<ObjectEvents, IcalError> {
     let mut master = match master_c {
         Some(c) => {
             let timing = read_timing(c, calendar, &mut warnings)?;
-            let recurrence = match c.property("RRULE") {
-                Some(rule) => {
-                    if c.properties_named("RRULE").count() > 1 {
-                        warnings.push("only the first RRULE is used".into());
-                    }
-                    Some(Recurrence {
-                        rrule: rule.value.trim().to_owned(),
-                        rdates: keys(c, "RDATE", &timing, calendar, &mut warnings)?,
-                        exdates: keys(c, "EXDATE", &timing, calendar, &mut warnings)?,
-                    })
+            // A recurrence set is RRULE and/or RDATE (RFC 5545 §3.8.5);
+            // RDATE alone gives an empty rule (see `is_rdate_only`).
+            let rule = c.property("RRULE");
+            let recurrence = if rule.is_some() || c.property("RDATE").is_some() {
+                if c.properties_named("RRULE").count() > 1 {
+                    warnings.push("only the first RRULE is used".into());
                 }
-                None => None,
+                Some(Recurrence {
+                    rrule: rule.map(|r| r.value.trim().to_owned()).unwrap_or_default(),
+                    rdates: keys(c, "RDATE", &timing, calendar, &mut warnings)?,
+                    exdates: keys(c, "EXDATE", &timing, calendar, &mut warnings)?,
+                })
+            } else {
+                None
             };
-            if is_cancelled(c) && recurrence.is_none() {
+            if is_cancelled(c) {
+                // A cancelled master cancels the event, or the whole series.
                 None
             } else {
                 Some(EventData {
@@ -254,12 +278,23 @@ pub fn read_events(calendar: &Component) -> Result<ObjectEvents, IcalError> {
     };
 
     let mut overrides = Vec::new();
+    let series_cancelled = master_c.is_some_and(|c| is_cancelled(c));
     for c in vevents
         .iter()
-        .filter(|c| c.property("RECURRENCE-ID").is_some())
+        .filter(|c| c.property("RECURRENCE-ID").is_some() && !series_cancelled)
     {
         let timing = read_timing(c, calendar, &mut warnings)?;
-        let rid = parse_time(c.property("RECURRENCE-ID").expect("filtered"))?;
+        let rid_prop = c.property("RECURRENCE-ID").expect("filtered");
+        if rid_prop
+            .param("RANGE")
+            .is_some_and(|r| r.eq_ignore_ascii_case("THISANDFUTURE"))
+        {
+            warnings.push(
+                "a change to \"this and following\" occurrences is shown on one occurrence only"
+                    .into(),
+            );
+        }
+        let rid = parse_time(rid_prop)?;
         let reference = master.as_ref().map_or(&timing, |m| &m.timing);
         let key = key_for(&rid, reference, calendar, &mut warnings);
         if is_cancelled(c) {
@@ -376,7 +411,9 @@ fn apply(
     }
     match &event.recurrence {
         Some(rec) => {
-            if c.property("RRULE").map(|p| p.value.trim()) != Some(rec.rrule.as_str()) {
+            if rec.rrule.trim().is_empty() {
+                c.remove("RRULE");
+            } else if c.property("RRULE").map(|p| p.value.trim()) != Some(rec.rrule.as_str()) {
                 c.set(Property::new("RRULE", rec.rrule.clone()));
             }
             if keys(c, "EXDATE", &event.timing, reference, &mut w)
@@ -447,6 +484,22 @@ pub fn write_events(
     overrides: &[EventData],
     now: DateTime<Utc>,
 ) -> Component {
+    write_object(existing, uid, master, overrides, &[], now)
+}
+
+/// [`write_events`] for overrides whose recurrence id changed since
+/// `existing` was read (the series was moved): `renamed` maps an override's
+/// current recurrence id to the one its component has in `existing`, so
+/// that component is edited (keeping attendees, alarms, `X-` properties)
+/// rather than replaced by a new one.
+pub fn write_object(
+    existing: Option<&Component>,
+    uid: &str,
+    master: Option<&EventData>,
+    overrides: &[EventData],
+    renamed: &[(OccurrenceKey, OccurrenceKey)],
+    now: DateTime<Utc>,
+) -> Component {
     let mut cal = existing.cloned().unwrap_or_else(|| {
         let mut c = Component::new("VCALENDAR");
         c.properties.push(Property::new("VERSION", "2.0"));
@@ -500,7 +553,13 @@ pub fn write_events(
     }
     for o in overrides {
         let series = series_timing.as_ref().unwrap_or(&o.timing);
-        let found = take(o.recurrence_id.as_ref());
+        let base_key = o.recurrence_id.as_ref().map(|k| {
+            renamed
+                .iter()
+                .find(|(current, _)| current == k)
+                .map_or(k, |(_, base)| base)
+        });
+        let found = take(base_key);
         let existed = found.is_some();
         let mut c = found.unwrap_or_else(|| {
             let mut c = Component::new("VEVENT");

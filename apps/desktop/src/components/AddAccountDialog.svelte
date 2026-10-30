@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { modal } from "../services/modal";
 
   interface Props {
     /** Resolves to an error message, or null on success. */
@@ -42,6 +43,7 @@
     aria-modal="true"
     aria-labelledby="add-account-title"
     tabindex="-1"
+    use:modal
     onkeydown={(e) => {
       if (e.key === "Escape" && !busy) {
         e.preventDefault();

@@ -24,6 +24,8 @@ pub trait CalendarProvider: Send + Sync {
                            known: &[(String, Option<String>)]) -> ProviderResult<ChangeSet>;
     async fn put_object(&self, href: &str, ical: &str, precondition: &Precondition)
         -> ProviderResult<WriteResult>;   // Precondition::Create | Version(etag) | Overwrite
+    /// One object, or None if it does not exist (used when a version is unknown).
+    async fn get_object(&self, href: &str) -> ProviderResult<Option<RemoteObject>>;
     async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()>;
 }
 ```
@@ -33,6 +35,14 @@ Providers exchange **calendar object resources**: an iCalendar object per item, 
 - **CalDAV and ICS** are natively like this.
 - **JSON APIs** (Google, Graph) will map their events to iCalendar objects inside their adapter. The sync engine, the offline queue and conflict handling then stay identical for every provider.
 - **Implication for Milestone 4:** those adapters need a careful JSON ⇄ iCalendar mapping, including their recurrence exceptions. Their opaque version tokens (Google `etag`, Graph `changeKey`) take the place of ETags.
+
+**Open contract questions to settle before Milestone 4** (from the October 2026 audit, F21):
+
+- **Native-data preservation.** Google and Graph fields with no iCalendar equivalent need a reversible envelope, for example an `X-` property or a side table, or they are lost on upload.
+- **Identity.** Google separates its event `id` from `iCalUID`, and providers assign ids on create. `put_object` addressed by a client-made href doesn't fit, so creates need to return the provider's identity.
+- **Scoped cursors.** Graph `calendarView/delta` tracks one calendar *and* one date window and follows opaque `nextLink`/`deltaLink` pages. One `sync_token` per calendar is not enough.
+- **Capabilities.** Per-operation support (create/update/delete, recurrence edits, attendees) should reach the UI.
+- **Authentication lifecycle.** OAuth token refresh and revocation, instead of one password string.
 
 `ProviderError` classifies failures so the engine can choose between retry with backoff, conflict, re-authentication and reporting:
 
@@ -52,7 +62,7 @@ Providers exchange **calendar object resources**: an iCalendar object per item, 
 
 | Provider | Mechanism | Notes |
 |---|---|---|
-| CalDAV (Nextcloud, Fastmail, Radicale, Baïkal, iCloud) | Basic auth over TLS with app passwords | Discovery via `.well-known/caldav` and principal/home-set lookup. No Nextcloud-specific assumptions. |
+| CalDAV (Nextcloud, Fastmail, Radicale, Baïkal, iCloud) | Basic auth over TLS with app passwords | Discovery via `.well-known/caldav` and principal/home-set lookup. No Nextcloud-specific assumptions. HTTPS is required except for `localhost`. A calendar home on another host is accepted only within the same domain and over HTTPS. Addresses with embedded credentials are refused. |
 | Google Calendar | OAuth 2.0 installed-app flow with PKCE, loopback redirect | Users or distributors register their own OAuth client. No client secret is treated as confidential. |
 | Microsoft Graph | OAuth 2.0 public client with PKCE (MSAL-style) | Personal and work/school accounts, subject to tenant policy. |
 | ICS subscription | Optional HTTP auth | Read-only. Uses ETag / Last-Modified. |

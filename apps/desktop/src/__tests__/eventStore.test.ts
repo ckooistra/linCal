@@ -242,3 +242,55 @@ describe("EventStore with recurring occurrences", () => {
     expect(store.get("s::1")).toBeDefined();
   });
 });
+
+describe("EventStore ordering (audit F13, F14, F20)", () => {
+  it("does not let an older load overwrite a completed edit", async () => {
+    const { store, source } = setup();
+    await store.load(june, "visible");
+    const original = store.eventsIn(june).find((e) => e.calendarId === "cal-work" && !e.seriesId)!;
+    store.invalidate();
+    // Hold a reload that captured the data before the edit.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const query = source.queryRange.bind(source);
+    vi.spyOn(source, "queryRange").mockImplementationOnce(async (range, opts) => {
+      const snapshot = await query(range, opts);
+      await gate;
+      return snapshot;
+    });
+    const reload = store.load(june, "visible");
+    store.update(original.id, { ...original, title: "Renamed" });
+    await flush();
+    expect(store.get(original.id)?.syncStatus).toBe("saved");
+    release();
+    await reload;
+    expect(store.get(original.id)?.title).toBe("Renamed");
+  });
+
+  it("keeps the sync status the source reports", async () => {
+    const { store, source } = setup();
+    vi.spyOn(source, "createEvent").mockImplementationOnce(async (id, d) => ({
+      ...d,
+      id,
+      seriesId: null,
+      recurrenceId: null,
+      rrule: null,
+      syncStatus: "pending-sync",
+      revision: 1,
+    }));
+    const result = store.create(draft);
+    if (!result.ok) throw new Error("expected ok");
+    await flush();
+    expect(store.get(result.id)?.syncStatus).toBe("pending-sync");
+  });
+
+  it("drops cached data far from what is visible", async () => {
+    const { store } = setup();
+    await store.load(june, "visible");
+    expect(store.eventsIn(june).length).toBeGreaterThan(0);
+    const far = { start: parseIsoDate("2027-06-01").getTime(), end: parseIsoDate("2027-07-01").getTime() };
+    await store.load(far, "visible");
+    expect(store.covers(june)).toBe(false);
+    expect(store.eventsIn(june)).toEqual([]);
+  });
+});

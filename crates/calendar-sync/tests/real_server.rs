@@ -233,7 +233,10 @@ async fn two_clients_stay_in_sync() {
     let conflicted = a.find(&format!("{tag} meeting")).await.remove(0);
     assert_eq!(conflicted.sync_status, SyncStatus::Conflict);
     let (cal, href) = a.store.object_of(&conflicted.id).await.unwrap().unwrap();
-    a.store.resolve_operation(&cal, &href, false).await.unwrap();
+    a.store
+        .resolve_operation(&cal, &href, calendar_storage::Resolution::UseServer)
+        .await
+        .unwrap();
     a.sync().await;
     assert_eq!(
         a.find(&format!("{tag} meeting")).await[0].title,

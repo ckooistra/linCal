@@ -11,7 +11,7 @@ pub mod events;
 pub mod values;
 
 pub use content::{Component, Property, parse};
-pub use events::{EventData, ObjectEvents, read_events, write_events};
+pub use events::{EventData, ObjectEvents, read_events, write_events, write_object};
 
 /// Errors from reading iCalendar data.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -25,3 +25,10 @@ export function mergeRange(ranges: readonly DateRange[], range: DateRange): Date
 export function rangeCovered(ranges: readonly DateRange[], range: DateRange): boolean {
   return ranges.some((r) => r.start <= range.start && r.end >= range.end);
 }
+
+/** The parts of `ranges` inside `window`. */
+export function clipRanges(ranges: readonly DateRange[], window: DateRange): DateRange[] {
+  return ranges
+    .map((r) => ({ start: Math.max(r.start, window.start), end: Math.min(r.end, window.end) }))
+    .filter((r) => r.end > r.start);
+}

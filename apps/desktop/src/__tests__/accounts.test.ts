@@ -59,8 +59,8 @@ describe("Sidebar sync status", () => {
     const onremoveaccount = vi.fn();
     const onaddaccount = vi.fn();
     calendars.setStatuses([
-      { accountId: "acct-sim", remote: false, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0 },
-      { accountId: "dav", remote: true, lastSyncedAt: Date.now(), error: null, pending: 2, failed: 0, conflicts: 0 },
+      { accountId: "acct-sim", remote: false, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0, importFailures: 0, approximated: 0 },
+      { accountId: "dav", remote: true, lastSyncedAt: Date.now(), error: null, pending: 2, failed: 0, conflicts: 0, importFailures: 0, approximated: 0 },
     ]);
     render(Sidebar, props(calendars, { onremoveaccount, onaddaccount, onsyncnow: noop }));
     expect(screen.getByText("2 changes waiting to sync")).toBeTruthy();
@@ -74,13 +74,20 @@ describe("Sidebar sync status", () => {
 
   it("shows syncing, offline and conflict states", async () => {
     const calendars = store();
-    const base = { accountId: "dav", remote: true, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0 };
+    const base = { accountId: "dav", remote: true, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0, importFailures: 0, approximated: 0 };
     calendars.setStatuses([{ ...base, error: "Offline: the server could not be reached. Changes are kept and will sync later." }]);
     const { rerender } = render(Sidebar, props(calendars));
     expect(screen.getByText(/^Offline/).className).toContain("warn");
     calendars.setStatuses([{ ...base, conflicts: 1 }]);
     await rerender(props(calendars));
     expect(screen.getByText("1 conflict to resolve").className).toContain("error");
+    const onreviewproblems = vi.fn();
+    await rerender(props(calendars, { onreviewproblems }));
+    await fireEvent.click(screen.getByRole("button", { name: "Review…" }));
+    expect(onreviewproblems).toHaveBeenCalled();
+    calendars.setStatuses([{ ...base, lastSyncedAt: Date.now(), importFailures: 2 }]);
+    await rerender(props(calendars));
+    expect(screen.getByText(/2 server events could not be read/).className).toContain("warn");
     calendars.setSyncing("dav", true);
     await rerender(props(calendars));
     expect(screen.getByText("Syncing…")).toBeTruthy();
@@ -117,9 +124,9 @@ describe("EventEditor sync conflicts", () => {
     });
     expect(screen.getByRole("alert").textContent).toContain("also changed on the server");
     await fireEvent.click(screen.getByRole("button", { name: "Use server version" }));
-    expect(onresolve).toHaveBeenCalledWith(false);
+    expect(onresolve).toHaveBeenCalledWith("use-server");
     await fireEvent.click(screen.getByRole("button", { name: "Keep mine" }));
-    expect(onresolve).toHaveBeenCalledWith(true);
+    expect(onresolve).toHaveBeenCalledWith("keep-local");
   });
 });
 
@@ -154,5 +161,41 @@ describe("TitleBar", async () => {
     for (const name of ["Minimize", "Maximize", "Close"]) {
       expect(screen.getByRole("button", { name })).toBeTruthy();
     }
+  });
+});
+
+describe("EventEditor keeps untouched times exactly (audit F09)", () => {
+  it("saves a title-only change without moving the event in a DST fold", async () => {
+    // 02:30:45 CET on 2026-10-25: the second 02:30 of the night clocks go back.
+    const start = Date.UTC(2026, 9, 25, 1, 30, 45);
+    const event: CalendarEvent = {
+      id: "e",
+      calendarId: "cal-work",
+      title: "Night shift",
+      description: "",
+      location: "",
+      timing: { kind: "timed", start, end: start + 3_600_000, timeZone: "Europe/Berlin" },
+      seriesId: null,
+      recurrenceId: null,
+      rrule: null,
+      syncStatus: "saved",
+      revision: 1,
+    };
+    const onsave = vi.fn(() => null);
+    render(EventEditor, {
+      event,
+      timing: event.timing,
+      calendars: simulatedCalendars(),
+      defaultCalendarId: null,
+      readOnly: false,
+      onsave,
+      ondelete: noop,
+      onclose: noop,
+    });
+    await fireEvent.input(screen.getByLabelText("Title"), { target: { value: "Night shift (renamed)" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onsave).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Night shift (renamed)", timing: event.timing }),
+    );
   });
 });

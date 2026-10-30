@@ -9,8 +9,9 @@ mod codec;
 mod remote;
 
 pub use remote::{
-    AccountStatus, ApplyReport, IncomingObject, OpFailure, OpKind, PendingOp, PushObject,
-    RemoteAccount, RemoteCalendarSpec, RemoteCalendarState,
+    AccountStatus, ApplyReport, IncomingObject, OpFailure, OpKind, PendingOp, Presence,
+    ProblemOperation, PushObject, RemoteAccount, RemoteCalendarSpec, RemoteCalendarState,
+    Resolution,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -24,7 +25,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use thiserror::Error;
 
-use calendar_core::recurrence::{self, retime_series};
+use calendar_core::recurrence::{self, KeyShift, retime_series};
 use calendar_core::timing::MAX_ZONE_OFFSET;
 use calendar_core::{
     Account, Calendar, CalendarEvent, CoreError, EventDraft, Occurrence, OccurrenceKey,
@@ -67,7 +68,13 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    /// Bounds concurrent decode/expansion jobs: rapid navigation must not
+    /// pile up CPU work for ranges nobody looks at any more.
+    expansions: std::sync::Arc<tokio::sync::Semaphore>,
 }
+
+/// Concurrent range expansions (visible range plus prefetch, with margin).
+const MAX_EXPANSIONS: usize = 2;
 
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
@@ -114,7 +121,10 @@ impl Store {
             .connect_with(options)
             .await?;
         MIGRATOR.run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            expansions: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_EXPANSIONS)),
+        })
     }
 
     pub async fn close(&self) {
@@ -243,8 +253,14 @@ impl Store {
         }
 
         // Decoding and recurrence expansion are CPU work: keep them off the
-        // async workers.
+        // async workers, a bounded number at a time (further requests wait
+        // instead of competing for every core).
+        let permit = std::sync::Arc::clone(&self.expansions)
+            .acquire_owned()
+            .await
+            .map_err(|_| StorageError::Task)?;
         tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let empty = HashSet::new();
             let mut result = Vec::new();
             for row in rows {
@@ -385,14 +401,14 @@ impl Store {
     async fn shift_overrides(
         tx: &mut Transaction<'_, Sqlite>,
         series_id: &str,
-        delta: chrono::Duration,
+        shift: &KeyShift,
     ) -> Result<()> {
-        if delta.is_zero() {
+        if shift.delta.is_zero() {
             return Ok(());
         }
         // Ids are derived from recurrence ids; move the furthest ones first so
         // a shifted id never collides with one not yet moved.
-        let sql = if delta > chrono::Duration::zero() {
+        let sql = if shift.is_forward() {
             "SELECT id, recurrence_id FROM events WHERE series_id = ? ORDER BY range_start_ms DESC"
         } else {
             "SELECT id, recurrence_id FROM events WHERE series_id = ? ORDER BY range_start_ms ASC"
@@ -407,13 +423,41 @@ impl Store {
             let key: OccurrenceKey = key
                 .parse()
                 .map_err(|_| StorageError::Corrupt(format!("recurrence id: {key}")))?;
-            let moved = key.shifted(delta);
-            sqlx::query("UPDATE events SET id = ?, recurrence_id = ? WHERE id = ?")
-                .bind(occurrence_id(series_id, &moved))
-                .bind(moved.to_string())
-                .bind(&id)
-                .execute(&mut **tx)
-                .await?;
+            let moved = shift.apply(&key);
+            // base_recurrence_id remembers the id the server copy uses.
+            sqlx::query(
+                "UPDATE events SET id = ?, recurrence_id = ?, \
+                 base_recurrence_id = COALESCE(base_recurrence_id, recurrence_id) WHERE id = ?",
+            )
+            .bind(occurrence_id(series_id, &moved))
+            .bind(moved.to_string())
+            .bind(&id)
+            .execute(&mut **tx)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Deletes overrides of a series for slots its (edited) rule no longer
+    /// generates, e.g. after COUNT was reduced.
+    async fn prune_overrides(
+        tx: &mut Transaction<'_, Sqlite>,
+        series_id: &str,
+        timing: &calendar_core::EventTiming,
+        rec: &Recurrence,
+    ) -> Result<()> {
+        let rows = sqlx::query("SELECT id, recurrence_id FROM events WHERE series_id = ?")
+            .bind(series_id)
+            .fetch_all(&mut **tx)
+            .await?;
+        for row in rows {
+            let key: String = row.get("recurrence_id");
+            let key: OccurrenceKey = key
+                .parse()
+                .map_err(|_| StorageError::Corrupt(format!("recurrence id: {key}")))?;
+            if !recurrence::has_occurrence(timing, rec, &key, &chrono_tz::UTC)? {
+                Self::delete_row(tx, &row.get::<String, _>("id")).await?;
+            }
         }
         Ok(())
     }
@@ -432,19 +476,22 @@ impl Store {
         Ok(())
     }
 
-    /// Marks the object of `event_id` as changed locally, if it is remote.
+    /// Marks the object of `event_id` as changed locally, if it is remote,
+    /// and returns the sync status its rows now have.
     async fn touch_event(
         tx: &mut Transaction<'_, Sqlite>,
         calendar_id: &str,
         event_id: &str,
-    ) -> Result<bool> {
+    ) -> Result<Option<SyncStatus>> {
         match Self::event_href(tx, event_id).await? {
-            Some(href) => {
-                Self::touch_object(tx, calendar_id, &href).await?;
-                Ok(true)
-            }
-            None => Ok(false),
+            Some(href) => Ok(Some(Self::touch_object(tx, calendar_id, &href).await?)),
+            None => Ok(None),
         }
+    }
+
+    /// An RDATE-only recurrence without dates is no recurrence.
+    fn meaningful(recurrence: Option<Recurrence>) -> Option<Recurrence> {
+        recurrence.filter(|r| !(recurrence::is_rdate_only(r) && r.rdates.is_empty()))
     }
 
     fn validated(draft: &EventDraft) -> Result<Option<Recurrence>> {
@@ -467,7 +514,7 @@ impl Store {
         if id.is_empty() || id.contains(calendar_core::model::OCCURRENCE_SEPARATOR) {
             return Err(StorageError::Unsupported("invalid event id"));
         }
-        let recurrence = Self::validated(&draft)?;
+        let recurrence = Self::meaningful(Self::validated(&draft)?);
         let now = now();
         let event = CalendarEvent {
             id: id.to_owned(),
@@ -521,7 +568,7 @@ impl Store {
                 new.rdates.clone_from(&old.rdates);
                 new.exdates.clone_from(&old.exdates);
             }
-            rec
+            Self::meaningful(rec)
         };
         if current.recurrence.is_some() && (recurrence.is_none() || draft.timing != current.timing)
         {
@@ -530,6 +577,10 @@ impl Store {
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
+        } else if let Some(rec) = &recurrence
+            && current.recurrence.as_ref() != Some(rec)
+        {
+            Self::prune_overrides(&mut tx, id, &draft.timing, rec).await?;
         }
         let updated = CalendarEvent {
             calendar_id: draft.calendar_id,
@@ -545,8 +596,8 @@ impl Store {
         };
         let mut updated = updated;
         Self::update_row(&mut tx, &updated).await?;
-        if Self::touch_event(&mut tx, &updated.calendar_id, id).await? {
-            updated.sync_status = SyncStatus::PendingSync;
+        if let Some(status) = Self::touch_event(&mut tx, &updated.calendar_id, id).await? {
+            updated.sync_status = status;
         }
         tx.commit().await?;
         Ok(updated)
@@ -592,12 +643,16 @@ impl Store {
                     rrule: rrule.clone(),
                     ..Recurrence::default()
                 };
-                if let Some(delta) = retimed.key_shift {
-                    rec.rdates = old_rec.rdates.iter().map(|k| k.shifted(delta)).collect();
-                    rec.exdates = old_rec.exdates.iter().map(|k| k.shifted(delta)).collect();
+                if let Some(shift) = retimed.key_shift {
+                    rec.rdates = old_rec.rdates.iter().map(|k| shift.apply(k)).collect();
+                    rec.exdates = old_rec.exdates.iter().map(|k| shift.apply(k)).collect();
                 }
                 recurrence::validate(&retimed.timing, &rec)?;
-                (retimed.timing, Some(rec), retimed.key_shift)
+                (
+                    retimed.timing,
+                    Self::meaningful(Some(rec)),
+                    retimed.key_shift,
+                )
             }
         };
         let keep_overrides = recurrence.is_some() && shift.is_some();
@@ -651,7 +706,7 @@ impl Store {
             ..master
         };
         Self::update_row(&mut tx, &updated).await?;
-        if let (true, Some(delta)) = (keep_overrides, shift) {
+        if let (true, Some(shift)) = (keep_overrides, shift) {
             if let Some(mut edited) = edited_override {
                 // The occurrence the user edited takes the new details too.
                 edited.title.clone_from(&updated.title);
@@ -662,11 +717,14 @@ impl Store {
                 edited.updated_at = updated.updated_at;
                 Self::update_row(&mut tx, &edited).await?;
             }
-            Self::shift_overrides(&mut tx, &series_id, delta).await?;
+            Self::shift_overrides(&mut tx, &series_id, &shift).await?;
+            if let Some(rec) = &updated.recurrence {
+                Self::prune_overrides(&mut tx, &series_id, &updated.timing, rec).await?;
+            }
         }
         let mut updated = updated;
-        if Self::touch_event(&mut tx, &updated.calendar_id, &series_id).await? {
-            updated.sync_status = SyncStatus::PendingSync;
+        if let Some(status) = Self::touch_event(&mut tx, &updated.calendar_id, &series_id).await? {
+            updated.sync_status = status;
         }
         tx.commit().await?;
         Ok(updated)
@@ -749,8 +807,8 @@ impl Store {
             }
         }
         let mut event = event;
-        if Self::touch_event(&mut tx, &event.calendar_id, series_id).await? {
-            event.sync_status = SyncStatus::PendingSync;
+        if let Some(status) = Self::touch_event(&mut tx, &event.calendar_id, series_id).await? {
+            event.sync_status = status;
         }
         tx.commit().await?;
         let mut occ = event.as_occurrence();

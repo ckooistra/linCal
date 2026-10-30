@@ -103,6 +103,24 @@ export interface AccountStatus {
   pending: number;
   failed: number;
   conflicts: number;
+  /** Server events whose newest version could not be read. */
+  importFailures: number;
+  /** Server events shown only approximately (e.g. unknown time zone). */
+  approximated: number;
+}
+
+/** How to settle a change the server refused or that conflicts. */
+export type Resolution = "retry" | "keep-local" | "use-server";
+
+/** A failed or conflicting change, including deletions (which have no event left). */
+export interface SyncProblem {
+  accountId: AccountId;
+  calendarId: CalendarId;
+  href: string;
+  title: string;
+  deletion: boolean;
+  conflict: boolean;
+  message: string;
 }
 
 /** Progress events from the background sync engine. */

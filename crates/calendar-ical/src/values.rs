@@ -66,8 +66,21 @@ pub struct IcalDuration {
     pub seconds: i64,
 }
 
+/// Longest accepted DURATION. Values come from servers and other clients;
+/// anything this large is malformed, and bounding it keeps every later
+/// date calculation in range.
+const MAX_DURATION_DAYS: i64 = 100 * 366;
+
 pub fn parse_duration(s: &str) -> Result<IcalDuration, IcalError> {
     let err = || bad("duration", s);
+    // digits × unit, refusing overflow.
+    let scaled = |digits: &str, unit: i64| -> Result<i64, IcalError> {
+        digits
+            .parse::<i64>()
+            .ok()
+            .and_then(|n| n.checked_mul(unit))
+            .ok_or_else(err)
+    };
     let (sign, rest) = match s.as_bytes().first() {
         Some(b'-') => (-1, &s[1..]),
         Some(b'+') => (1, &s[1..]),
@@ -80,26 +93,28 @@ pub fn parse_duration(s: &str) -> Result<IcalDuration, IcalError> {
     };
     let mut days = 0i64;
     let mut seconds = 0i64;
-    let mut number = String::new();
+    let mut digits = String::new();
     for c in date_part.chars() {
-        match c {
-            '0'..='9' => number.push(c),
-            'W' => days += 7 * number.parse::<i64>().map_err(|_| err())?,
-            'D' => days += number.parse::<i64>().map_err(|_| err())?,
+        let unit = match c {
+            '0'..='9' => {
+                digits.push(c);
+                continue;
+            }
+            'W' => 7,
+            'D' => 1,
             _ => return Err(err()),
-        }
-        if !c.is_ascii_digit() {
-            number.clear();
-        }
+        };
+        days = days.checked_add(scaled(&digits, unit)?).ok_or_else(err)?;
+        digits.clear();
     }
-    if !number.is_empty() {
+    if !digits.is_empty() {
         return Err(err());
     }
     if let Some(t) = time_part {
         for c in t.chars() {
             let unit = match c {
                 '0'..='9' => {
-                    number.push(c);
+                    digits.push(c);
                     continue;
                 }
                 'H' => 3600,
@@ -107,12 +122,17 @@ pub fn parse_duration(s: &str) -> Result<IcalDuration, IcalError> {
                 'S' => 1,
                 _ => return Err(err()),
             };
-            seconds += unit * number.parse::<i64>().map_err(|_| err())?;
-            number.clear();
+            seconds = seconds
+                .checked_add(scaled(&digits, unit)?)
+                .ok_or_else(err)?;
+            digits.clear();
         }
-        if !number.is_empty() {
+        if !digits.is_empty() {
             return Err(err());
         }
+    }
+    if days > MAX_DURATION_DAYS || seconds / 86_400 > MAX_DURATION_DAYS {
+        return Err(err());
     }
     Ok(IcalDuration {
         days: sign * days,
@@ -254,7 +274,17 @@ mod tests {
                 seconds: 43_200
             }
         );
-        for bad in ["", "1H", "PT1", "P1X", "PTH"] {
+        for bad in [
+            "",
+            "1H",
+            "PT1",
+            "P1X",
+            "PTH",
+            "P999999999999D",
+            "P9223372036854775807W",
+            "PT99999999999999999999S",
+            "P36601D",
+        ] {
             assert!(parse_duration(bad).is_err(), "{bad}");
         }
     }

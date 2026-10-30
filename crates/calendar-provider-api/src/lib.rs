@@ -134,6 +134,11 @@ pub trait CalendarProvider: Send + Sync {
         precondition: &Precondition,
     ) -> ProviderResult<WriteResult>;
 
+    /// The current version of one object, or `None` if it does not exist.
+    /// Used when the client does not know an object's version (e.g. the
+    /// server answered a write without an ETag, RFC 4791 §5.3.4).
+    async fn get_object(&self, href: &str) -> ProviderResult<Option<RemoteObject>>;
+
     /// Deletes an object; `version` makes the delete conditional.
     async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()>;
 }

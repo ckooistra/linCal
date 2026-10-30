@@ -24,12 +24,13 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   - Server changes are fetched incrementally with sync tokens where supported (RFC 6578), falling back to an ETag comparison.
   - It syncs on start-up, a few seconds after local edits, every 5 minutes, and on **Sync now**.
 - **Offline:**
-  - Changes are queued in SQLite and survive restarts and crashes.
-  - Failed uploads retry with backoff (30 s doubling to 1 h).
+  - Changes are queued in SQLite and survive restarts and crashes. A deletion stays queued even if it happens while the event's first upload is still in flight.
+  - Failed uploads retry with backoff (30 s doubling to 1 h). An account whose sync fails (wrong password, server down) backs off as a whole instead of retrying in a loop; editing or **Sync now** tries again at once.
   - The sidebar shows *Offline*, *N changes waiting* or errors.
-- **Conflicts:** if an event changed on the server and here, it is marked with a dashed red outline, and the editor offers *Keep mine* or *Use server version*.
-- **Round trips are lossless.** Properties this app doesn't edit (alarms, attendees, vendor `X-` fields, VTIMEZONEs) are kept exactly as the server sent them.
-- **Credentials** are stored in the system keyring via the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in the database or logs.
+- **Conflicts and refused changes:** an event changed both on the server and here gets a dashed red outline, and the editor offers *Keep mine* or *Use server version*. The sidebar's **Review…** link lists every conflicting or refused change, including deletions (which have no event left to open). A refused change can be retried, still checked against the server's version.
+- **Unknown data is preserved.** Properties this app doesn't edit (alarms, attendees, vendor `X-` fields, VTIMEZONEs) are written back as the server sent them, also when a whole series is moved. This is tested for the cases in `crates/calendar-ical/tests/events.rs`; it is not a guarantee for every possible object.
+- **Untrusted server data** can't stop synchronization. An object that can't be read keeps its last good version, and the sidebar counts it as *could not be read*. Objects shown only approximately (unknown time zone, "this and following" changes, RDATE periods) are counted too.
+- **Credentials** are stored in the system keyring via the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in the database or logs. They are only sent over HTTPS (plain HTTP is allowed for `localhost` test servers only), and never to a host outside the server's domain found during discovery.
 
 ### Calendar
 
@@ -39,7 +40,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - Multiple simulated accounts and calendars, including read-only ones. Each calendar has a colour picker and a visibility toggle.
 - Event creation and editing (click, drag-to-create, or **N**), drag/resize to move events, and timed and all-day events.
 - **Local persistence** in SQLite (WAL, migrations). Events, calendar colours, hidden calendars, theme and dataset choice survive restarts. The database lives at `~/.local/share/org.universalcalendar.desktop/calendar.db`.
-- **Recurring events** (RRULE, RDATE, EXDATE, moved occurrences) expanded by the Rust core for the visible range only, time-zone and DST correct:
+- **Recurring events** (RRULE, RDATE including RDATE-only series, EXDATE, moved occurrences, cancelled series) expanded by the Rust core for the visible range only, in the series' time zone so wall-clock times hold across DST. Old hourly, daily and weekly series jump straight to the visible range. Unsupported cases (custom VTIMEZONE rules, `RANGE=THISANDFUTURE`) are shown approximately and flagged:
   - **Dragging** an occurrence moves just that one.
   - **The editor** edits the whole series and offers *Delete this event* or *Delete series*.
   - **Repeat presets:** daily, weekdays, weekly, monthly, yearly. Custom rules are kept.
@@ -78,7 +79,7 @@ Linux (developed on Ubuntu 24.04; target desktop KDE Plasma). Windows and macOS 
 
 ## Prerequisites
 
-- Rust stable ≥ 1.90 (`rustup`), with `rustfmt` and `clippy`
+- Rust stable ≥ 1.94 (`rustup`; SQLx 0.9 requires it), with `rustfmt` and `clippy`
 - Node.js ≥ 22 (tested with 26.13 LTS) and npm
 - Tauri's Linux system libraries:
 

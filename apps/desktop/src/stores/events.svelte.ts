@@ -8,7 +8,10 @@ import type {
   EventDraft,
   EventId,
 } from "../types/calendar";
-import { mergeRange, rangeCovered } from "./ranges";
+import { clipRanges, mergeRange, rangeCovered } from "./ranges";
+
+/** Cached data further than this from the visible range is dropped. */
+const RETAIN_MS = 120 * 86_400_000;
 
 export type StoreChange =
   | { type: "upsert"; event: CalendarEvent }
@@ -53,6 +56,17 @@ export class EventStore {
   readonly #tombstones = new Set<EventId>();
   readonly #listeners = new Set<(change: StoreChange) => void>();
   #loaded: DateRange[] = [];
+  /**
+   * Orders loads against local writes: every write start and completion
+   * takes the next number, and a load ignores events written after it
+   * started (its data may predate the write).
+   */
+  #clock = 0;
+  readonly #writtenAt = new Map<EventId, number>();
+  /** Loads in flight, by the clock value they started at. */
+  readonly #inflight = new Set<number>();
+  /** Bumped by `reset`: completions of writes to an older source are ignored. */
+  #sourceGeneration = 0;
   readonly #controllers: Record<LoadPriority, AbortController | null> = {
     visible: null,
     prefetch: null,
@@ -99,6 +113,8 @@ export class EventStore {
     this.#events.clear();
     this.#confirmed.clear();
     this.#tombstones.clear();
+    this.#writtenAt.clear();
+    this.#sourceGeneration++;
     this.#loaded = [];
     this.loading = false;
     this.loadError = null;
@@ -117,10 +133,13 @@ export class EventStore {
     const controller = new AbortController();
     this.#controllers[priority] = controller;
     if (priority === "visible") this.loading = true;
+    const startedAt = ++this.#clock;
+    this.#inflight.add(startedAt);
     try {
       const events = await this.#source.queryRange(range, { signal: controller.signal });
       if (controller.signal.aborted) return false;
-      this.#merge(range, events);
+      if (priority === "visible") this.#retainAround(range);
+      this.#merge(range, events, startedAt);
       if (priority === "visible") this.loadError = null;
       this.#emit({ type: "loaded", range });
       return true;
@@ -129,9 +148,41 @@ export class EventStore {
       if (priority === "visible") this.loadError = describe(error, "Events could not be loaded.");
       return false;
     } finally {
+      this.#inflight.delete(startedAt);
+      this.#forgetOldWrites();
       if (this.#controllers[priority] === controller) {
         this.#controllers[priority] = null;
         if (priority === "visible") this.loading = false;
+      }
+    }
+  }
+
+  /** Marks a local write (start or completion) for load ordering. */
+  #wrote(id: EventId): void {
+    this.#writtenAt.set(id, ++this.#clock);
+  }
+
+  /** Write marks only matter to loads that started before them. */
+  #forgetOldWrites(): void {
+    const oldest = Math.min(Infinity, ...this.#inflight);
+    for (const [id, at] of this.#writtenAt) {
+      if (at < oldest) this.#writtenAt.delete(id);
+    }
+  }
+
+  /**
+   * Bounds the cache: drops events and loaded ranges far from `visible`
+   * (local changes still being saved are kept).
+   */
+  #retainAround(visible: DateRange): void {
+    const window = { start: visible.start - RETAIN_MS, end: visible.end + RETAIN_MS };
+    if (this.#loaded.every((r) => r.start >= window.start && r.end <= window.end)) return;
+    this.#loaded = clipRanges(this.#loaded, window);
+    for (const [id, event] of this.#events) {
+      if (event.syncStatus !== "pending-local" && !overlaps(eventBounds(event), window)) {
+        this.#events.delete(id);
+        this.#confirmed.delete(id);
+        this.#emit({ type: "remove", id });
       }
     }
   }
@@ -161,13 +212,19 @@ export class EventStore {
       revision: 1,
     };
     this.#set(optimistic);
+    this.#wrote(id);
+    const generation = this.#sourceGeneration;
     this.#source.createEvent(id, draft).then(
       (saved) => {
+        if (generation !== this.#sourceGeneration) return;
+        this.#wrote(id);
         this.#settle(id, optimistic.revision, saved);
         // A new series has occurrences beyond the one shown optimistically.
         if (optimistic.rrule) this.invalidate();
       },
       (error: unknown) => {
+        if (generation !== this.#sourceGeneration) return;
+        this.#wrote(id);
         if (this.#events.get(id)?.revision === optimistic.revision) this.#delete(id);
         this.#options.onError(describe(error, "The event could not be created."));
       },
@@ -200,13 +257,19 @@ export class EventStore {
       revision: previous.revision + 1,
     };
     this.#set(optimistic);
+    this.#wrote(id);
+    const generation = this.#sourceGeneration;
     const affectsOthers = effective === "series" || rrule !== previous.rrule;
     this.#source.updateEvent(id, { ...draft, rrule }, effective).then(
       (saved) => {
+        if (generation !== this.#sourceGeneration) return;
+        this.#wrote(id);
         if (affectsOthers) {
           // Other occurrences changed too: let the reload replace this one.
           const current = this.#events.get(id);
-          if (current?.revision === optimistic.revision) this.#events.set(id, { ...current, syncStatus: "saved" });
+          if (current?.revision === optimistic.revision) {
+            this.#events.set(id, { ...current, syncStatus: settledStatus(saved) });
+          }
           this.#confirmed.delete(id);
           this.invalidate();
         } else {
@@ -214,6 +277,8 @@ export class EventStore {
         }
       },
       (error: unknown) => {
+        if (generation !== this.#sourceGeneration) return;
+        this.#wrote(id);
         // Only roll back if no newer local edit has superseded this one.
         if (this.#events.get(id)?.revision === optimistic.revision) {
           this.#set(this.#confirmed.get(id) ?? previous);
@@ -242,16 +307,23 @@ export class EventStore {
     for (const event of removed) {
       this.#tombstones.add(event.id);
       this.#delete(event.id);
+      this.#wrote(event.id);
     }
+    const generation = this.#sourceGeneration;
     this.#source.deleteEvent(id, effective).then(
       () => {
+        if (generation !== this.#sourceGeneration) return;
         for (const event of removed) {
+          // Loads that started earlier still skip it (write mark).
+          this.#wrote(event.id);
           this.#tombstones.delete(event.id);
           this.#confirmed.delete(event.id);
         }
       },
       (error: unknown) => {
+        if (generation !== this.#sourceGeneration) return;
         for (const event of removed) {
+          this.#wrote(event.id);
           this.#tombstones.delete(event.id);
           this.#set(this.#confirmed.get(event.id) ?? event);
         }
@@ -268,16 +340,18 @@ export class EventStore {
 
   #settle(id: EventId, revision: number, saved: CalendarEvent): void {
     // Keep the local revision counter; the source's numbering is its own.
-    const settled: CalendarEvent = { ...saved, revision, syncStatus: "saved" };
+    const settled: CalendarEvent = { ...saved, revision, syncStatus: settledStatus(saved) };
     this.#confirmed.set(id, settled);
     if (this.#events.get(id)?.revision === revision) this.#set(settled);
   }
 
-  #merge(range: DateRange, incoming: CalendarEvent[]): void {
+  #merge(range: DateRange, incoming: CalendarEvent[], startedAt: number): void {
+    // Written locally after this load started: the loaded copy may be older.
+    const newer = (id: EventId) => (this.#writtenAt.get(id) ?? 0) > startedAt;
     const seen = new Set<EventId>();
     for (const event of incoming) {
       seen.add(event.id);
-      if (this.#tombstones.has(event.id)) continue;
+      if (this.#tombstones.has(event.id) || newer(event.id)) continue;
       const local = this.#events.get(event.id);
       // A local change still being persisted wins over loaded data.
       if (local?.syncStatus === "pending-local") continue;
@@ -286,7 +360,12 @@ export class EventStore {
     }
     // Drop cached events in this range that the source no longer has.
     for (const [id, event] of this.#events) {
-      if (!seen.has(id) && event.syncStatus !== "pending-local" && overlaps(eventBounds(event), range)) {
+      if (
+        !seen.has(id) &&
+        !newer(id) &&
+        event.syncStatus !== "pending-local" &&
+        overlaps(eventBounds(event), range)
+      ) {
         this.#events.delete(id);
         this.#confirmed.delete(id);
       }
@@ -311,6 +390,11 @@ export class EventStore {
   #emit(change: StoreChange): void {
     for (const listener of this.#listeners) listener(change);
   }
+}
+
+/** Status after a successful save: the source's (e.g. "pending-sync" for synchronized calendars). */
+function settledStatus(saved: CalendarEvent): CalendarEvent["syncStatus"] {
+  return saved.syncStatus === "pending-local" ? "saved" : saved.syncStatus;
 }
 
 function describe(error: unknown, fallback: string): string {

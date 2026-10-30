@@ -15,7 +15,7 @@ use calendar_provider_api::{
     CalendarProvider, Capabilities, ChangeSet, Precondition, ProviderError, ProviderResult,
     RemoteCalendar, RemoteObject, WriteResult,
 };
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 use url::Url;
 
 use client::{Client, method};
@@ -85,7 +85,31 @@ async fn find_href(
     Ok(None)
 }
 
+/// Whether credentials for `server` may be sent to `target`, a URL the
+/// server reported during discovery: the same origin, or (over HTTPS, never
+/// downgraded) another host of the same domain, as some providers keep
+/// calendars on per-user hosts (`p07-caldav.example.com`).
+fn trusted_transition(server: &Url, target: &Url) -> bool {
+    if server.origin() == target.origin() {
+        return true;
+    }
+    let site = |u: &Url| -> Option<String> {
+        let host = u.host_str()?.to_ascii_lowercase();
+        let labels: Vec<&str> = host.split('.').collect();
+        (labels.len() >= 2).then(|| labels[labels.len() - 2..].join("."))
+    };
+    target.scheme() == "https"
+        && site(server).is_some()
+        && site(server) == site(target)
+        && server
+            .host_str()
+            .is_some_and(|h| h.parse::<std::net::IpAddr>().is_err())
+}
+
 /// Finds the principal and calendar home for `server` with these credentials.
+///
+/// The calendar home must be on a trusted origin (see `trusted_transition`):
+/// account setup later sends the password there.
 pub async fn discover(server: &Url, username: &str, password: &str) -> ProviderResult<Discovery> {
     let client = Client::new(server, username, password)?;
     let mut candidates = vec![server.clone()];
@@ -122,6 +146,14 @@ pub async fn discover(server: &Url, username: &str, password: &str) -> ProviderR
         .ok_or_else(|| {
             ProviderError::InvalidResponse("the server did not report a calendar home".into())
         })?;
+        if !trusted_transition(server, &home) {
+            return Err(ProviderError::InvalidResponse(format!(
+                "the server keeps calendars at {}, which is not part of {}; enter that address instead",
+                home.host_str().unwrap_or("another server"),
+                server.host_str().unwrap_or("the server")
+            )));
+        }
+        client::check_transport(&home)?;
         return Ok(Discovery {
             principal,
             calendar_home: home,
@@ -423,6 +455,24 @@ impl CalendarProvider for CalDavProvider {
         })
     }
 
+    async fn get_object(&self, href: &str) -> ProviderResult<Option<RemoteObject>> {
+        let url = Url::parse(href)
+            .map_err(|_| ProviderError::InvalidResponse("bad object URL".into()))?;
+        match self.client.send(Method::GET, &url, &[], None, &[]).await {
+            Ok(reply) => Ok(Some(RemoteObject {
+                href: url.to_string(),
+                etag: reply
+                    .headers
+                    .get("ETag")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                ical: reply.body,
+            })),
+            Err(ProviderError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()> {
         let url = Url::parse(href)
             .map_err(|_| ProviderError::InvalidResponse("bad object URL".into()))?;
@@ -445,6 +495,33 @@ impl CalendarProvider for CalDavProvider {
 #[cfg(test)]
 mod tests {
     use super::normalize_color;
+
+    #[test]
+    fn discovery_only_trusts_the_same_site() {
+        let u = |s: &str| url::Url::parse(s).unwrap();
+        let server = u("https://cloud.example.org/remote.php/dav/");
+        assert!(super::trusted_transition(
+            &server,
+            &u("https://cloud.example.org/cal/")
+        ));
+        assert!(super::trusted_transition(
+            &server,
+            &u("https://p07.example.org/cal/")
+        ));
+        assert!(!super::trusted_transition(
+            &server,
+            &u("http://cloud.example.org/cal/")
+        ));
+        assert!(!super::trusted_transition(
+            &server,
+            &u("https://evil.example.net/cal/")
+        ));
+        let ip = u("https://192.168.1.5/dav/");
+        assert!(!super::trusted_transition(&ip, &u("https://10.1.5/dav/")));
+        assert!(super::client::check_transport(&u("http://127.0.0.1:5232/")).is_ok());
+        assert!(super::client::check_transport(&u("http://localhost/")).is_ok());
+        assert!(super::client::check_transport(&u("http://cloud.example.org/")).is_err());
+    }
 
     #[test]
     fn normalizes_colors() {

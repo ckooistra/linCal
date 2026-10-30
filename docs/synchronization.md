@@ -49,9 +49,11 @@ All event history is synced (the database is the local source). Rendering stays 
   - `put` uploads the object's current rows;
   - `delete` removes it.
 - **Coalescing.** Repeated edits merge into one upload.
-- **Local-only objects.** Deleting an object that never reached the server simply forgets it.
+- **Presence is tracked separately from the version.** `remote_objects.presence` is `local` (never sent), `sent` (a create went out; the answer may have been lost) or `present`. An upload of a `local` object first marks it `sent` in its own transaction. So a deletion made while the first upload is in flight is still queued and sent to the server.
+- **Local-only objects.** Deleting an object that is still `local` simply forgets it.
+- **Unknown versions.** If a write is answered without an ETag (allowed by RFC 4791 §5.3.4), the engine reads the object back to learn its version and the server's copy. If the version is still unknown at the next upload, it asks the server first and never sends a create for an object that may already exist.
 - **Edits during an upload.** Each operation has a generation counter. A change made while an upload is running bumps it, so that upload doesn't mark the newer change as synced and it is uploaded next.
-- **Lossless uploads.** The object is rebuilt from the last server copy plus the local rows (`calendar-ical::write_events`). Only changed properties are rewritten and SEQUENCE is incremented, so alarms, attendees and vendor properties survive.
+- **Preserving uploads.** The object is rebuilt from the last server copy plus the local rows (`calendar-ical::write_object`). Only changed properties are rewritten and SEQUENCE is incremented, so alarms, attendees and vendor properties survive. When a whole series moves, its overrides get new recurrence ids. `events.base_recurrence_id` remembers which component of the server copy each one came from, so that component is edited, not replaced.
 - **Crash-safe.** The queue survives restarts and crashes because it is in SQLite (WAL).
 
 ## Uploads and conflicts
@@ -69,10 +71,17 @@ All event history is synced (the database is the local source). Rendering stays 
 | 401 | the account shows a credentials error; the queue is kept |
 | Other 4xx (e.g. 403 on a read-only calendar) | `sync-failed`; the user can retry or discard |
 
-**Resolving a conflict** (editor banner):
+**Resolving** (editor banner, or the sidebar's **Review…** list, which also shows deletions that have no event left):
 
-- **Keep mine:** uploads the local version unconditionally.
-- **Use server version:** drops the local change, forgets the stored ETag and resets the calendar's sync token. Server changes skipped while the edit was queued are then fetched by a full ETag comparison.
+- **Keep mine** (conflicts): uploads the local version unconditionally.
+- **Try again** (refused changes): retries the same conditional request.
+- **Use server version / Discard my change / Restore the event:**
+  - drops the local change;
+  - forgets the stored version (the object stays known, with an unknown version);
+  - resets the calendar's sync token.
+
+  The next full listing then downloads the server copy, or finds it gone and removes the local rows. A create that never reached the server is simply removed.
+- **Further edits** to an object in conflict keep it in conflict until it is resolved.
 
 **During a pull, objects with a queued local change are left untouched.** The version check on upload turns any concurrent server change into a conflict rather than an overwrite.
 
@@ -84,7 +93,10 @@ All event history is synced (the database is the local source). Rendering stays 
 | Password rejected / revoked | Account shows the error; nothing is lost; other accounts keep syncing |
 | Calendar deleted remotely | Removed locally unless it has queued changes (then kept) |
 | Lost access to one calendar | Skipped; the rest of the account syncs |
-| Malformed remote data | Object skipped and logged; the rest is applied |
+| Malformed remote data | The last good version of that object is kept (rows, ETag, base copy) and the failure is recorded in `remote_objects.import_error` and counted in the sidebar. The rest is applied. Parsing runs off the async workers, with checked arithmetic and a panic guard per object. |
+| Data read only approximately | Recorded in `remote_objects.import_warnings` and counted in the sidebar |
+| An account keeps failing | Account-level backoff (30 s doubling to 1 h); a local edit or *Sync now* retries at once |
+| A pass hangs or panics | Each account's pass runs as its own task with a 10-minute limit; a panic ends that pass, not the scheduler. Up to 3 accounts sync in parallel. |
 | Crash during sync | Pull transactions are atomic; queued uploads are replayed |
 | Password missing from keyring | Account shows *Could not read the account password*; re-add the account |
 

@@ -5,7 +5,7 @@
  */
 
 import { SourceError } from "./eventSource";
-import type { AccountStatus, SyncEvent } from "../types/calendar";
+import type { AccountStatus, Resolution, SyncEvent, SyncProblem } from "../types/calendar";
 
 export interface BenchConfig {
   enabled: boolean;
@@ -136,8 +136,16 @@ export async function accountStatuses(): Promise<AccountStatus[]> {
   return invoke<AccountStatus[]>("account_statuses");
 }
 
-export async function resolveConflict(eventId: string, keepLocal: boolean): Promise<void> {
-  await invoke("resolve_conflict", { eventId, keepLocal });
+export async function resolveConflict(eventId: string, resolution: Resolution): Promise<void> {
+  await invoke("resolve_conflict", { eventId, resolution });
+}
+
+export async function syncProblems(): Promise<SyncProblem[]> {
+  return invoke<SyncProblem[]>("sync_problems");
+}
+
+export async function resolveSyncProblem(calendarId: string, href: string, resolution: Resolution): Promise<void> {
+  await invoke("resolve_sync_problem", { calendarId, href, resolution });
 }
 
 /** Subscribes to sync progress events. Returns an unsubscribe function. */

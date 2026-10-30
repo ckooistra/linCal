@@ -149,7 +149,9 @@ impl WireDraft {
             description: self.description.clone(),
             location: self.location.clone(),
             timing: self.timing.to_timing(display_tz)?,
-            rrule: self.rrule.clone().filter(|r| !r.trim().is_empty()),
+            // "" is kept: it is the rule of an RDATE-only series (storage
+            // treats it as "not recurring" unless the series has dates).
+            rrule: self.rrule.as_ref().map(|r| r.trim().to_owned()),
         };
         draft.validate()?;
         Ok(draft)

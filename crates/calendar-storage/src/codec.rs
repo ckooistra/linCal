@@ -180,5 +180,16 @@ pub(crate) fn index_range(event: &CalendarEvent) -> Result<(i64, i64), StorageEr
             .unwrap_or(i64::MAX),
         None => bounds.end.timestamp_millis(),
     };
-    Ok((bounds.start.timestamp_millis(), end))
+    // RDATEs may lie before DTSTART; the series starts at the earliest.
+    let start = event
+        .recurrence
+        .iter()
+        .flat_map(|r| r.rdates.iter())
+        .map(|k| match k {
+            OccurrenceKey::Instant(t) => *t,
+            OccurrenceKey::Floating(t) => t.and_utc(),
+            OccurrenceKey::Date(d) => d.and_hms_opt(0, 0, 0).expect("valid").and_utc(),
+        })
+        .fold(bounds.start, std::cmp::min);
+    Ok((start.timestamp_millis(), end))
 }
