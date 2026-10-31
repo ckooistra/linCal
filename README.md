@@ -138,8 +138,10 @@ Linux (developed on Ubuntu 24.04; target desktop KDE Plasma). Windows and macOS 
 cd apps/desktop
 npm install
 npx tauri dev          # development window with hot reload
-npx tauri build        # release binary + .deb + AppImage under target/release/bundle/
+npx tauri build        # release binary + .deb, .rpm and AppImage under target/release/bundle/
 ```
+
+The packages install `universal-calendar` with a menu entry, icons and AppStream metadata (shown in Discover). `scripts/test-packages.sh` installs and starts each one in clean Ubuntu, Debian and Fedora containers. See [docs/packaging.md](docs/packaging.md).
 
 You can also run the frontend alone in a browser. That preview uses an in-memory mock with **no persistence and no recurrence expansion**; it exists for quick UI work and for the latency and failure simulation controls:
 
@@ -216,7 +218,7 @@ See [docs/architecture.md](docs/architecture.md).
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
 3. CalDAV (Nextcloud reference) with offline queue ✔
 4. Google Calendar and Microsoft Graph ✔ (Google checked live; Microsoft tested against an API fake, live check pending)
-5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, reminders and notifications, automatic merging and conflict comparison, accessibility pass. Next: packaging, user guide, profiling.
+5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, reminders and notifications, automatic merging and conflict comparison, accessibility pass, settings dialog with calendar groups and command palette, packaging (deb, rpm, AppImage). Next: user guide, profiling.
 
 ## License
 

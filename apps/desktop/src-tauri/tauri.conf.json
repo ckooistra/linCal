@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Universal Calendar",
+  "productName": "universal-calendar",
   "version": "0.1.0",
   "identifier": "org.universalcalendar.desktop",
   "build": {
@@ -31,16 +31,43 @@
     "active": true,
     "targets": [
       "deb",
+      "rpm",
       "appimage"
     ],
     "category": "Productivity",
-    "shortDescription": "Local-first desktop calendar",
+    "shortDescription": "Fast, local-first calendar for CalDAV, Google and Microsoft",
     "license": "GPL-3.0-or-later",
     "icon": [
       "icons/32x32.png",
+      "icons/64x64.png",
       "icons/128x128.png",
-      "icons/128x128@2x.png",
+      "icons/256x256.png",
       "icons/icon.png"
-    ]
-  }
+    ],
+    "publisher": "Universal Calendar contributors",
+    "homepage": "https://github.com/ckooistra/linCal",
+    "copyright": "© 2026 Universal Calendar contributors. GPL-3.0-or-later.",
+    "longDescription": "Universal Calendar shows calendars from CalDAV servers such as Nextcloud, Google Calendar, Microsoft 365 and Outlook.com, and ICS subscriptions in one fast desktop app. Events are kept locally and synchronized in the background, so the calendar stays responsive and works offline.",
+    "linux": {
+      "deb": {
+        "desktopTemplate": "linux/universal-calendar.desktop",
+        "files": {
+          "/usr/share/metainfo/org.universalcalendar.desktop.metainfo.xml": "linux/org.universalcalendar.desktop.metainfo.xml"
+        },
+        "section": "utils"
+      },
+      "rpm": {
+        "desktopTemplate": "linux/universal-calendar.desktop",
+        "files": {
+          "/usr/share/metainfo/org.universalcalendar.desktop.metainfo.xml": "linux/org.universalcalendar.desktop.metainfo.xml"
+        }
+      },
+      "appimage": {
+        "files": {
+          "/usr/share/metainfo/org.universalcalendar.desktop.metainfo.xml": "linux/org.universalcalendar.desktop.metainfo.xml"
+        }
+      }
+    }
+  },
+  "mainBinaryName": "universal-calendar"
 }

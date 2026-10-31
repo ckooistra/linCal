@@ -6,7 +6,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-bin="$root/target/release/universal-calendar-desktop"
+bin="$root/target/release/universal-calendar"
 out="${1:-$root/docs/screenshots/month.png}"
 wait_s="${2:-6}"
 mkdir -p "$(dirname "$out")"

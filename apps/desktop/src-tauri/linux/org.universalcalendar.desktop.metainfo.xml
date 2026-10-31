@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.universalcalendar.desktop</id>
+  <name>Universal Calendar</name>
+  <summary>Fast, local-first calendar for CalDAV, Google and Microsoft</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.ckooistra">
+    <name>Universal Calendar contributors</name>
+  </developer>
+  <description>
+    <p>
+      Universal Calendar shows your calendars from Nextcloud and other CalDAV servers,
+      Google Calendar, Microsoft 365 and Outlook.com, and calendar subscriptions together
+      in one fast desktop app. Everything is kept on your computer and synchronized in the
+      background, so the calendar stays responsive and works offline.
+    </p>
+    <ul>
+      <li>Month, week, day and agenda views, with search across all your events</li>
+      <li>Repeating events, including changes to "this and following" events</li>
+      <li>Reminders with desktop notifications</li>
+      <li>Changes made elsewhere are merged automatically where they do not overlap</li>
+      <li>Calendar groups, a command palette and full keyboard control</li>
+      <li>No account with us, no telemetry, no hosted backend</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">universal-calendar.desktop</launchable>
+  <url type="homepage">https://github.com/ckooistra/linCal</url>
+  <url type="bugtracker">https://github.com/ckooistra/linCal/issues</url>
+  <categories>
+    <category>Office</category>
+    <category>Calendar</category>
+  </categories>
+  <keywords>
+    <keyword>calendar</keyword>
+    <keyword>CalDAV</keyword>
+    <keyword>Nextcloud</keyword>
+  </keywords>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-31">
+      <description>
+        <p>First release: CalDAV, Google and Microsoft accounts, ICS subscriptions,
+        reminders, recurring-event editing, search and an agenda view.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Universal Calendar
+GenericName=Calendar
+Comment={{comment}}
+Exec={{exec}}
+Icon={{icon}}
+Terminal=false
+Categories=Office;Calendar;
+Keywords=calendar;events;agenda;schedule;caldav;nextcloud;google;outlook;ics;
+StartupNotify=true
+StartupWMClass={{exec}}

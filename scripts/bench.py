@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BIN = ROOT / "target" / "release" / "universal-calendar-desktop"
+BIN = ROOT / "target" / "release" / "universal-calendar"
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 
 
