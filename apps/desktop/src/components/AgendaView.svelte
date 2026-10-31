@@ -76,6 +76,8 @@
         view: "agenda",
         label: month.toLocaleDateString(undefined, { month: "long", year: "numeric" }),
         range: r,
+        // Today when it is in this month, else the month's first day.
+        date: Date.now() >= r.start && Date.now() < r.end ? Date.now() : r.start,
       });
       void load(r);
     });

@@ -10,7 +10,9 @@ export type ShortcutAction =
   | "next"
   | "toggle-perf"
   | "toggle-hours"
-  | "help";
+  | "help"
+  | "palette"
+  | "settings";
 
 /** True when keyboard input is going into a text field and shortcuts must not fire. */
 export function isEditableTarget(target: EventTarget | null): boolean {
@@ -35,6 +37,8 @@ export function resolveShortcut(e: KeyInput): ShortcutAction | null {
   const key = e.key.toLowerCase();
   const primary = e.ctrlKey || e.metaKey;
   if (primary && !e.altKey && !e.shiftKey && key === "f") return "search";
+  if (primary && !e.altKey && !e.shiftKey && key === "k") return "palette";
+  if (primary && !e.altKey && !e.shiftKey && key === ",") return "settings";
   if (primary && e.shiftKey && !e.altKey && key === "p") return "toggle-perf";
   if (primary || e.altKey || isEditableTarget(e.target)) return null;
   switch (key) {
@@ -74,7 +78,9 @@ export const SHORTCUT_HELP: readonly { keys: string[]; action: string; either?: 
   { keys: ["A"], action: "Agenda view" },
   { keys: ["H"], action: "Week and day: working hours or the full day" },
   { keys: ["N"], action: "New event" },
+  { keys: ["Ctrl", "K"], action: "Command palette: run any action by name" },
   { keys: ["Ctrl", "F"], action: "Search; Enter or ↓ goes to the results" },
+  { keys: ["Ctrl", ","], action: "Settings" },
   { keys: ["Tab"], action: "Move between controls and events" },
   { keys: ["Enter"], action: "Open the focused event" },
   { keys: ["↑", "↓"], either: true, action: "Agenda and search results: previous or next event" },

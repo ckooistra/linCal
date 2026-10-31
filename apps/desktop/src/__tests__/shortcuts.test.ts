@@ -20,6 +20,13 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(key(k))).toBe(action);
   });
 
+  it("maps Ctrl+K to the palette and Ctrl+, to settings, even inside inputs", () => {
+    const input = document.createElement("input");
+    expect(resolveShortcut(key("k", { ctrlKey: true }, input))).toBe("palette");
+    expect(resolveShortcut(key(",", { ctrlKey: true }, input))).toBe("settings");
+    expect(resolveShortcut(key("k"))).toBe("previous");
+  });
+
   it("maps Ctrl+F to search even inside inputs", () => {
     const input = document.createElement("input");
     expect(resolveShortcut(key("f", { ctrlKey: true }, input))).toBe("search");

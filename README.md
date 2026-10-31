@@ -17,7 +17,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 
 ### CalDAV accounts
 
-- **Add CalDAV account…** in the sidebar: enter the server address (for Nextcloud, just `https://your.cloud`), the user name and an **app password**.
+- **Add CalDAV account…** in Settings → Accounts: enter the server address (for Nextcloud, just `https://your.cloud`), the user name and an **app password**.
 - **Discovery** follows the standard route (`/.well-known/caldav` → principal → calendar home). Every event calendar is listed with its server colour; shared read-only calendars are detected.
 - **Two-way sync** in the background:
   - Every change is saved locally first, then uploaded with ETag checks, so another client's edits are never silently overwritten.
@@ -26,17 +26,17 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - **Offline:**
   - Changes are queued in SQLite and survive restarts and crashes. A deletion stays queued even if it happens while the event's first upload is still in flight.
   - Failed uploads retry with backoff (30 s doubling to 1 h). An account whose sync fails (wrong password, server down) backs off as a whole instead of retrying in a loop; editing or **Sync now** tries again at once.
-  - The sidebar shows *Offline*, *N changes waiting* or errors.
+  - Settings → Accounts shows *Offline*, *N changes waiting* or errors. While an account needs attention, the bottom of the sidebar says so.
 - **Conflicts and refused changes:**
   - **Changes to different fields merge automatically**, for example a new title here and a new location on the server. Cancelled occurrences from both sides combine.
-  - An event whose same field was changed differently on both sides gets a dashed red outline. The editor offers *Keep mine* or *Use server version*, and **Compare versions** shows both side by side with the differences marked. The sidebar's **Review…** link lists every conflicting or refused change, including deletions (which have no event left to open). A refused change can be retried, still checked against the server's version.
+  - An event whose same field was changed differently on both sides gets a dashed red outline. The editor offers *Keep mine* or *Use server version*, and **Compare versions** shows both side by side with the differences marked. Settings → Accounts → **Review…** lists every conflicting or refused change, including deletions (which have no event left to open). A refused change can be retried, still checked against the server's version.
 - **Unknown data is preserved.** Properties this app doesn't edit (alarms, attendees, vendor `X-` fields, VTIMEZONEs) are written back as the server sent them, also when a whole series is moved. This is tested for the cases in `crates/calendar-ical/tests/events.rs`; it is not a guarantee for every possible object.
-- **Untrusted server data** can't stop synchronization. An object that can't be read keeps its last good version, and the sidebar counts it as *could not be read*. Objects shown only approximately (unknown time zone, "this and following" changes, RDATE periods) are counted too.
+- **Untrusted server data** can't stop synchronization. An object that can't be read keeps its last good version, and Settings → Accounts counts it as *could not be read*. Objects shown only approximately (unknown time zone, "this and following" changes, RDATE periods) are counted too.
 - **Credentials** are stored in the system keyring via the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in the database or logs. They are only sent over HTTPS (plain HTTP is allowed for `localhost` test servers only), and never to a host outside the server's domain found during discovery.
 
 ### Google and Microsoft accounts
 
-- **Add Google account…** / **Add Microsoft account…** in the sidebar. You sign in in your web browser (OAuth with PKCE and a loopback redirect), so the app never sees your password. Tokens go to the system keyring and are refreshed automatically. If a sign-in expires or is revoked, **Sign in again…** appears and nothing queued is lost.
+- **Add Google account…** / **Add Microsoft account…** in Settings → Accounts. You sign in in your web browser (OAuth with PKCE and a loopback redirect), so the app never sees your password. Tokens go to the system keyring and are refreshed automatically. If a sign-in expires or is revoked, **Sign in again…** appears and nothing queued is lost.
 - **Both use the same engine as CalDAV:** offline queue, version-checked uploads, conflicts, and the **Review…** list. Several accounts per provider are supported, and each account syncs and fails independently.
 - **Only what you change is sent.** Attendees, reminders, conferencing links and other details this app doesn't edit stay untouched.
 - **Google:** full recurring-series support, with incremental sync via sync tokens.
@@ -45,7 +45,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 
 ### Calendar subscriptions (ICS)
 
-- **Subscribe to a calendar…** in the sidebar: enter a feed address (`webcal://…` or `https://…/….ics`), such as a public holiday calendar or the private "secret address" of a calendar in another service.
+- **Subscribe to a calendar…** in Settings → Accounts: enter a feed address (`webcal://…` or `https://…/….ics`), such as a public holiday calendar or the private "secret address" of a calendar in another service.
 - The calendar is **read-only** and refreshes in the background about every 15 minutes, with conditional requests, so an unchanged feed costs one short request. Events added, changed or removed in the feed follow.
 - Private feed addresses work like passwords, so the address is kept in the system keyring and never in the database or logs.
 - Checked against Google's and Apple's public holiday feeds. Feeds that need a user name and password aren't supported yet.
@@ -57,7 +57,13 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - Month, week and day views powered by the MIT-licensed [SVAR Svelte Calendar](https://github.com/svar-widgets/calendar), kept behind an adapter so it can be replaced.
 - **Agenda view** (**A**): one month as a list grouped by day, opening at today. Events spanning several days appear on each of them. **↑/↓** move between events; **Enter** opens one.
 - A **Personal** calendar *on this computer* is always there, so events can be added without any account. It is never synchronized.
-- Multiple accounts and calendars, including read-only ones. Each calendar has a colour picker and a visibility toggle.
+- **A minimal sidebar:** a calendar-group selector and the calendars you chose for it, each with a toggle for its events. Everything else is in **Settings** (⚙ at the bottom of the sidebar, or **Ctrl+,**):
+  - **Calendars:** colour, *in sidebar*, *show events*. A calendar left out of the sidebar stays connected and can still show events.
+  - **Calendar groups:** named sets of calendars, such as Work or Family, each with its own colour; a calendar can be in several. Choosing a group at the top of the sidebar shows exactly its calendars, at once and without reloading. Calendar colours are not changed. After a manual toggle the selector says *Custom selection*.
+  - **Accounts:** add, remove, sign in again, review sync problems, and sync now. When an account needs attention, one line at the bottom of the sidebar says so and opens this tab.
+  - **Appearance and General:** theme, title bar, reminder notifications, keyboard shortcuts.
+- **Command palette (Ctrl+K):** type part of a command, for example "nxt wk", "week", "group work" or "hide personal", choose with ↑/↓ and press Enter. It covers navigation, views, new event, search, settings, groups, showing and hiding calendars, sync and adding accounts. It works entirely locally.
+- Multiple accounts and calendars, including read-only ones.
 - Event creation and editing (click, drag-to-create, or **N**), drag/resize to move events, and timed and all-day events.
 - **Local persistence** in SQLite (WAL, migrations). Events, calendar colours, hidden calendars, theme and dataset choice survive restarts. The database lives at `~/.local/share/org.universalcalendar.desktop/calendar.db`.
 - **Recurring events** (RRULE, RDATE including RDATE-only series, EXDATE, moved occurrences, cancelled series) expanded by the Rust core for the visible range only, in the series' time zone so wall-clock times hold across DST. Old hourly, daily and weekly series jump straight to the visible range. Unsupported cases (custom VTIMEZONE rules, `RANGE=THISANDFUTURE`) are shown approximately and flagged:
@@ -68,12 +74,12 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   - The editor sets reminders, from "at start" to "1 week before" (up to five; Outlook calendars hold one).
   - Reminders from your servers are read: CalDAV/ICS alarms, Google's (including the calendar's default reminders), and Outlook's.
   - While the app runs, a desktop notification appears when a reminder is due. Plasma and other desktops show it through the standard notification service. Reminders missed while the computer was off or asleep are still shown if the event hasn't ended.
-  - Settings → *Reminder notifications* turns them off.
+  - Settings → General → *Reminder notifications* turns them off.
   - Alarms the app doesn't represent are kept as they are: e-mail alarms, alarms at a fixed time, and alarms relative to the end.
 - Optimistic updates. A failed save is rolled back with a visible message.
 - Visible-range loading with adjacent-month prefetch and cancellation of obsolete loads.
 - **Search** (**Ctrl+F**) covers every stored event, not just what is on screen: two years back and two years ahead, including occurrences of recurring series. Every word must appear in the title, location or description (ignoring case). Upcoming matches come first, then earlier ones. **Enter** or **↓** jumps to the results, and opening a result shows its date and opens it in the editor. **Esc** closes the search. Hidden calendars are not searched.
-- Dark theme by default, with Light and System options. The app draws its own title bar in the same theme. Settings → *Use system title bar* switches back to the desktop's native frame.
+- Dark theme by default, with Light and System options. The app draws its own title bar in the same theme. Settings → Appearance → *Use the desktop's title bar* switches back to the desktop's native frame.
 - Keyboard shortcuts:
 
   | Key | Action |
@@ -85,6 +91,8 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   | `H` | Week/day: toggle working hours (08–18) / full day |
   | `Ctrl+F` | Search |
   | `Esc` | Close dialog |
+  | `Ctrl+K` | Command palette |
+  | `Ctrl+,` | Settings |
   | `?` | Show all keyboard shortcuts |
   | `Ctrl+Shift+P` | Toggle performance panel |
 
@@ -95,7 +103,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   - Errors are announced immediately, and the "reduce animations" setting is honoured.
   - See [docs/accessibility.md](docs/accessibility.md).
 - Deterministic data generator (100 / 1,000 / 5,000 events, written in Rust), a scripted UI benchmark that runs in the real WebKitGTK window, and a storage benchmark. See [docs/performance.md](docs/performance.md).
-- The desktop app starts with just the Personal calendar. Add CalDAV, Google or Microsoft accounts from the sidebar. Simulated demo events exist only in the browser preview and in benchmark runs (which use a throw-away database); demo data left by earlier versions is removed on startup. Visibility choices are remembered per calendar.
+- The desktop app starts with just the Personal calendar. Add CalDAV, Google or Microsoft accounts in Settings → Accounts. Simulated demo events exist only in the browser preview and in benchmark runs (which use a throw-away database); demo data left by earlier versions is removed on startup. Visibility choices are remembered per calendar.
 
 ## Supported platforms
 

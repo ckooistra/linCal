@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/svelte";
 import AddAccountDialog from "../components/AddAccountDialog.svelte";
 import Sidebar from "../components/Sidebar.svelte";
+import SettingsDialog from "../components/SettingsDialog.svelte";
+import { GroupsStore } from "../stores/groups.svelte";
 import EventEditor from "../components/EventEditor.svelte";
 import OAuthAccountDialog from "../components/OAuthAccountDialog.svelte";
 import SubscriptionDialog from "../components/SubscriptionDialog.svelte";
@@ -44,7 +46,7 @@ describe("AddAccountDialog", () => {
   });
 });
 
-describe("Sidebar sync status", () => {
+describe("Account status in Settings and the sidebar", () => {
   function store() {
     const s = new CalendarsStore();
     s.load(
@@ -56,18 +58,19 @@ describe("Sidebar sync status", () => {
     );
     return s;
   }
-  const props = (calendars: CalendarsStore, extra = {}) => ({
+  const base = { accountId: "dav", remote: true, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0, importFailures: 0, approximated: 0, needsSignIn: false };
+  const settings = (calendars: CalendarsStore, extra = {}) => ({
     calendars,
-    datasetSize: 1000,
-    latencyMs: 0,
+    groups: new GroupsStore(),
+    initialTab: "accounts" as const,
     themePreference: "system" as const,
-    simulationControls: false,
-    ontogglecalendar: noop,
-    oncolor: noop,
-    ondataset: noop,
-    onlatency: noop,
     ontheme: noop,
-    onfailnext: noop,
+    ontogglecalendar: noop,
+    onsidebar: noop,
+    oncolor: noop,
+    ongroupschange: noop,
+    onshortcuts: noop,
+    onclose: noop,
     ...extra,
   });
 
@@ -76,47 +79,68 @@ describe("Sidebar sync status", () => {
     const onremoveaccount = vi.fn();
     const onaddaccount = vi.fn();
     calendars.setStatuses([
-      { accountId: "acct-sim", remote: false, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0, importFailures: 0, approximated: 0, needsSignIn: false },
-      { accountId: "dav", remote: true, lastSyncedAt: Date.now(), error: null, pending: 2, failed: 0, conflicts: 0, importFailures: 0, approximated: 0, needsSignIn: false },
+      { ...base, accountId: "acct-sim", remote: false },
+      { ...base, lastSyncedAt: Date.now(), pending: 2 },
     ]);
-    render(Sidebar, props(calendars, { onremoveaccount, onaddaccount, onsyncnow: noop }));
+    render(SettingsDialog, settings(calendars, { onremoveaccount, onaddaccount, onsyncnow: noop }));
     expect(screen.getByText("2 changes waiting to sync")).toBeTruthy();
-    expect(screen.getAllByRole("button", { name: "Remove" })).toHaveLength(1);
-    await fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.getAllByRole("button", { name: /^Remove/ })).toHaveLength(1);
+    await fireEvent.click(screen.getByRole("button", { name: "Remove alice @ cloud.example.org" }));
     expect(onremoveaccount).toHaveBeenCalledWith("dav");
-    await fireEvent.click(screen.getByRole("button", { name: "Add CalDAV account…" }));
-    expect(onaddaccount).toHaveBeenCalledWith("caldav");
-    await fireEvent.click(screen.getByRole("button", { name: "Add Google account…" }));
-    expect(onaddaccount).toHaveBeenCalledWith("google");
-    await fireEvent.click(screen.getByRole("button", { name: "Add Microsoft account…" }));
-    expect(onaddaccount).toHaveBeenCalledWith("microsoft");
-    expect(screen.getByRole("button", { name: "Sync now" })).toBeTruthy();
+    for (const [name, kind] of [
+      ["Add CalDAV account…", "caldav"],
+      ["Add Google account…", "google"],
+      ["Add Microsoft account…", "microsoft"],
+      ["Subscribe to a calendar…", "ics"],
+    ] as const) {
+      await fireEvent.click(screen.getByRole("button", { name }));
+      expect(onaddaccount).toHaveBeenLastCalledWith(kind);
+    }
+    expect(screen.getByRole("button", { name: "Sync all accounts now" })).toBeTruthy();
   });
 
-  it("shows syncing, offline and conflict states", async () => {
+  it("shows syncing, offline and conflict states with their actions", async () => {
     const calendars = store();
-    const base = { accountId: "dav", remote: true, lastSyncedAt: null, error: null, pending: 0, failed: 0, conflicts: 0, importFailures: 0, approximated: 0, needsSignIn: false };
     calendars.setStatuses([{ ...base, error: "Offline: the server could not be reached. Changes are kept and will sync later." }]);
-    const { rerender } = render(Sidebar, props(calendars));
+    const onreviewproblems = vi.fn();
+    const onsignin = vi.fn();
+    const { rerender } = render(SettingsDialog, settings(calendars, { onreviewproblems, onsignin }));
     expect(screen.getByText(/^Offline/).className).toContain("warn");
     calendars.setStatuses([{ ...base, conflicts: 1 }]);
-    await rerender(props(calendars));
+    await rerender(settings(calendars, { onreviewproblems, onsignin }));
     expect(screen.getByText("1 conflict to resolve").className).toContain("error");
-    const onreviewproblems = vi.fn();
-    await rerender(props(calendars, { onreviewproblems }));
     await fireEvent.click(screen.getByRole("button", { name: "Review…" }));
     expect(onreviewproblems).toHaveBeenCalled();
-    const onsignin = vi.fn();
     calendars.setStatuses([{ ...base, error: "The sign-in has expired.", needsSignIn: true }]);
-    await rerender(props(calendars, { onsignin }));
+    await rerender(settings(calendars, { onreviewproblems, onsignin }));
     await fireEvent.click(screen.getByRole("button", { name: "Sign in again…" }));
     expect(onsignin).toHaveBeenCalledWith("dav");
     calendars.setStatuses([{ ...base, lastSyncedAt: Date.now(), importFailures: 2 }]);
-    await rerender(props(calendars));
+    await rerender(settings(calendars, { onreviewproblems, onsignin }));
     expect(screen.getByText(/2 server events could not be read/).className).toContain("warn");
     calendars.setSyncing("dav", true);
-    await rerender(props(calendars));
+    await rerender(settings(calendars, { onreviewproblems, onsignin }));
     expect(screen.getByText("Syncing…")).toBeTruthy();
+  });
+
+  it("the sidebar shows one line when an account needs attention", async () => {
+    const calendars = store();
+    const onsettings = vi.fn();
+    const props = () => ({
+      calendars,
+      groups: new GroupsStore(),
+      selection: "all",
+      onselectgroup: noop,
+      ontogglecalendar: noop,
+      onsettings,
+    });
+    calendars.setStatuses([{ ...base, lastSyncedAt: Date.now() }]);
+    const { rerender } = render(Sidebar, props());
+    expect(screen.queryByText(/needs attention/)).toBeNull();
+    calendars.setStatuses([{ ...base, conflicts: 2 }]);
+    await rerender(props());
+    await fireEvent.click(screen.getByRole("button", { name: /1 account needs attention/ }));
+    expect(onsettings).toHaveBeenCalledWith("accounts");
   });
 });
 

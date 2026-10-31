@@ -260,7 +260,8 @@
     let view: CalendarViewKind = last.view;
     let label = "";
     let range: DateRange = { start: 0, end: 0 };
-    const publish = () => onstatechange({ view, label, range });
+    let date = last.date.getTime();
+    const publish = () => onstatechange({ view, label, range, date });
     // SVAR's typings say `void`, but its stores return an unsubscriber.
     const watch = <T,>(s: { subscribe: (fn: (v: T) => void) => void }, fn: (v: T) => void) =>
       s.subscribe(fn) as unknown as () => void;
@@ -283,6 +284,8 @@
       }),
       watch(state.currentDate, (v) => {
         last.date = v;
+        date = v.getTime();
+        publish();
       }),
     );
     if (last.view === "week" || last.view === "day") {

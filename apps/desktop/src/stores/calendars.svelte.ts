@@ -31,6 +31,49 @@ export class CalendarsStore {
   /** Explicit user choices; calendars without one use `defaultVisible`. */
   #choices: Record<CalendarId, boolean> = {};
 
+  /**
+   * Calendars left out of the sidebar. Separate from `hidden` (whose events
+   * are not shown): a calendar can be off the sidebar and still show events.
+   * Replaced (not mutated) so dependents update once.
+   */
+  notInSidebar = $state.raw<ReadonlySet<CalendarId>>(new Set());
+
+  /** Calendars shown in the sidebar, in list order. */
+  sidebarCalendars = $derived(this.calendars.filter((c) => !this.notInSidebar.has(c.id)));
+
+  inSidebar(id: CalendarId): boolean {
+    return !this.notInSidebar.has(id);
+  }
+
+  setInSidebar(id: CalendarId, on: boolean): void {
+    if (on === this.inSidebar(id)) return;
+    const next = new Set(this.notInSidebar);
+    if (on) next.delete(id);
+    else next.add(id);
+    this.notInSidebar = next;
+  }
+
+  /** Sidebar choices to persist: calendars left out (shown is the default). */
+  sidebarChoices(): Record<CalendarId, boolean> {
+    return Object.fromEntries([...this.notInSidebar].map((id) => [id, false]));
+  }
+
+  /** Restores saved sidebar choices; calendars without one are shown. */
+  setSidebarChoices(choices: Record<CalendarId, boolean>): void {
+    this.notInSidebar = new Set(
+      Object.entries(choices)
+        .filter(([, shown]) => shown === false)
+        .map(([id]) => id),
+    );
+  }
+
+  /** Shows the events of exactly `ids` (e.g. a calendar group), in one update. */
+  setVisibleExactly(ids: Iterable<CalendarId>): void {
+    const visible = new Set(ids);
+    for (const c of this.calendars) this.#choices[c.id] = visible.has(c.id);
+    this.#recompute();
+  }
+
   /** Simulated demo calendars start hidden; real calendars start visible. */
   defaultVisible(calendar: Calendar): boolean {
     return this.accounts.find((a) => a.id === calendar.accountId)?.provider !== "simulated";

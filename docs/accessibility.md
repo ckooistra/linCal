@@ -8,6 +8,8 @@ The target is WCAG 2.2 level AA for everything the app draws itself. Keyboard us
 - **Agenda and search results:** ↑/↓ move between events, and Enter opens one. In the search box, Enter or ↓ jumps to the results and Esc closes the search.
 - **Shortcuts** (T, J/K, M/W/D/A, H, N, Ctrl+F) don't fire while typing in a field. **?** (or the **?** button in the toolbar) lists them all.
 - **Dialogs** trap focus, close with Esc, and return focus to where it was.
+- **Settings** is a dialog with tabs. Arrow keys, Home and End move between tabs. In the group editor, Esc first leaves the editor, then the dialog, and focus stays on the group just edited.
+- **The command palette** (Ctrl+K) is a combobox: typing filters, ↑/↓ choose (announced via `aria-activedescendant`), Enter runs, Esc closes.
 - **Moving or resizing** an event by dragging is mouse-only. The keyboard alternative is the editor's date and time fields, and "this event / this and following / all" for series.
 
 ## Screen readers

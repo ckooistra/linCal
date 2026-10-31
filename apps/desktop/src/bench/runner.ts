@@ -28,6 +28,11 @@ export interface BenchHarness {
   visibleEditableIds(): string[];
   openEditor(id: string): void;
   closeEditor(): void;
+  /** Settings and the command palette open and close (UI only). */
+  setSettingsOpen(open: boolean): void;
+  setPaletteOpen(open: boolean): void;
+  /** Shows the events of exactly these calendars, as a calendar group does. */
+  showOnly(calendarIds: string[]): void;
   /** Resolves once the results are set, with the search's own duration (IPC + SQLite) in ms. */
   setSearch(query: string): void | Promise<number>;
   createEvent(): string | null;
@@ -122,6 +127,20 @@ export async function runBenchmarks(
       const id = ids[i % ids.length]!;
       await measureInteraction("visibility-toggle", () => h.toggleCalendar(id), log);
       await measureInteraction("visibility-toggle", () => h.toggleCalendar(id), log);
+    }
+
+    // Group switching: half the calendars, then all again.
+    const all = h.calendarIds();
+    for (let i = 0; i < 10; i++) {
+      await measureInteraction("activate-group", () => h.showOnly(all.slice(0, Math.ceil(all.length / 2))), log);
+      await measureInteraction("activate-group", () => h.showOnly(all), log);
+    }
+
+    for (let i = 0; i < 10; i++) {
+      await measureInteraction("open-settings", () => h.setSettingsOpen(true), log);
+      await measureInteraction("close-settings", () => h.setSettingsOpen(false), log);
+      await measureInteraction("open-palette", () => h.setPaletteOpen(true), log);
+      await measureInteraction("close-palette", () => h.setPaletteOpen(false), log);
     }
 
     const editable = h.visibleEditableIds();

@@ -8,6 +8,7 @@ import AgendaView from "../components/AgendaView.svelte";
 import { MockEventSource } from "../services/mock/mockEventSource";
 import { EventStore } from "../stores/events.svelte";
 import { CalendarsStore } from "../stores/calendars.svelte";
+import { GroupsStore, selectionFor } from "../stores/groups.svelte";
 import { simulatedAccounts, simulatedCalendars } from "../services/mock/generator";
 import { parseIsoDate } from "../services/time";
 import type { CalendarEvent } from "../types/calendar";
@@ -21,28 +22,69 @@ function calendarsStore() {
 const noop = () => {};
 
 describe("Sidebar", () => {
-  it("hides demo calendars by default and toggles visibility", async () => {
+  function setup() {
     const calendars = calendarsStore();
-    render(Sidebar, {
-      calendars,
-      datasetSize: 1000,
-      latencyMs: 0,
-      themePreference: "system",
-      ontogglecalendar: (id: string) => calendars.toggle(id),
-      oncolor: noop,
-      ondataset: noop,
-      onlatency: noop,
-      ontheme: noop,
-      onfailnext: noop,
-    });
-    const work = screen.getByLabelText("Work") as HTMLInputElement;
-    // Simulated (demo) calendars start unchecked; clicking shows them.
+    const groups = new GroupsStore();
+    const work = groups.add("Work", "#3b5bdb", ["cal-work", "cal-team"]);
+    return { calendars, groups, work };
+  }
+  const props = (calendars: CalendarsStore, groups: GroupsStore, extra = {}) => ({
+    calendars,
+    groups,
+    selection: selectionFor(groups.groups, calendars.calendars.map((c) => c.id), calendars.hidden),
+    onselectgroup: noop,
+    ontogglecalendar: (id: string) => calendars.toggle(id),
+    onsettings: noop,
+    ...extra,
+  });
+
+  it("lists only sidebar calendars and toggles their events", async () => {
+    const { calendars, groups } = setup();
+    calendars.setSidebarChoices({ "cal-holidays": false, "cal-birthdays": false });
+    render(Sidebar, props(calendars, groups));
+    expect(screen.queryByLabelText("Show events of Holidays")).toBeNull();
+    const work = screen.getByLabelText("Show events of Work") as HTMLInputElement;
+    // Simulated (demo) calendars start hidden; checking shows their events.
     expect(work.checked).toBe(false);
     await fireEvent.click(work);
     expect(calendars.isVisible("cal-work")).toBe(true);
-    expect(work.checked).toBe(true);
-    expect(calendars.choices()).toEqual({ "cal-work": true });
-    expect(screen.getAllByTitle("Read-only")).toHaveLength(2);
+    // Hidden from the sidebar is not hidden events: the calendar still exists.
+    expect(calendars.get("cal-holidays")).toBeDefined();
+  });
+
+  it("selects groups, and shows a custom selection after manual changes", async () => {
+    const { calendars, groups, work } = setup();
+    const onselectgroup = vi.fn((id: string) =>
+      calendars.setVisibleExactly(id === "all" ? calendars.calendars.map((c) => c.id) : groups.get(id)!.calendarIds),
+    );
+    const { rerender } = render(Sidebar, props(calendars, groups, { onselectgroup }));
+    const select = screen.getByLabelText("Calendar group") as HTMLSelectElement;
+    expect(select.value).toBe("custom");
+    await fireEvent.change(select, { target: { value: work.id } });
+    expect(onselectgroup).toHaveBeenCalledWith(work.id);
+    await rerender(props(calendars, groups, { onselectgroup }));
+    expect(select.value).toBe(work.id);
+    expect([...calendars.calendars].filter((c) => calendars.isVisible(c.id)).map((c) => c.id)).toEqual(["cal-work", "cal-team"]);
+    // A group never changes calendar colours.
+    expect(calendars.get("cal-work")?.color).toBe(simulatedCalendars().find((c) => c.id === "cal-work")?.color);
+    calendars.toggle("cal-team");
+    await rerender(props(calendars, groups, { onselectgroup }));
+    expect(select.value).toBe("custom");
+    await fireEvent.change(select, { target: { value: "all" } });
+    await rerender(props(calendars, groups, { onselectgroup }));
+    expect(select.value).toBe("all");
+  });
+
+  it("shows an empty state that leads to Settings", async () => {
+    const { calendars, groups } = setup();
+    calendars.setSidebarChoices(Object.fromEntries(calendars.calendars.map((c) => [c.id, false])));
+    const onsettings = vi.fn();
+    render(Sidebar, props(calendars, groups, { onsettings }));
+    expect(screen.getByText(/No calendars in the sidebar/)).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "Choose some in Settings" }));
+    expect(onsettings).toHaveBeenCalledWith("calendars");
+    await fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(onsettings).toHaveBeenLastCalledWith();
   });
 });
 
@@ -468,5 +510,126 @@ describe("EventContent (grid events)", () => {
     await fireEvent.keyDown(button, { key: "a" });
     expect(open).toHaveBeenCalledTimes(2);
     expect(open).toHaveBeenCalledWith("e1");
+  });
+});
+
+describe("SettingsDialog", () => {
+  async function open(extra = {}) {
+    const { default: SettingsDialog } = await import("../components/SettingsDialog.svelte");
+    const calendars = calendarsStore();
+    const groups = new GroupsStore();
+    const handlers = {
+      onsidebar: vi.fn((id: string, on: boolean) => calendars.setInSidebar(id, on)),
+      ontogglecalendar: vi.fn((id: string) => calendars.toggle(id)),
+      ongroupschange: vi.fn(),
+      onclose: vi.fn(),
+    };
+    render(SettingsDialog, {
+      calendars,
+      groups,
+      themePreference: "system",
+      ontheme: noop,
+      oncolor: noop,
+      onshortcuts: noop,
+      ...handlers,
+      ...extra,
+    });
+    return { calendars, groups, ...handlers };
+  }
+
+  it("switches tabs with the arrow keys and closes with Escape", async () => {
+    const { onclose } = await open();
+    const calendarsTab = screen.getByRole("tab", { name: "Calendars" });
+    expect(document.activeElement).toBe(calendarsTab);
+    expect(calendarsTab.getAttribute("aria-selected")).toBe("true");
+    await fireEvent.keyDown(calendarsTab, { key: "ArrowDown" });
+    const groupsTab = screen.getByRole("tab", { name: "Calendar groups" });
+    expect(groupsTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tabpanel").getAttribute("aria-labelledby")).toBe(groupsTab.id);
+    await fireEvent.keyDown(groupsTab, { key: "End" });
+    expect(screen.getByRole("tab", { name: "General" }).getAttribute("aria-selected")).toBe("true");
+    await fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(onclose).toHaveBeenCalled();
+  });
+
+  it("keeps 'in sidebar' and 'show events' separate", async () => {
+    const { calendars, onsidebar, ontogglecalendar } = await open();
+    await fireEvent.click(screen.getByLabelText("Show Work in the sidebar"));
+    expect(onsidebar).toHaveBeenCalledWith("cal-work", false);
+    expect(calendars.inSidebar("cal-work")).toBe(false);
+    expect(ontogglecalendar).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByLabelText("Show events of Work"));
+    expect(ontogglecalendar).toHaveBeenCalledWith("cal-work");
+    // Still listed (connected), just not in the sidebar.
+    expect(screen.getByLabelText("Show Work in the sidebar")).toBeTruthy();
+  });
+
+  it("creates, edits and deletes calendar groups", async () => {
+    const { groups, ongroupschange } = await open({ initialTab: "groups" });
+    await fireEvent.click(screen.getByRole("button", { name: "New group…" }));
+    const name = screen.getByLabelText("Name");
+    expect(document.activeElement).toBe(name);
+    await fireEvent.click(screen.getByRole("button", { name: "Create group" }));
+    expect(screen.getByRole("alert").textContent).toContain("name");
+    await fireEvent.input(name, { target: { value: "Work" } });
+    await fireEvent.click(screen.getByRole("checkbox", { name: "Team" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Create group" }));
+    expect(groups.groups).toHaveLength(1);
+    expect(groups.groups[0]!.name).toBe("Work");
+    expect(groups.groups[0]!.calendarIds).toContain("cal-team");
+    expect(ongroupschange).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("1 calendar")).toBeTruthy();
+    // Focus stays in the dialog, on the new group.
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit Work" }));
+
+    await fireEvent.click(screen.getByRole("button", { name: "Edit Work" }));
+    await fireEvent.input(screen.getByLabelText("Name"), { target: { value: "Office" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Save group" }));
+    expect(groups.groups[0]!.name).toBe("Office");
+
+    await fireEvent.click(screen.getByRole("button", { name: "Delete Office" }));
+    expect(screen.getByRole("alert").textContent).toContain("Delete “Office”?");
+    await fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(groups.groups).toHaveLength(0);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "New group…" }));
+    expect(ongroupschange).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("CommandPalette", () => {
+  it("filters as you type and runs the chosen command", async () => {
+    const { default: CommandPalette } = await import("../components/CommandPalette.svelte");
+    const ran: string[] = [];
+    const onclose = vi.fn();
+    const command = (id: string, title: string) => ({ id, title, section: "Test", run: () => ran.push(id) });
+    render(CommandPalette, {
+      commands: [command("today", "Go to today"), command("week", "Week view"), command("month", "Month view")],
+      onclose,
+    });
+    const input = screen.getByRole("combobox");
+    expect(document.activeElement).toBe(input);
+    expect(screen.getAllByRole("option")).toHaveLength(3);
+    await fireEvent.input(input, { target: { value: "view" } });
+    expect(screen.getAllByRole("option").map((o) => o.querySelector(".title")?.textContent)).toEqual([
+      "Week view",
+      "Month view",
+    ]);
+    await fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe("palette-month");
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(ran).toEqual(["month"]);
+    expect(onclose).toHaveBeenCalled();
+  });
+
+  it("closes with Escape and shows when nothing matches", async () => {
+    const { default: CommandPalette } = await import("../components/CommandPalette.svelte");
+    const onclose = vi.fn();
+    render(CommandPalette, { commands: [{ id: "a", title: "Go to today", section: "Test", run: noop }], onclose });
+    const input = screen.getByRole("combobox");
+    await fireEvent.input(input, { target: { value: "qqq" } });
+    expect(screen.getByText("No matching command")).toBeTruthy();
+    await fireEvent.keyDown(input, { key: "Enter" });
+    await fireEvent.keyDown(input, { key: "Escape" });
+    expect(onclose).toHaveBeenCalledTimes(1);
   });
 });

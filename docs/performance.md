@@ -48,6 +48,20 @@ Whatever remains after JS + layout is paint and compositing, plus any async foll
 
 The scenarios run at 100, 1,000 and 5,000 events.
 
+## Results: settings dialog, calendar groups, command palette, 2026-10-31
+
+Raw data: [`benchmarks/20261031-214414-vm-xvfb-m5-ui.json`](benchmarks/20261031-214414-vm-xvfb-m5-ui.json). Same VM and Xvfb setup (software rendering).
+
+| p50 / p95 ms | 100 events | 1,000 events | 5,000 events | Target |
+|---|---|---|---|---|
+| open settings | 27 / 85 (first open) | 33 / 42 | 51 / 61 | < 50 |
+| close settings | 12 / 13 | 18 / 21 | 36 / 37 | immediate |
+| open command palette | 24 / 31 | 30 / 32 | 48 / 51 | < 50 |
+| activate a calendar group (half the calendars, then all) | 14 / 25 | 40 / 55 | 54 / 60 | < 30 |
+| calendar visibility toggle | 15 / 23 | 34 / 40 | 51 / 61 | < 30 |
+
+Opening and closing a dialog takes 1–2 ms of our JavaScript. The rest is repainting the window under the dimmed backdrop, and grows with the events drawn behind it, as when opening the event editor. Activating a group costs about as much as toggling one calendar: a single visibility update and a single debounced save, with no reload from the database. Like the toggle, it is paint-bound in SVAR's re-layout. It meets the target up to 100 events and misses it from 1,000 on this VM; real hardware with GPU rendering should be checked.
+
 ## Results: Milestone 5, accessible grid events, 2026-10-31
 
 Raw data: [`benchmarks/20261031-vm-xvfb-m5-a11y.json`](benchmarks/20261031-vm-xvfb-m5-a11y.json). Same VM and Xvfb setup.

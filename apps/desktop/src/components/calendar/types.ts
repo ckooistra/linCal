@@ -17,6 +17,8 @@ export interface CalendarViewState {
   /** Human-readable label of the visible range, e.g. "October 2026". */
   label: string;
   range: DateRange;
+  /** The view's current date (epoch ms): the day shown, or the date the range was opened at. */
+  date: number;
 }
 
 export type EditorRequest =

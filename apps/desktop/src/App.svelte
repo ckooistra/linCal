@@ -11,6 +11,8 @@
   import { parseDayHours } from "./components/calendar/types";
   import AddAccountDialog from "./components/AddAccountDialog.svelte";
   import AgendaView from "./components/AgendaView.svelte";
+  import CommandPalette from "./components/CommandPalette.svelte";
+  import SettingsDialog, { type SettingsTab } from "./components/SettingsDialog.svelte";
   import OAuthAccountDialog from "./components/OAuthAccountDialog.svelte";
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
   import EventEditor from "./components/EventEditor.svelte";
@@ -29,8 +31,10 @@
   import { measureInteraction, nextPaint, observeLongTasks } from "./services/perf";
   import { resolveShortcut } from "./services/shortcuts";
   import { parseThemePreference, resolveTheme, watchSystemDark, type ThemePreference } from "./services/theme";
-  import { HOUR, eventBounds, localTimeZone, parseIsoDate } from "./services/time";
+  import { HOUR, addDays, eventBounds, localTimeZone, parseIsoDate } from "./services/time";
   import { CalendarsStore } from "./stores/calendars.svelte";
+  import { GroupsStore, parseGroups, selectionFor } from "./stores/groups.svelte";
+  import type { Command } from "./services/commands";
   import { EventStore, type SeriesScope } from "./stores/events.svelte";
   import { Notifications } from "./stores/notifications.svelte";
   import type {
@@ -251,12 +255,61 @@
     }
   }
 
-  // Visibility is a per-device preference: persist it, debounced.
-  let hiddenTimer: ReturnType<typeof setTimeout> | undefined;
+  // Display preferences are per device: applied at once, saved shortly
+  // after (bursts of changes coalesce). A failed save keeps the change in
+  // memory and says so.
+  const pendingSaves = new Map<string, { timer: ReturnType<typeof setTimeout>; save: () => void }>();
+  function persist(key: string, value: () => unknown, what: string): void {
+    clearTimeout(pendingSaves.get(key)?.timer);
+    const save = () => {
+      pendingSaves.delete(key);
+      backend.saveSetting(key, value()).catch(() => {
+        notifications.push(`Your ${what} could not be saved; it applies until the app is closed.`);
+      });
+    };
+    pendingSaves.set(key, { timer: setTimeout(save, 300), save });
+  }
+
+  /** Saves what is still waiting (the app is closing). */
+  function flushSaves(): void {
+    for (const { timer, save } of [...pendingSaves.values()]) {
+      clearTimeout(timer);
+      save();
+    }
+  }
+
+  const saveVisibility = () => persist("calendarVisibility", () => calendars.choices(), "calendar visibility");
+
   function toggleCalendar(id: string): void {
     calendars.toggle(id);
-    clearTimeout(hiddenTimer);
-    hiddenTimer = setTimeout(() => void backend.saveSetting("calendarVisibility", calendars.choices()), 300);
+    saveVisibility();
+  }
+
+  function setInSidebar(id: string, on: boolean): void {
+    calendars.setInSidebar(id, on);
+    persist("sidebarCalendars", () => calendars.sidebarChoices(), "sidebar choice");
+  }
+
+  // --- calendar groups --------------------------------------------------------
+  const groups = new GroupsStore();
+  groups.load(parseGroups(untrack(() => backend.settings.calendarGroups)));
+  const saveGroups = () => persist("calendarGroups", () => groups.groups, "calendar groups");
+
+  /** The group whose calendars are exactly the ones shown ("all"/"custom" otherwise). */
+  const selection = $derived(
+    selectionFor(
+      groups.groups,
+      calendars.calendars.map((c) => c.id),
+      calendars.hidden,
+    ),
+  );
+
+  function selectGroup(id: "all" | string): void {
+    void measureInteraction("activate-group", () => {
+      const ids = id === "all" ? calendars.calendars.map((c) => c.id) : (groups.get(id)?.calendarIds ?? []);
+      calendars.setVisibleExactly(ids);
+    });
+    saveVisibility();
   }
 
   /** Saved visibility choices, migrating the older "hidden list" setting. */
@@ -275,10 +328,20 @@
       : {};
   }
   calendars.setChoices(savedVisibility());
+  {
+    const saved = initialSettings.sidebarCalendars;
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      calendars.setSidebarChoices(
+        Object.fromEntries(
+          Object.entries(saved as Record<string, unknown>).filter((e): e is [string, boolean] => typeof e[1] === "boolean"),
+        ),
+      );
+    }
+  }
 
   // --- view -----------------------------------------------------------------
   let controller: CalendarViewController | null = null;
-  let viewState = $state<CalendarViewState>({ view: "month", label: "", range: { start: 0, end: 0 } });
+  let viewState = $state<CalendarViewState>({ view: "month", label: "", range: { start: 0, end: 0 }, date: Date.now() });
   let searchInput = $state<HTMLInputElement>();
   let searchText = $state("");
   let searchQuery = $state("");
@@ -295,6 +358,7 @@
 
   /** Where to open another view: today if it is shown, else the middle of what is shown. */
   function shownDate(): Date {
+    if (viewState.view !== "month") return new Date(viewState.date);
     const { start, end } = viewState.range;
     const now = Date.now();
     if (end <= start || (now >= start && now < end)) return new Date(now);
@@ -510,12 +574,110 @@
     calendars.writable.find((c) => !calendars.hidden.has(c.id))?.id ?? calendars.writable[0]?.id ?? null,
   );
 
+  // --- settings and command palette -----------------------------------------
+  /** Open Settings tab, or null when closed. */
+  let settingsTab = $state<SettingsTab | null>(null);
+  let paletteOpen = $state(false);
+
+  function openSettings(tab: SettingsTab = "calendars"): void {
+    paletteOpen = false;
+    void measureInteraction("open-settings", () => {
+      settingsTab = tab;
+    });
+  }
+
+  function openPalette(): void {
+    void measureInteraction("open-palette", () => {
+      paletteOpen = true;
+    });
+  }
+
+  /** Moves the current date by a number of days or months, keeping the view. */
+  function shift(days: number, months = 0): void {
+    const date = new Date(viewState.date);
+    if (months) date.setMonth(date.getMonth() + months);
+    controller?.goToDate(addDays(date, days));
+  }
+
+  const desktop = untrack(() => backend.kind) === "desktop";
+  const hasRemote = $derived(Object.values(calendars.statuses).some((s) => s.remote));
+
+  /** Everything the palette offers; rebuilt when groups or calendars change. */
+  const commands: Command[] = $derived.by(() => {
+    const nav = "Navigation";
+    const view = "View";
+    const list: Command[] = [
+      { id: "today", title: "Go to today", section: nav, shortcut: "T", run: () => navigate("today") },
+      { id: "next-day", title: "Next day", section: nav, run: () => shift(1) },
+      { id: "previous-day", title: "Previous day", section: nav, run: () => shift(-1) },
+      { id: "next-week", title: "Next week", section: nav, run: () => shift(7) },
+      { id: "previous-week", title: "Previous week", section: nav, run: () => shift(-7) },
+      { id: "next-month", title: "Next month", section: nav, run: () => shift(0, 1) },
+      { id: "previous-month", title: "Previous month", section: nav, run: () => shift(0, -1) },
+      { id: "view-month", title: "Month view", keywords: "switch", section: view, shortcut: "M", run: () => setView("month") },
+      { id: "view-week", title: "Week view", keywords: "switch", section: view, shortcut: "W", run: () => setView("week") },
+      { id: "view-day", title: "Day view", keywords: "switch", section: view, shortcut: "D", run: () => setView("day") },
+      { id: "view-agenda", title: "Agenda view", keywords: "list switch", section: view, shortcut: "A", run: () => setView("agenda") },
+      {
+        id: "new-event",
+        title: "Create event",
+        keywords: "new add",
+        section: "Events",
+        shortcut: "N",
+        run: () => openEditor({ mode: "create", timing: defaultTiming() }),
+      },
+      {
+        id: "search",
+        title: "Search events",
+        keywords: "find",
+        section: "Events",
+        shortcut: "Ctrl+F",
+        run: () => {
+          searchInput?.focus();
+          searchInput?.select();
+        },
+      },
+      { id: "settings", title: "Open settings", keywords: "preferences options", section: "Settings", shortcut: "Ctrl+,", run: () => openSettings() },
+      { id: "manage-calendars", title: "Manage calendars", keywords: "colours sidebar", section: "Settings", run: () => openSettings("calendars") },
+      { id: "manage-groups", title: "Manage calendar groups", keywords: "new edit", section: "Settings", run: () => openSettings("groups") },
+      { id: "accounts", title: "Manage accounts", keywords: "sign in remove", section: "Settings", run: () => openSettings("accounts") },
+      { id: "shortcuts", title: "Keyboard shortcuts", keywords: "help keys", section: "Help", shortcut: "?", run: () => (helpOpen = true) },
+      { id: "group-all", title: "Show all calendars", keywords: "group everything", section: "Calendar groups", run: () => selectGroup("all") },
+    ];
+    for (const g of groups.groups) {
+      list.push({ id: `group-${g.id}`, title: `Show group: ${g.name}`, keywords: "activate group", section: "Calendar groups", run: () => selectGroup(g.id) });
+    }
+    for (const c of calendars.calendars) {
+      const shown = !calendars.hidden.has(c.id);
+      list.push({
+        id: `toggle-${c.id}`,
+        title: `${shown ? "Hide" : "Show"} ${c.name}`,
+        keywords: "toggle calendar visibility events",
+        section: "Calendars",
+        run: () => void measureInteraction("visibility-toggle", () => toggleCalendar(c.id)),
+      });
+    }
+    if (desktop && hasRemote) {
+      list.push({ id: "sync", title: "Synchronize calendars now", keywords: "sync refresh", section: "Accounts", run: () => void backend.syncNow() });
+    }
+    if (desktop) {
+      list.push(
+        { id: "add-caldav", title: "Add CalDAV account…", keywords: "nextcloud", section: "Accounts", run: () => void openAddAccount("caldav") },
+        { id: "add-google", title: "Add Google account…", section: "Accounts", run: () => void openAddAccount("google") },
+        { id: "add-microsoft", title: "Add Microsoft account…", keywords: "outlook", section: "Accounts", run: () => void openAddAccount("microsoft") },
+        { id: "add-ics", title: "Subscribe to a calendar…", keywords: "ics webcal feed", section: "Accounts", run: () => void openAddAccount("ics") },
+      );
+    }
+    return list;
+  });
+
   // --- keyboard -------------------------------------------------------------
   let perfOpen = $state(false);
   let helpOpen = $state(false);
 
   function onKeydown(e: KeyboardEvent) {
-    if (editor || addingAccount || removing || helpOpen) return; // Dialogs handle their own keys.
+    // Dialogs handle their own keys.
+    if (editor || addingAccount || removing || helpOpen || settingsTab || paletteOpen || reviewing) return;
     if (e.key === "Escape" && searchQuery) {
       clearSearch();
       searchInput?.focus();
@@ -551,6 +713,12 @@
       case "help":
         helpOpen = true;
         return;
+      case "palette":
+        openPalette();
+        return;
+      case "settings":
+        openSettings();
+        return;
       case "toggle-hours":
         if (viewState.view === "week" || viewState.view === "day") setDayHours(dayHours === "work" ? "full" : "work");
         return;
@@ -568,6 +736,9 @@
     cleanups.push(watchSystemDark((dark) => (systemDark = dark)));
     window.addEventListener("keydown", onKeydown);
     cleanups.push(() => window.removeEventListener("keydown", onKeydown));
+    // The window may close without components being destroyed.
+    window.addEventListener("pagehide", flushSaves);
+    cleanups.push(() => window.removeEventListener("pagehide", flushSaves));
     const stopLongTasks = observeLongTasks(() => longTasks++);
     longTasksSupported = stopLongTasks !== null;
     if (stopLongTasks) cleanups.push(stopLongTasks);
@@ -603,7 +774,7 @@
   onDestroy(() => {
     for (const cleanup of cleanups) cleanup();
     clearTimeout(searchTimer);
-    clearTimeout(hiddenTimer);
+    flushSaves();
     clearTimeout(statusTimer);
     notifications.dispose();
   });
@@ -638,6 +809,13 @@
         .map((e) => e.id),
     openEditor: (id) => openEditor({ mode: "edit", id }),
     closeEditor,
+    setSettingsOpen: (open) => {
+      settingsTab = open ? "calendars" : null;
+    },
+    setPaletteOpen: (open) => {
+      paletteOpen = open;
+    },
+    showOnly: (ids) => calendars.setVisibleExactly(ids),
     setSearch: (query) => {
       searchText = query;
       searchQuery = query;
@@ -713,36 +891,11 @@
 <div class="app">
   <Sidebar
     {calendars}
-    {datasetSize}
-    {latencyMs}
-    {themePreference}
-    systemTitleBar={backend.kind === "desktop" ? systemTitleBar : undefined}
-    onsystemtitlebar={setSystemTitleBar}
-    notifications={backend.kind === "desktop" ? notificationsOn : undefined}
-    onnotifications={setNotifications}
-    simulationControls={backend.mock !== null}
-    onaddaccount={backend.kind === "desktop" ? (kind) => void openAddAccount(kind) : undefined}
-    onsignin={(id) => void signInAgain(id)}
-    onremoveaccount={(id) => (removing = { id, name: calendars.accounts.find((a) => a.id === id)?.name ?? id })}
-    onsyncnow={() => void backend.syncNow()}
-    onreviewproblems={() => {
-      reviewing = true;
-      problems = null;
-      void loadProblems();
-    }}
+    {groups}
+    {selection}
+    onselectgroup={selectGroup}
     ontogglecalendar={(id) => void measureInteraction("visibility-toggle", () => toggleCalendar(id))}
-    oncolor={setCalendarColor}
-    ondataset={(size) => void measureInteraction("dataset-load", () => switchDataset(size))}
-    onlatency={(ms) => {
-      latencyMs = ms;
-      if (backend.mock) backend.mock.latencyMs = ms;
-    }}
-    ontheme={setThemePreference}
-    onfailnext={() => {
-      if (!backend.mock) return;
-      backend.mock.failNextWrites++;
-      notifications.push("The next save will fail (simulated).", "info");
-    }}
+    onsettings={(tab) => openSettings(tab)}
   />
   <main>
     <Toolbar
@@ -872,6 +1025,55 @@
     onconfirm={() => void confirmRemoveAccount()}
     oncancel={() => (removing = null)}
   />
+{/if}
+
+{#if settingsTab}
+  <SettingsDialog
+    {calendars}
+    {groups}
+    initialTab={settingsTab}
+    {themePreference}
+    ontheme={setThemePreference}
+    systemTitleBar={desktop ? systemTitleBar : undefined}
+    onsystemtitlebar={setSystemTitleBar}
+    notifications={desktop ? notificationsOn : undefined}
+    onnotifications={setNotifications}
+    ontogglecalendar={(id) => void measureInteraction("visibility-toggle", () => toggleCalendar(id))}
+    onsidebar={setInSidebar}
+    oncolor={setCalendarColor}
+    ongroupschange={saveGroups}
+    onaddaccount={desktop ? (kind) => void openAddAccount(kind) : undefined}
+    onsignin={(id) => void signInAgain(id)}
+    onremoveaccount={(id) => (removing = { id, name: calendars.accounts.find((a) => a.id === id)?.name ?? id })}
+    onsyncnow={() => void backend.syncNow()}
+    onreviewproblems={() => {
+      reviewing = true;
+      problems = null;
+      void loadProblems();
+    }}
+    onshortcuts={() => (helpOpen = true)}
+    simulation={backend.mock
+      ? {
+          datasetSize,
+          latencyMs,
+          ondataset: (size) => void measureInteraction("dataset-load", () => switchDataset(size)),
+          onlatency: (ms) => {
+            latencyMs = ms;
+            if (backend.mock) backend.mock.latencyMs = ms;
+          },
+          onfailnext: () => {
+            if (!backend.mock) return;
+            backend.mock.failNextWrites++;
+            notifications.push("The next save will fail (simulated).", "info");
+          },
+        }
+      : null}
+    onclose={() => (settingsTab = null)}
+  />
+{/if}
+
+{#if paletteOpen}
+  <CommandPalette {commands} onclose={() => (paletteOpen = false)} />
 {/if}
 
 {#if helpOpen}

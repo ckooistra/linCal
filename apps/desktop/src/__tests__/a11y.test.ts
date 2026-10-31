@@ -14,7 +14,10 @@ import EventEditor from "../components/EventEditor.svelte";
 import OAuthAccountDialog from "../components/OAuthAccountDialog.svelte";
 import RepeatEditor from "../components/RepeatEditor.svelte";
 import ShortcutsDialog from "../components/ShortcutsDialog.svelte";
+import CommandPalette from "../components/CommandPalette.svelte";
+import SettingsDialog from "../components/SettingsDialog.svelte";
 import Sidebar from "../components/Sidebar.svelte";
+import { GroupsStore } from "../stores/groups.svelte";
 import SubscriptionDialog from "../components/SubscriptionDialog.svelte";
 import SyncProblemsDialog from "../components/SyncProblemsDialog.svelte";
 import Toasts from "../components/Toasts.svelte";
@@ -74,25 +77,29 @@ describe("accessibility (axe)", () => {
   const cases: [string, () => Promise<string[]>][] = [
     [
       "Sidebar",
-      () =>
-        check(Sidebar, {
+      () => {
+        const groups = new GroupsStore();
+        groups.add("Work", "#3b5bdb", ["cal-work"]);
+        return check(Sidebar, {
           calendars: calendars(),
-          datasetSize: 1000,
-          latencyMs: 0,
-          themePreference: "system",
-          systemTitleBar: false,
-          onsystemtitlebar: noop,
-          notifications: true,
-          onnotifications: noop,
-          simulationControls: true,
-          onaddaccount: noop,
+          groups,
+          selection: "custom",
+          onselectgroup: noop,
           ontogglecalendar: noop,
-          oncolor: noop,
-          ondataset: noop,
-          onlatency: noop,
-          ontheme: noop,
-          onfailnext: noop,
-        } as never),
+          onsettings: noop,
+        });
+      },
+    ],
+    [
+      "CommandPalette",
+      () =>
+        check(CommandPalette, {
+          commands: [
+            { id: "a", title: "Go to today", section: "Navigation", shortcut: "T", run: noop },
+            { id: "b", title: "Week view", section: "View", run: noop },
+          ],
+          onclose: noop,
+        }),
     ],
     [
       "Toolbar",
@@ -183,6 +190,46 @@ describe("accessibility (axe)", () => {
 
   it.each(cases)("%s", async (_name, run) => {
     expect(await run()).toEqual([]);
+  });
+
+  it.each(["calendars", "groups", "accounts", "appearance", "general"] as const)("SettingsDialog: %s", async (tab) => {
+    const groups = new GroupsStore();
+    groups.add("Work", "#3b5bdb", ["cal-work"]);
+    const store = calendars();
+    store.setStatuses([
+      { accountId: "acct-work", remote: true, lastSyncedAt: null, error: null, pending: 1, failed: 0, conflicts: 1, importFailures: 0, approximated: 0, needsSignIn: true },
+    ]);
+    const { container, getByRole } = render(SettingsDialog, {
+      props: {
+        calendars: store,
+        groups,
+        initialTab: tab,
+        themePreference: "system",
+        ontheme: noop,
+        systemTitleBar: false,
+        onsystemtitlebar: noop,
+        notifications: true,
+        onnotifications: noop,
+        ontogglecalendar: noop,
+        onsidebar: noop,
+        oncolor: noop,
+        ongroupschange: noop,
+        onaddaccount: noop,
+        onremoveaccount: noop,
+        onsignin: noop,
+        onsyncnow: noop,
+        onreviewproblems: noop,
+        onshortcuts: noop,
+        simulation: { datasetSize: 1000, latencyMs: 0, ondataset: noop, onlatency: noop, onfailnext: noop },
+        onclose: noop,
+      } as never,
+    });
+    expect(await violations(container)).toEqual([]);
+    if (tab === "groups") {
+      // The group editor too.
+      await fireEvent.click(getByRole("button", { name: "New group…" }));
+      expect(await violations(container)).toEqual([]);
+    }
   });
 
   it("Toasts", async () => {

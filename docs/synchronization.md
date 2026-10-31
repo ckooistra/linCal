@@ -82,7 +82,7 @@ Without a conflict, the merge is built on the server's copy (so its unknown prop
 
 When a conflict remains, the server's version is kept (`remote_objects.conflict_ical`). The editor's **Compare versions** then shows both versions side by side, with the changed fields marked.
 
-**Resolving** (editor banner, or the sidebar's **Review…** list, which also shows deletions that have no event left):
+**Resolving** (editor banner, or **Review…** in Settings → Accounts, a list that also shows deletions that have no event left):
 
 - **Keep mine** (conflicts): uploads the local version unconditionally.
 - **Try again** (refused changes): retries the same conditional request.
@@ -104,8 +104,8 @@ When a conflict remains, the server's version is kept (`remote_objects.conflict_
 | Password rejected / revoked | Account shows the error; nothing is lost; other accounts keep syncing |
 | Calendar deleted remotely | Removed locally unless it has queued changes (then kept) |
 | Lost access to one calendar | Skipped; the rest of the account syncs |
-| Malformed remote data | The last good version of that object is kept (rows, ETag, base copy) and the failure is recorded in `remote_objects.import_error` and counted in the sidebar. The rest is applied. Parsing runs off the async workers, with checked arithmetic and a panic guard per object. |
-| Data read only approximately | Recorded in `remote_objects.import_warnings` and counted in the sidebar |
+| Malformed remote data | The last good version of that object is kept (rows, ETag, base copy) and the failure is recorded in `remote_objects.import_error` and counted in Settings → Accounts. The rest is applied. Parsing runs off the async workers, with checked arithmetic and a panic guard per object. |
+| Data read only approximately | Recorded in `remote_objects.import_warnings` and counted in Settings → Accounts |
 | An account keeps failing | Account-level backoff (30 s doubling to 1 h); a local edit or *Sync now* retries at once |
 | A pass hangs or panics | Each account's pass runs as its own task with a 10-minute limit; a panic ends that pass, not the scheduler. Up to 3 accounts sync in parallel. |
 | Crash during sync | Pull transactions are atomic; queued uploads are replayed |

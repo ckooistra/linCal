@@ -54,6 +54,9 @@ apps/desktop/
     ├── stores/               EventStore (range cache, optimistic writes, change feed), calendars, notifications
     ├── components/calendar/  Widget adapter: the only code that imports SVAR
     ├── components/AgendaView.svelte, AgendaList.svelte, SearchResults.svelte  Lists drawn without SVAR
+    ├── components/SettingsDialog.svelte, CommandPalette.svelte, Sidebar.svelte  Settings (tabs), Ctrl+K palette, minimal sidebar
+    ├── stores/groups.svelte.ts  Calendar groups and which group the visible calendars match
+    ├── services/commands.ts  Palette matching (the commands themselves are built in App.svelte)
     └── components/, bench/, App.svelte
 ```
 
