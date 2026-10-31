@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/desktop/src-tauri", "crates/calendar-core", "crates/calendar-storage", "crates/calendar-ical", "crates/calendar-provider-api", "crates/calendar-caldav", "crates/calendar-oauth", "crates/calendar-google", "crates/calendar-microsoft", "crates/calendar-sync"]
+members = ["apps/desktop/src-tauri", "crates/calendar-core", "crates/calendar-storage", "crates/calendar-ical", "crates/calendar-provider-api", "crates/calendar-caldav", "crates/calendar-oauth", "crates/calendar-google", "crates/calendar-microsoft", "crates/calendar-ics", "crates/calendar-sync"]
 
 [workspace.package]
 edition = "2024"

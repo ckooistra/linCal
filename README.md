@@ -41,6 +41,13 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - **Microsoft:** sync via calendar-view delta over a moving window (12 months back, 24 ahead). Recurring events sync as whole series: you can create them, edit the series or single occurrences, and cancel occurrences. Outlook can hold fewer repeat rules than iCalendar; a rule it cannot express (for example "on the 1st and 15th") is refused with a message.
 - **Client IDs:** each user or distributor registers their own OAuth client; no secret is built into the app. See [Registering OAuth clients](docs/provider-integration.md#registering-oauth-clients).
 
+### Calendar subscriptions (ICS)
+
+- **Subscribe to a calendar…** in the sidebar: enter a feed address (`webcal://…` or `https://…/….ics`), such as a public holiday calendar or the private "secret address" of a calendar in another service.
+- The calendar is **read-only** and refreshes in the background about every 15 minutes, with conditional requests, so an unchanged feed costs one short request. Events added, changed or removed in the feed follow.
+- Private feed addresses work like passwords, so the address is kept in the system keyring and never in the database or logs.
+- Checked against Google's and Apple's public holiday feeds. Feeds that need a user name and password aren't supported yet.
+
 ### Calendar
 
 - Tauri 2 desktop shell with a Svelte 5 + TypeScript (strict) + Vite frontend.
@@ -187,7 +194,7 @@ See [docs/architecture.md](docs/architecture.md).
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
 3. CalDAV (Nextcloud reference) with offline queue ✔
 4. Google Calendar and Microsoft Graph ✔ (Google checked live; Microsoft tested against an API fake, live check pending)
-5. **Production quality** ← current. Done: agenda view, full-database search, local calendar. Next: recurrence editing ("this and following"), ICS subscriptions, reminders and notifications, conflict review, accessibility, packaging, user guide, profiling.
+5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions. Next: reminders and notifications, conflict review, accessibility, packaging, user guide, profiling.
 
 ## License
 

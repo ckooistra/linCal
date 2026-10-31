@@ -358,6 +358,21 @@ pub async fn add_caldav_account(
     Ok(id)
 }
 
+/// Subscribes to an iCalendar feed (read-only calendar).
+#[tauri::command]
+pub async fn add_ics_subscription(
+    state: State<'_, AppState>,
+    address: String,
+) -> CommandResult<String> {
+    let sync = state.sync()?;
+    let cancel = begin_adding(sync);
+    let result = sync.engine.add_ics_subscription(&address, &cancel).await;
+    sync.adding.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let id = result?;
+    sync.scheduler.trigger();
+    Ok(id)
+}
+
 /// OAuth client ids built into this binary by its distributor
 /// (`UC_GOOGLE_CLIENT_ID` / `UC_MICROSOFT_CLIENT_ID` at build time), if any.
 /// Client ids are not secrets; no client secret is ever built in.

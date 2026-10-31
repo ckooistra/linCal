@@ -6,10 +6,12 @@
 >   `crates/calendar-google` and `crates/calendar-microsoft`, with OAuth in
 >   `crates/calendar-oauth`. Tested against stateful API fakes; a live check
 >   needs an OAuth client registration (below).
+> - **ICS subscriptions:** implemented (Milestone 5) in `crates/calendar-ics`,
+>   read-only. Checked against Google's and Apple's public holiday feeds.
 
 ## Boundaries
 
-- Provider adapters are separate crates (`calendar-caldav`, `calendar-google`, `calendar-microsoft`, later ICS). They depend on `calendar-provider-api` and `calendar-core`, **never** on Tauri or the UI.
+- Provider adapters are separate crates (`calendar-caldav`, `calendar-google`, `calendar-microsoft`, `calendar-ics`). They depend on `calendar-provider-api` and `calendar-core`, **never** on Tauri or the UI.
 - Adapters translate between provider formats and `calendar-core` types. They also keep the provider metadata needed for lossless round trips: ETags, change keys, raw iCalendar properties and provider IDs.
 - The UI sees only provider-neutral types. On the frontend, the `EventSource` interface (`apps/desktop/src/services/eventSource.ts`) is the data boundary.
 
@@ -41,15 +43,15 @@ pub trait CalendarProvider: Send + Sync {
 
 Providers exchange **objects**: one event or one recurring series per remote item, with an `href`, an opaque `etag` and raw `data` in the provider's own format. Each provider's `ObjectCodec` turns that data into `calendar-core` content and back, so the sync engine, the offline queue, conflict handling and the review dialog are the same for every provider. The decisions behind this are in [ADR 0005](decisions/0005-google-and-microsoft.md).
 
-| | CalDAV | Google Calendar | Microsoft Graph |
-|---|---|---|---|
-| Object | one iCalendar resource | a series: master + exceptions (`events.list?iCalUID=`) | a single event, or a series: master read with `$expand=exceptionOccurrences` and `cancelledOccurrences` |
-| Version | ETag | hash of the members' ETags | `@odata.etag`; for a series, a hash over master, exceptions and cancellations |
-| Cursor | sync-token, or ETag comparison | `syncToken` (410 → full sync) | window + `calendarView/delta` link (410 or window moved → full listing) |
-| Writes | edit the stored iCalendar in place, `PUT` with `If-Match` | `PATCH` only changed fields per member, with `If-Match` | `PATCH` only changed fields, with `If-Match`; new exceptions and cancellations look the occurrence up via `instances` |
-| Create identity | client href | client-chosen id (retry → 409) | server id; `transactionId` makes retries safe; href renamed |
-| Recurrence | full (RRULE/RDATE/EXDATE, overrides) | full (RFC 5545 lines + exceptions) | Outlook patterns ⇄ RRULE (daily, weekly on days, monthly/yearly by day or by first–fourth/last weekday; count or end date). Other rules, extra dates (RDATE) and restoring a cancelled occurrence are refused before they are stored |
-| Unmodelled data (attendees, alarms, conferencing…) | preserved in the stored resource | untouched on the server | untouched on the server |
+| | CalDAV | Google Calendar | Microsoft Graph | ICS subscription |
+|---|---|---|---|---|
+| Object | one iCalendar resource | a series: master + exceptions (`events.list?iCalUID=`) | a single event, or a series: master read with `$expand=exceptionOccurrences` and `cancelledOccurrences` | the feed's VEVENTs with one UID, wrapped in a VCALENDAR with the VTIMEZONEs they use; href `ics:feed/<uid>` (the feed URL may be secret and is never used as an href) |
+| Version | ETag | hash of the members' ETags | `@odata.etag`; for a series, a hash over master, exceptions and cancellations | hash of the object's text |
+| Cursor | sync-token, or ETag comparison | `syncToken` (410 → full sync) | window + `calendarView/delta` link (410 or window moved → full listing) | the feed's ETag / Last-Modified plus the fetch time: a conditional GET at most every 15 minutes; a changed feed is compared object by object with what the client holds |
+| Writes | edit the stored iCalendar in place, `PUT` with `If-Match` | `PATCH` only changed fields per member, with `If-Match` | `PATCH` only changed fields, with `If-Match`; new exceptions and cancellations look the occurrence up via `instances` | refused (read-only calendar) |
+| Create identity | client href | client-chosen id (retry → 409) | server id; `transactionId` makes retries safe; href renamed | — |
+| Recurrence | full (RRULE/RDATE/EXDATE, overrides) | full (RFC 5545 lines + exceptions) | Outlook patterns ⇄ RRULE (daily, weekly on days, monthly/yearly by day or by first–fourth/last weekday; count or end date). Other rules, extra dates (RDATE) and restoring a cancelled occurrence are refused before they are stored | full (read with the CalDAV codec) |
+| Unmodelled data (attendees, alarms, conferencing…) | preserved in the stored resource | untouched on the server | untouched on the server | kept in the stored copy |
 
 `ProviderError` classifies failures so the engine can choose between retry with backoff, conflict, re-authentication and reporting:
 
@@ -72,7 +74,7 @@ Providers exchange **objects**: one event or one recurring series per remote ite
 | CalDAV (Nextcloud, Fastmail, Radicale, Baïkal, iCloud) | Basic auth over TLS with app passwords | Discovery via `.well-known/caldav` and principal/home-set lookup. No Nextcloud-specific assumptions. HTTPS is required except for `localhost`. A calendar home on another host is accepted only within the same domain and over HTTPS. Addresses with embedded credentials are refused. |
 | Google Calendar | OAuth 2.0 installed-app flow with PKCE, loopback redirect `http://127.0.0.1:<port>` | Users or distributors register their own OAuth client. No client secret is built in; Google's desktop-client "secret" is non-confidential and, if entered, is kept in the keyring. |
 | Microsoft Graph | OAuth 2.0 public client with PKCE, loopback redirect `http://localhost:<port>` | Personal and work/school accounts (`/common`), subject to tenant policy. Scopes `offline_access User.Read Calendars.ReadWrite`. |
-| ICS subscription | Optional HTTP auth | Read-only. Uses ETag / Last-Modified. |
+| ICS subscription | None (the address itself may be secret; it is stored in the keyring) | Read-only. Conditional GET with ETag / Last-Modified, gzip, at most 20 MB. `webcal://` means HTTPS; plain HTTP only for localhost, and redirects may not downgrade. HTTP authentication is not supported yet. |
 
 Tokens and passwords live **only** in the OS secret store: the Secret Service API (KWallet / GNOME Keyring) on Linux, via the `keyring` crate or equivalent. Nothing secret goes into SQLite or logs.
 

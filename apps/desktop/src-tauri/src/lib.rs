@@ -116,6 +116,7 @@ pub fn run() {
             commands::set_setting,
             commands::load_simulated_dataset,
             commands::add_caldav_account,
+            commands::add_ics_subscription,
             commands::cancel_add_account,
             commands::oauth_client_id,
             commands::add_google_account,

@@ -4,12 +4,28 @@ import AddAccountDialog from "../components/AddAccountDialog.svelte";
 import Sidebar from "../components/Sidebar.svelte";
 import EventEditor from "../components/EventEditor.svelte";
 import OAuthAccountDialog from "../components/OAuthAccountDialog.svelte";
+import SubscriptionDialog from "../components/SubscriptionDialog.svelte";
 import { CalendarsStore } from "../stores/calendars.svelte";
 import { simulatedCalendars } from "../services/mock/generator";
 import { parseIsoDate } from "../services/time";
 import type { CalendarEvent } from "../types/calendar";
 
 const noop = () => {};
+
+describe("SubscriptionDialog", () => {
+  it("validates, submits the address and shows errors", async () => {
+    const onsubmit = vi.fn(async () => "Not an iCalendar feed.");
+    render(SubscriptionDialog, { onsubmit, onclose: noop });
+    await fireEvent.click(screen.getByRole("button", { name: "Subscribe" }));
+    expect(onsubmit).not.toHaveBeenCalled();
+    await fireEvent.input(screen.getByLabelText("Feed address"), {
+      target: { value: " webcal://example.org/holidays.ics " },
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Subscribe" }));
+    expect(onsubmit).toHaveBeenCalledWith("webcal://example.org/holidays.ics");
+    expect((await screen.findByRole("alert")).textContent).toContain("iCalendar");
+  });
+});
 
 describe("AddAccountDialog", () => {
   it("validates, submits and shows server errors", async () => {

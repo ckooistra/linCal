@@ -124,6 +124,10 @@ export async function addCaldavAccount(serverUrl: string, username: string, pass
   return invoke<string>("add_caldav_account", { serverUrl, username, password });
 }
 
+export async function addIcsSubscription(address: string): Promise<string> {
+  return invoke<string>("add_ics_subscription", { address });
+}
+
 /** OAuth client ID built into this app for a provider, if any (never a secret). */
 export async function oauthClientId(provider: "google" | "microsoft"): Promise<string | null> {
   return invoke<string | null>("oauth_client_id", { provider });

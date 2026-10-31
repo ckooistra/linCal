@@ -16,6 +16,7 @@
   import EventEditor from "./components/EventEditor.svelte";
   import PerfPanel from "./components/PerfPanel.svelte";
   import SearchResults from "./components/SearchResults.svelte";
+  import SubscriptionDialog from "./components/SubscriptionDialog.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import SyncProblemsDialog from "./components/SyncProblemsDialog.svelte";
   import Toasts from "./components/Toasts.svelte";
@@ -96,7 +97,7 @@
 
   // --- accounts and sync ---------------------------------------------------
   /** Which "add account" dialog is open. */
-  let addingAccount = $state<false | "caldav" | "google" | "microsoft">(false);
+  let addingAccount = $state<false | "caldav" | "google" | "microsoft" | "ics">(false);
   let builtInClientId = $state<string | null>(null);
   let removing = $state<{ id: string; name: string } | null>(null);
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -128,9 +129,24 @@
     }
   }
 
-  async function openAddAccount(kind: "caldav" | "google" | "microsoft"): Promise<void> {
-    builtInClientId = kind === "caldav" ? null : await backend.oauthClientId(kind).catch(() => null);
+  async function openAddAccount(kind: "caldav" | "google" | "microsoft" | "ics"): Promise<void> {
+    builtInClientId =
+      kind === "caldav" || kind === "ics" ? null : await backend.oauthClientId(kind).catch(() => null);
     addingAccount = kind;
+  }
+
+  async function subscribe(address: string): Promise<string | null> {
+    try {
+      await backend.addIcsSubscription(address);
+      addingAccount = false;
+      await reloadCalendars();
+      refreshStatuses();
+      notifications.push("Subscribed. Loading events…", "info");
+      return null;
+    } catch (error) {
+      if (!addingAccount) return null; // cancelled: the dialog is gone
+      return error instanceof Error ? error.message : "The calendar could not be subscribed to.";
+    }
   }
 
   async function addOAuth(clientId: string, clientSecret: string | null): Promise<string | null> {
@@ -795,6 +811,12 @@
     provider={addingAccount}
     {builtInClientId}
     onsubmit={addOAuth}
+    onclose={() => (addingAccount = false)}
+    oncancel={() => void backend.cancelAddAccount()}
+  />
+{:else if addingAccount === "ics"}
+  <SubscriptionDialog
+    onsubmit={subscribe}
     onclose={() => (addingAccount = false)}
     oncancel={() => void backend.cancelAddAccount()}
   />

@@ -8,6 +8,7 @@ import {
   accountStatuses,
   addCaldavAccount,
   addGoogleAccount,
+  addIcsSubscription,
   addMicrosoftAccount,
   cancelAddAccount,
   oauthClientId,
@@ -49,6 +50,8 @@ export interface Backend {
   saveSetting(key: string, value: unknown): Promise<void>;
   /** Remote accounts (desktop only; the preview rejects with a message). */
   addCaldavAccount(serverUrl: string, username: string, password: string): Promise<string>;
+  /** Read-only iCalendar feed subscription (desktop only). */
+  addIcsSubscription(address: string): Promise<string>;
   cancelAddAccount(): Promise<void>;
   oauthClientId(provider: "google" | "microsoft"): Promise<string | null>;
   addGoogleAccount(clientId: string, clientSecret: string | null): Promise<string>;
@@ -102,6 +105,7 @@ async function desktopBackend(): Promise<Backend> {
     setCalendarColor,
     saveSetting,
     addCaldavAccount,
+    addIcsSubscription,
     cancelAddAccount,
     oauthClientId,
     addGoogleAccount,
@@ -140,6 +144,7 @@ function previewBackend(settings: Settings): Backend {
     setCalendarColor: async () => {},
     saveSetting,
     addCaldavAccount: desktopOnly,
+    addIcsSubscription: desktopOnly,
     cancelAddAccount: async () => {},
     oauthClientId: async () => null,
     addGoogleAccount: desktopOnly,

@@ -17,6 +17,7 @@ calendar-caldav = { path = "../calendar-caldav" }
 calendar-core = { path = "../calendar-core" }
 calendar-google = { path = "../calendar-google" }
 calendar-microsoft = { path = "../calendar-microsoft" }
+calendar-ics = { path = "../calendar-ics" }
 calendar-oauth = { path = "../calendar-oauth" }
 calendar-ical = { path = "../calendar-ical" }
 calendar-provider-api = { path = "../calendar-provider-api" }
@@ -36,3 +37,4 @@ calendar-microsoft = { path = "../calendar-microsoft", features = ["testing"] }
 calendar-oauth = { path = "../calendar-oauth" }
 chrono-tz = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+wiremock = "0.6"

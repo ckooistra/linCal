@@ -22,8 +22,8 @@ pub use calendar_storage::Resolution;
 pub use credentials::KeyringCredentials;
 pub use credentials::{CredentialStore, MemoryCredentials};
 pub use engine::{
-    BrowserOpener, CalDavConfig, OAuthConfig, SyncEngine, SyncError, SyncEvent, SyncProblem,
-    SyncReport, backoff, codec_for, default_factory, user_message,
+    BrowserOpener, CalDavConfig, IcsConfig, OAuthConfig, SyncEngine, SyncError, SyncEvent,
+    SyncProblem, SyncReport, backoff, codec_for, default_factory, user_message,
 };
 pub use scheduler::{SchedulerHandle, scheduler};
 /// Signal used to cancel a long operation (account setup).

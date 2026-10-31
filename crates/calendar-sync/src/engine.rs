@@ -31,6 +31,15 @@ pub struct CalDavConfig {
     pub calendar_home_url: String,
 }
 
+/// Non-secret settings of an ICS subscription. The feed address is the
+/// account's secret: private feed URLs grant access on their own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IcsConfig {
+    /// The calendar's name, from the feed when subscribing.
+    pub name: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
     #[error("{0}")]
@@ -134,6 +143,14 @@ pub fn default_factory() -> ProviderFactory {
                     .map_err(|_| ProviderError::InvalidResponse("bad calendar home URL".into()))?;
                 let provider =
                     calendar_caldav::CalDavProvider::new(home, &config.username, secret)?;
+                Ok(Box::new(provider) as Box<dyn CalendarProvider>)
+            }
+            ProviderKind::Ics => {
+                let config: IcsConfig =
+                    serde_json::from_value(account.config.clone()).map_err(|_| damaged())?;
+                let url = Url::parse(secret)
+                    .map_err(|_| ProviderError::InvalidResponse("bad feed address".into()))?;
+                let provider = calendar_ics::IcsProvider::new(url, &config.name)?;
                 Ok(Box::new(provider) as Box<dyn CalendarProvider>)
             }
             other => Err(ProviderError::InvalidResponse(format!(
@@ -404,6 +421,42 @@ impl SyncEngine {
         };
         let config = serde_json::to_value(&config).map_err(|e| SyncError::Config(e.to_string()))?;
         self.save_new_account(&account, &config, &calendars, password)
+            .await?;
+        Ok(id)
+    }
+
+    /// Subscribes to the iCalendar feed at `address` (`webcal://`,
+    /// `https://`): a read-only calendar refreshed in the background. The
+    /// feed is fetched once to check it and to name the calendar; `cancel`
+    /// gives up during that download.
+    pub async fn add_ics_subscription(
+        &self,
+        address: &str,
+        cancel: &tokio::sync::Notify,
+    ) -> Result<String, SyncError> {
+        let url = calendar_ics::feed_url(address).map_err(SyncError::Config)?;
+        let host = url.host_str().unwrap_or("feed").to_owned();
+        let provider = calendar_ics::IcsProvider::new(url.clone(), &host)?;
+        let feed = tokio::select! {
+            result = provider.probe() => result?,
+            () = cancel.notified() => return Err(SyncError::Cancelled),
+        };
+        let name = feed.name.unwrap_or_else(|| host.clone());
+        let mut calendars = calendar_ics::IcsProvider::new(url.clone(), &name)?
+            .list_calendars()
+            .await?;
+        for c in &mut calendars {
+            c.color.clone_from(&feed.color);
+        }
+        let id = new_account_id("ics");
+        let account = Account {
+            id: id.clone(),
+            name: format!("{host} (subscription)"),
+            provider: ProviderKind::Ics,
+        };
+        let config = serde_json::to_value(IcsConfig { name })
+            .map_err(|e| SyncError::Config(e.to_string()))?;
+        self.save_new_account(&account, &config, &calendars, url.as_str())
             .await?;
         Ok(id)
     }

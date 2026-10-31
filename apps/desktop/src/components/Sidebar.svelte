@@ -20,7 +20,7 @@
     ontheme: (preference: ThemePreference) => void;
     onfailnext: () => void;
     /** Account actions; omitted in the browser preview. */
-    onaddaccount?: (kind: "caldav" | "google" | "microsoft") => void;
+    onaddaccount?: (kind: "caldav" | "google" | "microsoft" | "ics") => void;
     /** Renew an expired OAuth sign-in. */
     onsignin?: (accountId: string) => void;
     onremoveaccount?: (accountId: string) => void;
@@ -154,6 +154,7 @@
       <button type="button" onclick={() => onaddaccount("caldav")}>Add CalDAV account…</button>
       <button type="button" onclick={() => onaddaccount("google")}>Add Google account…</button>
       <button type="button" onclick={() => onaddaccount("microsoft")}>Add Microsoft account…</button>
+      <button type="button" onclick={() => onaddaccount("ics")}>Subscribe to a calendar…</button>
       {#if onsyncnow && Object.values(calendars.statuses).some((s) => s.remote)}
         <button type="button" onclick={onsyncnow} title="Sync all accounts now">Sync now</button>
       {/if}
