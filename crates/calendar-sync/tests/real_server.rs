@@ -202,6 +202,25 @@ async fn two_clients_stay_in_sync() {
             .any(|o| o.title.ends_with("(special)") && o.timing == timing(10, 17))
     );
 
+    // Different fields edited on both sides merge: B moves it, A adds a place.
+    let one_a = a.find(&format!("{tag} meeting")).await.remove(0);
+    let one_b = b.find(&format!("{tag} meeting")).await.remove(0);
+    let mut moved = draft(&b.calendar, &one_b.title, timing(12, 16), None);
+    moved.location = one_b.location.clone();
+    b.store.update_event(&one_b.id, moved).await.unwrap();
+    b.sync().await;
+    let mut placed = draft(&a.calendar, &one_a.title, one_a.timing.clone(), None);
+    placed.location = "Room 7".into();
+    a.store.update_event(&one_a.id, placed).await.unwrap();
+    a.sync().await;
+    b.sync().await;
+    for client in [&a, &b] {
+        let merged = client.find(&format!("{tag} meeting")).await.remove(0);
+        assert_eq!(merged.timing, timing(12, 16));
+        assert_eq!(merged.location, "Room 7");
+        assert_eq!(merged.sync_status, SyncStatus::Synced);
+    }
+
     // Concurrent edits: B saves first, A gets a conflict instead of overwriting.
     let one_a = a.find(&format!("{tag} meeting")).await.remove(0);
     let one_b = b.find(&format!("{tag} meeting")).await.remove(0);

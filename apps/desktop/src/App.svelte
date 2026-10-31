@@ -815,6 +815,9 @@
       ondelete={deleteFromEditor}
       onclose={closeEditor}
       onresolve={backend.kind === "desktop" ? (resolution) => void resolveFromEditor(resolution) : undefined}
+      onloadversions={backend.kind === "desktop" && editor.event
+        ? () => backend.conflictVersions(editor!.event!.id)
+        : undefined}
       reminderLimit={reminderLimit}
       newer={editorNewer !== null}
       onshownewer={showNewerVersion}

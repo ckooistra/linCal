@@ -118,6 +118,22 @@ export interface AccountStatus {
   needsSignIn: boolean;
 }
 
+/** One version of an event, for comparing conflicting versions. */
+export interface EventVersion {
+  title: string;
+  description: string;
+  location: string;
+  timing: EventTiming;
+  rrule: string | null;
+  reminders: number[];
+}
+
+/** The local and the server's version of a conflicting event (null = deleted there). */
+export interface ConflictVersions {
+  local: EventVersion | null;
+  server: EventVersion | null;
+}
+
 /** How to settle a change the server refused or that conflicts. */
 export type Resolution = "retry" | "keep-local" | "use-server";
 

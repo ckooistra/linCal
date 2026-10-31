@@ -3,7 +3,15 @@
  * or an in-memory mock when the UI runs in a plain browser (preview/tests).
  * Everything above this module works against the same interface.
  */
-import type { Account, AccountStatus, Calendar, Resolution, SyncEvent, SyncProblem } from "../types/calendar";
+import type {
+  Account,
+  AccountStatus,
+  Calendar,
+  ConflictVersions,
+  Resolution,
+  SyncEvent,
+  SyncProblem,
+} from "../types/calendar";
 import {
   accountStatuses,
   addCaldavAccount,
@@ -18,6 +26,7 @@ import {
   onSyncEvent,
   removeAccount,
   resolveConflict,
+  conflictVersions,
   resolveSyncProblem,
   saveSetting,
   setCalendarColor,
@@ -31,7 +40,7 @@ import type { EventSource } from "./eventSource";
 import { DEFAULT_SEED, generateDataset } from "./mock/generator";
 import { MockEventSource } from "./mock/mockEventSource";
 import { TauriEventSource } from "./tauriEventSource";
-import { toIsoDate } from "./time";
+import { localTimeZone, toIsoDate } from "./time";
 
 export const DEFAULT_DATASET_SIZE = 1000;
 
@@ -61,6 +70,8 @@ export interface Backend {
   syncNow(): Promise<void>;
   accountStatuses(): Promise<AccountStatus[]>;
   resolveConflict(eventId: string, resolution: Resolution): Promise<void>;
+  /** Both versions of a conflicting event, if the server's was kept. */
+  conflictVersions(eventId: string): Promise<ConflictVersions | null>;
   /** Failed and conflicting changes, deletions included. */
   syncProblems(): Promise<SyncProblem[]>;
   resolveSyncProblem(calendarId: string, href: string, resolution: Resolution): Promise<void>;
@@ -115,6 +126,7 @@ async function desktopBackend(): Promise<Backend> {
     syncNow,
     accountStatuses,
     resolveConflict,
+    conflictVersions: (eventId) => conflictVersions(eventId, localTimeZone()),
     syncProblems,
     resolveSyncProblem,
     onSyncEvent,
@@ -154,6 +166,7 @@ function previewBackend(settings: Settings): Backend {
     syncNow: async () => {},
     accountStatuses: async () => [],
     resolveConflict: desktopOnly,
+    conflictVersions: async () => null,
     syncProblems: async () => [],
     resolveSyncProblem: desktopOnly,
     onSyncEvent: async () => () => {},

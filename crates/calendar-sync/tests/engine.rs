@@ -366,6 +366,70 @@ async fn calendars_read_by_older_readers_are_read_again_once() {
 }
 
 #[tokio::test]
+async fn edits_to_different_fields_merge_instead_of_conflicting() {
+    let e = env().await;
+    let href = format!("{CAL}remote.ics");
+    e.server.put_raw(&href, &ics("remote", "Original"));
+    e.engine.sync_account("acct").await.unwrap();
+    let id = format!("{}/remote", e.calendar_id);
+    // Here: a new location. On the server: a new title.
+    let mut d = e.store.get_event(&id).await.unwrap().unwrap().draft();
+    d.location = "Room 4".into();
+    e.store.update_event(&id, d).await.unwrap();
+    e.server.put_raw(
+        &href,
+        &ics("remote", "Renamed elsewhere").replace("X-KEEP:me", "X-KEEP:me\r\nX-OTHER:theirs"),
+    );
+
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!((report.conflicts, report.uploaded), (0, 1));
+    let on_server = e.server.objects.lock().unwrap()[&href].1.clone();
+    assert!(on_server.contains("SUMMARY:Renamed elsewhere"));
+    assert!(on_server.contains("LOCATION:Room 4"));
+    // Built on the server's copy: its unknown properties survive too.
+    assert!(on_server.contains("X-OTHER:theirs"), "{on_server}");
+    let local = e.store.get_event(&id).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            local.title.as_str(),
+            local.location.as_str(),
+            local.sync_status
+        ),
+        ("Renamed elsewhere", "Room 4", SyncStatus::Synced)
+    );
+    // Nothing left to do.
+    let again = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!((again.uploaded, again.downloaded), (0, 0));
+
+    // The same field changed on both sides stays a conflict, and the
+    // server's version is kept for comparison.
+    let mut d = e.store.get_event(&id).await.unwrap().unwrap().draft();
+    d.title = "Mine".into();
+    e.store.update_event(&id, d).await.unwrap();
+    e.server.put_raw(&href, &ics("remote", "Theirs"));
+    assert_eq!(e.engine.sync_account("acct").await.unwrap().conflicts, 1);
+    let copy = e
+        .store
+        .conflict_copy(&e.calendar_id, &href)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(copy.contains("SUMMARY:Theirs"));
+    let view = e.engine.conflict_view(&id).await.unwrap().unwrap();
+    assert_eq!(view.local.unwrap().title, "Mine");
+    assert_eq!(view.server.unwrap().title, "Theirs");
+    e.store
+        .resolve_operation(&e.calendar_id, &href, Resolution::UseServer)
+        .await
+        .unwrap();
+    e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(
+        e.store.conflict_copy(&e.calendar_id, &href).await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
 async fn concurrent_edits_become_conflicts_not_overwrites() {
     let e = env().await;
     let href = format!("{CAL}remote.ics");

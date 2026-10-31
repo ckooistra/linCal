@@ -4,6 +4,7 @@
 //! by `calendar-storage` today and by sync and provider crates later.
 
 pub mod error;
+pub mod merge;
 pub mod model;
 pub mod occurrence_key;
 pub mod recurrence;

@@ -5,7 +5,7 @@
  */
 
 import { SourceError } from "./eventSource";
-import type { AccountStatus, Resolution, SyncEvent, SyncProblem } from "../types/calendar";
+import type { AccountStatus, ConflictVersions, Resolution, SyncEvent, SyncProblem } from "../types/calendar";
 
 export interface BenchConfig {
   enabled: boolean;
@@ -163,6 +163,10 @@ export async function syncNow(): Promise<void> {
 
 export async function accountStatuses(): Promise<AccountStatus[]> {
   return invoke<AccountStatus[]>("account_statuses");
+}
+
+export async function conflictVersions(id: string, timeZone: string): Promise<ConflictVersions | null> {
+  return invoke<ConflictVersions | null>("conflict_versions", { id, timeZone });
 }
 
 export async function resolveConflict(eventId: string, resolution: Resolution): Promise<void> {

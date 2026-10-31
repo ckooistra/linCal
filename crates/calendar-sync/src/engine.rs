@@ -166,6 +166,33 @@ pub fn default_factory() -> ProviderFactory {
     )
 }
 
+/// Both versions of an event in conflict, for comparison: the local one
+/// and the server's at the time of the conflict (`None` = deleted there).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictView {
+    pub local: Option<calendar_core::EventContent>,
+    pub server: Option<calendar_core::EventContent>,
+}
+
+/// The version and server copy to keep after a write.
+async fn stored_copy(
+    provider: &dyn CalendarProvider,
+    href: &str,
+    written: calendar_provider_api::WriteResult,
+    payload: String,
+) -> (Option<String>, String) {
+    match (written.etag, written.data) {
+        (etag, Some(data)) => (etag, data),
+        // Without an ETag the server may have changed the data it stored
+        // (RFC 4791 §5.3.4): read back its version and copy.
+        (None, None) => match provider.get_object(href).await {
+            Ok(Some(current)) => (current.etag, current.data),
+            _ => (None, payload),
+        },
+        (etag, None) => (etag, payload),
+    }
+}
+
 /// Opens a URL in the user's browser (supplied by the desktop shell).
 pub type BrowserOpener = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
@@ -997,6 +1024,12 @@ impl SyncEngine {
         };
         let written = match provider.put_object(&op.href, &payload, &precondition).await {
             Ok(w) => w,
+            // Changed on the server too: merge what does not overlap.
+            Err(ProviderError::PreconditionFailed)
+                if matches!(precondition, Precondition::Version(_)) && obj.renamed.is_empty() =>
+            {
+                return self.merge_with_server(provider, op, obj).await;
+            }
             Err(e) => return Ok(Err(e)),
         };
         // Providers that assign ids on create report where the object is.
@@ -1011,18 +1044,127 @@ impl SyncEngine {
         } else {
             op.clone()
         };
-        let (etag, stored) = match (written.etag, written.data) {
-            (etag, Some(data)) => (etag, data),
-            // Without an ETag the server may have changed the data it
-            // stored (RFC 4791 §5.3.4): read back its version and copy.
-            (None, None) => match provider.get_object(&op.href).await {
-                Ok(Some(current)) => (current.etag, current.data),
-                _ => (None, payload),
-            },
-            (etag, None) => (etag, payload),
-        };
+        let (etag, stored) = stored_copy(provider, &op.href, written, payload).await;
         self.store
             .complete_put(&op, etag.as_deref(), &stored)
+            .await?;
+        Ok(Ok(()))
+    }
+
+    /// Both versions of the conflicting event `event_id` (an event, override
+    /// or occurrence id), if the server's version was kept at the conflict.
+    pub async fn conflict_view(&self, event_id: &str) -> Result<Option<ConflictView>, SyncError> {
+        let Some((calendar_id, href)) = self.store.object_of(event_id).await? else {
+            return Ok(None);
+        };
+        let Some(copy) = self.store.conflict_copy(&calendar_id, &href).await? else {
+            return Ok(None);
+        };
+        let Some(local) = self.store.object_for_push(&calendar_id, &href).await? else {
+            return Ok(None);
+        };
+        let kind = self
+            .store
+            .calendar_provider(&calendar_id)
+            .await?
+            .unwrap_or(ProviderKind::Caldav);
+        // An override row is its own component; occurrences of the series
+        // (and one-off events) are the master.
+        let component = match self.store.get_event(event_id).await? {
+            Some(row) => row.series.map(|s| s.recurrence_id),
+            None => None,
+        };
+        let codec = codec_for(kind);
+        let server = tokio::task::spawn_blocking(move || codec.read(&copy).map(|r| r.content))
+            .await
+            .map_err(|_| SyncError::Task)?
+            .map_err(|e| {
+                SyncError::Config(format!("the server's version could not be read: {e}"))
+            })?;
+        let find = |content: &calendar_core::ObjectContent| {
+            content
+                .master
+                .iter()
+                .chain(&content.overrides)
+                .find(|c| c.recurrence_id == component)
+                .cloned()
+        };
+        Ok(Some(ConflictView {
+            local: find(&local.content),
+            server: find(&server),
+        }))
+    }
+
+    /// After a conflicting upload: merges the local change with the
+    /// server's current version (three-way, against the last common copy)
+    /// and uploads the merge. Overlapping changes stay a conflict, with the
+    /// server's version kept for comparison.
+    async fn merge_with_server(
+        &self,
+        provider: &dyn CalendarProvider,
+        op: &PendingOp,
+        obj: &PushObject,
+    ) -> Result<Result<(), ProviderError>, SyncError> {
+        let conflict = Ok(Err(ProviderError::PreconditionFailed));
+        let server = match provider.get_object(&op.href).await {
+            Ok(Some(server)) => server,
+            // Deleted on the server while changed here.
+            Ok(None) => return conflict,
+            Err(e) => return Ok(Err(e)),
+        };
+        let keep_copy = || async {
+            self.store
+                .record_conflict_copy(
+                    &op.calendar_id,
+                    &op.href,
+                    server.etag.as_deref(),
+                    &server.data,
+                )
+                .await
+        };
+        let codec = provider.codec();
+        let (base, theirs, local) = (
+            obj.base_ical.clone(),
+            server.data.clone(),
+            obj.content.clone(),
+        );
+        // Parsing untrusted data is CPU work: off the async workers.
+        let merged = tokio::task::spawn_blocking(move || {
+            let base = codec.read(&base).ok()?.content;
+            let theirs = codec.read(&theirs).ok()?.content;
+            calendar_core::merge::three_way(&base, &local, &theirs).ok()
+        })
+        .await
+        .map_err(|_| SyncError::Task)?;
+        let (Some(merged), Some(version)) = (merged, server.etag.clone()) else {
+            keep_copy().await?;
+            return conflict;
+        };
+        let payload = provider
+            .codec()
+            .write(Some(&server.data), &obj.uid, &merged, &[]);
+        let written = match provider
+            .put_object(&op.href, &payload, &Precondition::Version(version))
+            .await
+        {
+            Ok(w) => w,
+            Err(ProviderError::PreconditionFailed) => {
+                // Changed yet again: the user decides.
+                keep_copy().await?;
+                return conflict;
+            }
+            Err(e) => return Ok(Err(e)),
+        };
+        let (etag, stored) = stored_copy(provider, &op.href, written, payload).await;
+        // Show what the server now holds (it may normalise the merge).
+        let codec = provider.codec();
+        let text = stored.clone();
+        let content = tokio::task::spawn_blocking(move || codec.read(&text).map(|r| r.content))
+            .await
+            .map_err(|_| SyncError::Task)?
+            .unwrap_or(merged);
+        self.store
+            .complete_merged_put(op, etag.as_deref(), &stored, &content)
             .await?;
         Ok(Ok(()))
     }

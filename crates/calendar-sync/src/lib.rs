@@ -23,8 +23,8 @@ pub use calendar_storage::Resolution;
 pub use credentials::KeyringCredentials;
 pub use credentials::{CredentialStore, MemoryCredentials};
 pub use engine::{
-    BrowserOpener, CalDavConfig, IcsConfig, OAuthConfig, SyncEngine, SyncError, SyncEvent,
-    SyncProblem, SyncReport, backoff, codec_for, default_factory, user_message,
+    BrowserOpener, CalDavConfig, ConflictView, IcsConfig, OAuthConfig, SyncEngine, SyncError,
+    SyncEvent, SyncProblem, SyncReport, backoff, codec_for, default_factory, user_message,
 };
 pub use reminders::{DueReminder, RemindersHandle, reminder_loop};
 pub use scheduler::{SchedulerHandle, scheduler};

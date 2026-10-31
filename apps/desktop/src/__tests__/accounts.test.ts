@@ -191,6 +191,45 @@ describe("TitleBar", async () => {
   });
 });
 
+describe("EventEditor compares conflicting versions", () => {
+  it("shows both versions with the changed fields marked", async () => {
+    const start = parseIsoDate("2026-06-15").getTime() + 9 * 3_600_000;
+    const event: CalendarEvent = {
+      id: "e1",
+      calendarId: "cal-work",
+      title: "Mine",
+      description: "",
+      location: "Room 4",
+      timing: { kind: "timed", start, end: start + 3_600_000, timeZone: "Europe/Berlin" },
+      seriesId: null,
+      recurrenceId: null,
+      rrule: null,
+      reminders: [],
+      syncStatus: "conflict",
+      revision: 1,
+    };
+    const version = { title: "Mine", description: "", location: "Room 4", timing: event.timing, rrule: null, reminders: [] };
+    const onloadversions = vi.fn(async () => ({ local: version, server: { ...version, title: "Theirs" } }));
+    render(EventEditor, {
+      event,
+      timing: event.timing,
+      calendars: simulatedCalendars(),
+      defaultCalendarId: null,
+      readOnly: false,
+      onsave: () => null,
+      ondelete: noop,
+      onclose: noop,
+      onresolve: noop,
+      onloadversions,
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "Compare versions" }));
+    const table = await screen.findByRole("table");
+    const changed = [...table.querySelectorAll("tr.differs")].map((r) => r.textContent);
+    expect(changed).toEqual(["TitleMineTheirs"]);
+    expect(screen.getByRole("button", { name: "Keep mine" })).toBeTruthy();
+  });
+});
+
 describe("EventEditor keeps untouched times exactly (audit F09)", () => {
   it("saves a title-only change without moving the event in a DST fold", async () => {
     // 02:30:45 CET on 2026-10-25: the second 02:30 of the night clocks go back.

@@ -66,10 +66,21 @@ All event history is synced (the database is the local source). Rendering stays 
 
 | Server answer | Result |
 |---|---|
-| `412 Precondition Failed` | **conflict**: the operation and its events are marked `conflict` and the server copy isn't touched |
+| `412 Precondition Failed` on an update | **merge attempt** (below); if that fails, **conflict**: the operation and its events are marked `conflict` and the server copy isn't touched |
+| `412` on a create or delete | **conflict** |
 | Network error, 5xx, 429/503 | retried with backoff (30 s doubling to 1 h, or the server's `Retry-After`); the pass stops and the account shows *Offline* |
 | 401 | the account shows a credentials error; the queue is kept |
 | Other 4xx (e.g. 403 on a read-only calendar) | `sync-failed`; the user can retry or discard |
+
+**Merging.** When an update is refused because the server copy changed, the engine fetches the server's current version. It then compares, per event component (the master and each override) and per field, the local version and the server's version against the last common copy (`calendar_core::merge::three_way`):
+
+- A field changed on only one side takes that side's value.
+- Cancelled occurrences combine as sets.
+- A field changed differently on both sides, or a component deleted on one side and changed on the other, is a conflict.
+
+Without a conflict, the merge is built on the server's copy (so its unknown properties survive), uploaded against the server's version, and imported locally. Nothing has to be resolved by hand. If the event was edited again meanwhile, nothing local is replaced: the next upload conflicts and merges again. A series moved locally (its occurrence ids changed) is not merged.
+
+When a conflict remains, the server's version is kept (`remote_objects.conflict_ical`). The editor's **Compare versions** then shows both versions side by side, with the changed fields marked.
 
 **Resolving** (editor banner, or the sidebar's **Review…** list, which also shows deletions that have no event left):
 

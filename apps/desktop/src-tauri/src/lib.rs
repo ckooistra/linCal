@@ -203,6 +203,7 @@ pub fn run() {
             commands::account_statuses,
             commands::resolve_conflict,
             commands::sync_problems,
+            commands::conflict_versions,
             commands::resolve_sync_problem,
             bench::bench_config,
             bench::bench_memory,

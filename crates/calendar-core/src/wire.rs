@@ -67,6 +67,31 @@ pub struct WireEvent {
     pub revision: i64,
 }
 
+/// One version of an event (for comparing conflicting versions).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireVersion {
+    pub title: String,
+    pub description: String,
+    pub location: String,
+    pub timing: WireTiming,
+    pub rrule: Option<String>,
+    pub reminders: Vec<u32>,
+}
+
+impl WireVersion {
+    pub fn from_content(c: &crate::model::EventContent, display_tz: &Tz) -> Self {
+        Self {
+            title: c.title.clone(),
+            description: c.description.clone(),
+            location: c.location.clone(),
+            timing: WireTiming::from_timing(&c.timing, display_tz),
+            rrule: c.recurrence.as_ref().map(|r| r.rrule.clone()),
+            reminders: c.reminders.clone(),
+        }
+    }
+}
+
 fn instant(ms: i64) -> Result<DateTime<Utc>, CoreError> {
     DateTime::from_timestamp_millis(ms).ok_or(CoreError::InvalidTime)
 }

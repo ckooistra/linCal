@@ -27,7 +27,9 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   - Changes are queued in SQLite and survive restarts and crashes. A deletion stays queued even if it happens while the event's first upload is still in flight.
   - Failed uploads retry with backoff (30 s doubling to 1 h). An account whose sync fails (wrong password, server down) backs off as a whole instead of retrying in a loop; editing or **Sync now** tries again at once.
   - The sidebar shows *Offline*, *N changes waiting* or errors.
-- **Conflicts and refused changes:** an event changed both on the server and here gets a dashed red outline, and the editor offers *Keep mine* or *Use server version*. The sidebar's **Review…** link lists every conflicting or refused change, including deletions (which have no event left to open). A refused change can be retried, still checked against the server's version.
+- **Conflicts and refused changes:**
+  - **Changes to different fields merge automatically**, for example a new title here and a new location on the server. Cancelled occurrences from both sides combine.
+  - An event whose same field was changed differently on both sides gets a dashed red outline. The editor offers *Keep mine* or *Use server version*, and **Compare versions** shows both side by side with the differences marked. The sidebar's **Review…** link lists every conflicting or refused change, including deletions (which have no event left to open). A refused change can be retried, still checked against the server's version.
 - **Unknown data is preserved.** Properties this app doesn't edit (alarms, attendees, vendor `X-` fields, VTIMEZONEs) are written back as the server sent them, also when a whole series is moved. This is tested for the cases in `crates/calendar-ical/tests/events.rs`; it is not a guarantee for every possible object.
 - **Untrusted server data** can't stop synchronization. An object that can't be read keeps its last good version, and the sidebar counts it as *could not be read*. Objects shown only approximately (unknown time zone, "this and following" changes, RDATE periods) are counted too.
 - **Credentials** are stored in the system keyring via the Secret Service API (KWallet on Plasma, GNOME Keyring elsewhere), never in the database or logs. They are only sent over HTTPS (plain HTTP is allowed for `localhost` test servers only), and never to a host outside the server's domain found during discovery.
@@ -200,7 +202,7 @@ See [docs/architecture.md](docs/architecture.md).
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
 3. CalDAV (Nextcloud reference) with offline queue ✔
 4. Google Calendar and Microsoft Graph ✔ (Google checked live; Microsoft tested against an API fake, live check pending)
-5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, reminders and notifications. Next: conflict review, accessibility, packaging, user guide, profiling.
+5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, reminders and notifications, automatic merging and conflict comparison. Next: accessibility, packaging, user guide, profiling.
 
 ## License
 

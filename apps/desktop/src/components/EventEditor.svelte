@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
-  import type { Calendar, CalendarEvent, EventDraft, EventTiming, Resolution } from "../types/calendar";
+  import type { Calendar, CalendarEvent, ConflictVersions, EventDraft, EventTiming, Resolution } from "../types/calendar";
+  import { compareVersions, type ComparedField } from "../services/conflict";
   import type { SeriesScope } from "../stores/events.svelte";
   import { buildRule, defaultForm, isPreset, parseRule, REPEAT_PRESETS, type RuleForm } from "../services/recurrence";
   import { MAX_REMINDERS, normalizeReminders, REMINDER_PRESETS, reminderLabel } from "../services/reminders";
@@ -31,6 +32,8 @@
     onclose: () => void;
     /** Resolve a sync conflict or failure for this event. */
     onresolve?: (resolution: Resolution) => void;
+    /** Both versions of this event while it is in conflict. */
+    onloadversions?: () => Promise<ConflictVersions | null>;
     /** How many reminders a calendar holds (Outlook: one). */
     reminderLimit?: (calendarId: string) => number;
     /** The event changed (e.g. through sync) since the editor opened. */
@@ -48,6 +51,7 @@
     ondelete,
     onclose,
     onresolve,
+    onloadversions,
     reminderLimit = () => MAX_REMINDERS,
     newer = false,
     onshownewer,
@@ -120,6 +124,19 @@
   /** The series start as currently entered, which custom rules are relative to. */
   const ruleStart = $derived(combineDateTime(startDate, allDay ? "00:00" : startTime) ?? initStart);
   let error = $state<string | null>(null);
+  /** The two versions side by side (conflicts), once loaded. */
+  let comparison = $state.raw<ComparedField[] | "loading" | "unavailable" | null>(null);
+
+  async function compare(): Promise<void> {
+    if (!onloadversions) return;
+    comparison = "loading";
+    try {
+      const versions = await onloadversions();
+      comparison = versions ? compareVersions(versions.local, versions.server) : "unavailable";
+    } catch {
+      comparison = "unavailable";
+    }
+  }
   /** Asking which occurrences of the series a save or delete applies to. */
   let choosing = $state.raw<{ action: "save"; draft: EventDraft } | { action: "delete" } | null>(null);
   let scopeGroup = $state<HTMLDivElement>();
@@ -340,7 +357,31 @@
             <button type="button" onclick={() => onresolve("use-server")}>
               {syncIssue === "conflict" ? "Use server version" : "Discard my change"}
             </button>
+            {#if syncIssue === "conflict" && onloadversions && comparison === null}
+              <button type="button" onclick={() => void compare()}>Compare versions</button>
+            {/if}
           </div>
+          {#if comparison === "loading"}
+            <p class="compare-note" role="status">Loading the server's version…</p>
+          {:else if comparison === "unavailable"}
+            <p class="compare-note">The server's version isn't available to compare. Choose a version above.</p>
+          {:else if comparison}
+            <table class="compare">
+              <caption>Changed fields are highlighted.</caption>
+              <thead>
+                <tr><th scope="col">Field</th><th scope="col">Yours</th><th scope="col">Server</th></tr>
+              </thead>
+              <tbody>
+                {#each comparison as row (row.label)}
+                  <tr class:differs={row.differs}>
+                    <th scope="row">{row.label}</th>
+                    <td>{row.local}</td>
+                    <td>{row.server}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
         </div>
       {/if}
       {#if readOnly}
@@ -557,8 +598,43 @@
   .banner p {
     margin: 0 0 0.5rem;
   }
+  .compare-note {
+    margin: 0.5rem 0 0;
+    font-size: 0.85rem;
+    color: var(--uc-text-muted);
+  }
+  .compare {
+    width: 100%;
+    margin-top: 0.6rem;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+  }
+  .compare caption {
+    text-align: left;
+    color: var(--uc-text-muted);
+    padding-bottom: 0.25rem;
+  }
+  .compare th,
+  .compare td {
+    text-align: left;
+    vertical-align: top;
+    padding: 0.25rem 0.4rem;
+    border-top: 1px solid var(--uc-border);
+    overflow-wrap: anywhere;
+  }
+  .compare thead th {
+    border-top: none;
+    color: var(--uc-text-muted);
+    font-weight: 600;
+  }
+  .compare tr.differs td,
+  .compare tr.differs th {
+    background: color-mix(in srgb, var(--uc-danger) 12%, transparent);
+    font-weight: 600;
+  }
   .banner-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
   }
   .note {

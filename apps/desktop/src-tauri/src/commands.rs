@@ -545,6 +545,31 @@ pub async fn resolve_conflict(
 
 /// Failed and conflicting changes, including deletions (which have no
 /// event left to open).
+/// Both versions of a conflicting event, if the server's was kept.
+#[derive(Debug, Serialize)]
+pub struct ConflictVersions {
+    local: Option<calendar_core::wire::WireVersion>,
+    server: Option<calendar_core::wire::WireVersion>,
+}
+
+#[tauri::command]
+pub async fn conflict_versions(
+    state: State<'_, AppState>,
+    id: String,
+    time_zone: String,
+) -> CommandResult<Option<ConflictVersions>> {
+    let tz = zone(&time_zone)?;
+    let view = state.sync()?.engine.conflict_view(&id).await?;
+    Ok(view.map(|v| ConflictVersions {
+        local: v
+            .local
+            .map(|c| calendar_core::wire::WireVersion::from_content(&c, &tz)),
+        server: v
+            .server
+            .map(|c| calendar_core::wire::WireVersion::from_content(&c, &tz)),
+    }))
+}
+
 #[tauri::command]
 pub async fn sync_problems(state: State<'_, AppState>) -> CommandResult<Vec<SyncProblem>> {
     Ok(state.sync()?.engine.problems().await?)

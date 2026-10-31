@@ -797,7 +797,7 @@ impl Store {
              VALUES (?, ?, ?, ?, ?, 'present', NULL, ?) \
              ON CONFLICT(calendar_id, href) DO UPDATE SET uid = excluded.uid, etag = excluded.etag, \
              ical = excluded.ical, presence = 'present', import_error = NULL, \
-             import_warnings = excluded.import_warnings",
+             import_warnings = excluded.import_warnings, conflict_etag = NULL, conflict_ical = NULL",
         )
         .bind(calendar_id)
         .bind(&obj.href)
@@ -1136,6 +1136,93 @@ impl Store {
     /// unless they were changed again while the upload was running; then
     /// the previous base copy is kept, because those rows were edited
     /// against it (moved override ids still refer to it).
+    /// Keeps the server's version of an object whose upload conflicted,
+    /// for comparison (see [`Store::conflict_copy`]).
+    pub async fn record_conflict_copy(
+        &self,
+        calendar_id: &str,
+        href: &str,
+        etag: Option<&str>,
+        ical: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE remote_objects SET conflict_etag = ?, conflict_ical = ? WHERE calendar_id = ? AND href = ?",
+        )
+        .bind(etag)
+        .bind(ical)
+        .bind(calendar_id)
+        .bind(href)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The server's version kept at the last conflict, if any.
+    pub async fn conflict_copy(&self, calendar_id: &str, href: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT conflict_ical FROM remote_objects WHERE calendar_id = ? AND href = ? \
+             AND conflict_ical IS NOT NULL",
+        )
+        .bind(calendar_id)
+        .bind(href)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// The kind of account a calendar belongs to.
+    pub async fn calendar_provider(&self, calendar_id: &str) -> Result<Option<ProviderKind>> {
+        let provider: Option<String> = sqlx::query_scalar(
+            "SELECT a.provider FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?",
+        )
+        .bind(calendar_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(provider.as_deref().and_then(ProviderKind::parse))
+    }
+
+    /// Completes an upload of a merge with the server's version (after a
+    /// conflict): the local rows become the merged content and `ical` the
+    /// new base. Returns false, changing nothing, if the object was edited
+    /// again meanwhile; the next upload then merges again.
+    pub async fn complete_merged_put(
+        &self,
+        op: &PendingOp,
+        etag: Option<&str>,
+        ical: &str,
+        merged: &ObjectContent,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let done = sqlx::query(
+            "DELETE FROM pending_operations WHERE calendar_id = ? AND href = ? AND generation = ?",
+        )
+        .bind(&op.calendar_id)
+        .bind(&op.href)
+        .bind(op.generation)
+        .execute(&mut *tx)
+        .await?;
+        if done.rows_affected() == 0 {
+            return Ok(false);
+        }
+        let incoming = IncomingObject {
+            href: op.href.clone(),
+            etag: etag.map(str::to_owned),
+            ical: ical.to_owned(),
+            content: Ok(merged.clone()),
+            warnings: Vec::new(),
+        };
+        Self::replace_object(&mut tx, &op.calendar_id, &incoming, merged).await?;
+        sqlx::query(
+            "UPDATE remote_objects SET conflict_etag = NULL, conflict_ical = NULL \
+             WHERE calendar_id = ? AND href = ?",
+        )
+        .bind(&op.calendar_id)
+        .bind(&op.href)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn complete_put(&self, op: &PendingOp, etag: Option<&str>, ical: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         let done = sqlx::query(
@@ -1148,8 +1235,8 @@ impl Store {
         .await?;
         if done.rows_affected() > 0 {
             sqlx::query(
-                "UPDATE remote_objects SET etag = ?, ical = ?, presence = 'present', import_error = NULL \
-                 WHERE calendar_id = ? AND href = ?",
+                "UPDATE remote_objects SET etag = ?, ical = ?, presence = 'present', import_error = NULL, \
+                 conflict_etag = NULL, conflict_ical = NULL WHERE calendar_id = ? AND href = ?",
             )
             .bind(etag)
             .bind(ical)
