@@ -25,6 +25,10 @@ pub struct Sync {
 pub struct AppState {
     pub store: Result<Store, String>,
     pub sync: Option<Sync>,
+    /// Wakes the reminder loop after local changes.
+    pub reminders: Option<calendar_sync::RemindersHandle>,
+    /// The "notifications" setting (desktop reminders on or off).
+    pub notifications: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -45,6 +49,9 @@ impl AppState {
 
     /// Ask for an upload soon if a change touched a synchronized calendar.
     fn changed(&self, status: calendar_core::SyncStatus) {
+        if let Some(reminders) = &self.reminders {
+            reminders.changed();
+        }
         if status == calendar_core::SyncStatus::PendingSync
             && let Some(sync) = &self.sync
         {
@@ -94,7 +101,9 @@ impl From<StorageError> for CommandError {
             StorageError::ReadOnly(_) => "read-only",
             StorageError::UnknownCalendar(_) => "unknown-calendar",
             StorageError::AlreadyExists(_) => "already-exists",
-            StorageError::Unsupported(_) | StorageError::UnsupportedRecurrence(_) => "unsupported",
+            StorageError::Unsupported(_)
+            | StorageError::UnsupportedRecurrence(_)
+            | StorageError::TooManyReminders(_) => "unsupported",
             StorageError::Database(_)
             | StorageError::Migration(_)
             | StorageError::Corrupt(_)
@@ -260,6 +269,9 @@ pub async fn delete_event(
         Scope::Series => store.delete_series(&id).await?,
         Scope::Following => store.delete_following(&id).await?,
     }
+    if let Some(reminders) = &state.reminders {
+        reminders.changed();
+    }
     if remote {
         state.changed(calendar_core::SyncStatus::PendingSync);
     }
@@ -291,8 +303,17 @@ pub async fn set_setting(
     key: String,
     value: serde_json::Value,
 ) -> CommandResult<()> {
+    if key == NOTIFICATIONS_SETTING {
+        state.notifications.store(
+            value.as_bool() != Some(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     Ok(state.store()?.set_setting(&key, &value).await?)
 }
+
+/// Setting that turns desktop reminder notifications off (`false`).
+pub const NOTIFICATIONS_SETTING: &str = "notifications";
 
 /// Replaces all data with a deterministic simulated dataset centred on today.
 #[tauri::command]

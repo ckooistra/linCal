@@ -27,6 +27,8 @@
 | `base64` | 0.21 | MIT OR Apache-2.0 | PKCE / state encoding (already in the tree) |
 | `getrandom` | 0.2 | MIT OR Apache-2.0 | OS randomness for PKCE verifiers and OAuth state (already in the tree) |
 | `reqwest` feature `gzip` (`calendar-ics` only) | 0.13 | MIT OR Apache-2.0; pulls in `async-compression` 0.4, `compression-codecs`/`-core`, `flate2` 1.1 (MIT OR Apache-2.0), `miniz_oxide` (MIT OR Zlib OR Apache-2.0), `adler2` (0BSD OR MIT OR Apache-2.0), `crc32fast` (MIT OR Apache-2.0) | Some feed servers (Apple's) send gzip whether asked or not |
+| `tauri-plugin-notification` | 2.8 | Apache-2.0 OR MIT; pulls in `notify-rust` 4.18 (MIT OR Apache-2.0; D-Bus `org.freedesktop.Notifications` via the `zbus` already in the tree), `time` 0.3, `rand` 0.10, `chacha20` (MIT OR Apache-2.0) | Reminder notifications, called from Rust only (no frontend permission) |
+| `iana-time-zone` | 0.1 | MIT OR Apache-2.0 | The system time zone for reminders of all-day and floating events (already in the tree via `chrono`) |
 | `wiremock` (dev, and the optional `testing` feature of `calendar-google` / `calendar-microsoft`) | 0.6 | MIT/Apache-2.0 | Mock CalDAV server and stateful Google/Graph fakes in tests; never in release builds |
 | Dev tool (not shipped): Radicale | 3.9 | GPL-3.0 | Local CalDAV server for end-to-end tests (`scripts/dev-radicale.sh`) |
 | Dev: `svelte` 5.57, `vite` 8.3, `@sveltejs/vite-plugin-svelte` 7.3, `typescript` 6.0, `svelte-check` 4.7, `vitest` 5.0, `jsdom` 30, `@testing-library/svelte` 5.4, `@tauri-apps/cli` 2.12 | | MIT / Apache-2.0 | Build and test tooling |

@@ -41,6 +41,36 @@ pub(crate) fn members(data: &str) -> Result<(Vec<Value>, Option<String>), String
     Ok((events, str_field(&v, "timeZone").map(str::to_owned)))
 }
 
+/// Popup reminders (minutes) of a `reminders.overrides` or
+/// `defaultReminders` list. E-mail reminders are not desktop reminders.
+fn popup_minutes(list: Option<&Value>) -> Vec<u32> {
+    calendar_core::normalize_reminders(
+        list.and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|r| str_field(r, "method") == Some("popup"))
+            .filter_map(|r| r.get("minutes")?.as_u64())
+            .filter_map(|m| u32::try_from(m).ok())
+            .filter(|m| *m <= calendar_core::MAX_REMINDER_MINUTES)
+            .collect(),
+    )
+}
+
+/// The reminders of an event: its own, or the calendar's defaults (which
+/// the provider stores alongside the object as `defaultReminders`).
+fn event_reminders(event: &Value, defaults: &[u32]) -> Vec<u32> {
+    let reminders = event.get("reminders");
+    let use_default = reminders
+        .and_then(|r| r.get("useDefault"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if use_default {
+        defaults.to_vec()
+    } else {
+        popup_minutes(reminders.and_then(|r| r.get("overrides")))
+    }
+}
+
 pub(crate) fn is_cancelled(event: &Value) -> bool {
     str_field(event, "status") == Some("cancelled")
 }
@@ -74,7 +104,12 @@ fn time_line(name: &str, t: &Value, calendar_tz: Option<&str>) -> Result<String,
 }
 
 /// The VCALENDAR equivalent of a stored Google object.
-fn to_icalendar(events: &[Value], calendar_tz: Option<&str>, uid: &str) -> Result<String, String> {
+fn to_icalendar(
+    events: &[Value],
+    calendar_tz: Option<&str>,
+    uid: &str,
+    defaults: &[u32],
+) -> Result<String, String> {
     let mut out = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n");
     for e in events {
         let cancelled = is_cancelled(e);
@@ -109,6 +144,18 @@ fn to_icalendar(events: &[Value], calendar_tz: Option<&str>, uid: &str) -> Resul
         }
         if cancelled {
             out.push_str("STATUS:CANCELLED\r\n");
+        } else {
+            for m in event_reminders(e, defaults) {
+                let trigger = if m == 0 {
+                    "PT0S".to_owned()
+                } else {
+                    format!("-PT{m}M")
+                };
+                out.push_str(&format!(
+                    "BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:{trigger}\r\n\
+                     DESCRIPTION:Reminder\r\nEND:VALARM\r\n"
+                ));
+            }
         }
         if !is_exception(e) {
             for line in e
@@ -247,6 +294,21 @@ fn patch(
             time_value(&desired.timing, false, calendar_tz),
         );
     }
+    // Reminders replace Google's (including the calendar defaults) only
+    // when they changed; a new event without any keeps the defaults.
+    if base.map(|b| &b.reminders) != Some(&desired.reminders)
+        && (base.is_some() || !desired.reminders.is_empty())
+    {
+        let overrides: Vec<Value> = desired
+            .reminders
+            .iter()
+            .map(|m| json!({"method": "popup", "minutes": m}))
+            .collect();
+        body.insert(
+            "reminders".into(),
+            json!({"useDefault": false, "overrides": overrides}),
+        );
+    }
     if with_recurrence && base.map(|b| &b.recurrence) != Some(&desired.recurrence) {
         body.insert(
             "recurrence".into(),
@@ -265,7 +327,11 @@ impl ObjectCodec for GoogleCodec {
             .or_else(|| events.iter().find_map(|e| str_field(e, "id")))
             .ok_or("event without an id")?
             .to_owned();
-        let text = to_icalendar(&events, tz.as_deref(), &uid)?;
+        let defaults = serde_json::from_str::<Value>(data)
+            .ok()
+            .map(|v| popup_minutes(v.get("defaultReminders")))
+            .unwrap_or_default();
+        let text = to_icalendar(&events, tz.as_deref(), &uid, &defaults)?;
         let cal = calendar_ical::parse(&text).map_err(|e| e.to_string())?;
         let mut read = calendar_ical::read_events(&cal).map_err(|e| e.to_string())?;
         let warnings = std::mem::take(&mut read.warnings);

@@ -62,6 +62,12 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   - **Dragging** an occurrence moves just that one.
   - **Saving or deleting in the editor** asks whether the change is for *this event*, *this and following events*, or *all events*. "This and following" splits the series: the original ends before the occurrence (UNTIL, or a reduced COUNT), and a new series continues from it with the changes and any later modified occurrences. This syncs to CalDAV, Google and Microsoft as an edited series plus a new one. A new repeat rule or calendar can't apply to a single event, so *this event* is unavailable then.
   - **Repeat:** presets (daily, weekdays, weekly, monthly, yearly) or **Custom…**: every N days/weeks/months/years, weekdays, monthly on a day or on the nth/last weekday, ending never, on a date or after N times. Rules the custom fields can't show are kept as they are.
+- **Reminders and desktop notifications:**
+  - The editor sets reminders, from "at start" to "1 week before" (up to five; Outlook calendars hold one).
+  - Reminders from your servers are read: CalDAV/ICS alarms, Google's (including the calendar's default reminders), and Outlook's.
+  - While the app runs, a desktop notification appears when a reminder is due. Plasma and other desktops show it through the standard notification service. Reminders missed while the computer was off or asleep are still shown if the event hasn't ended.
+  - Settings → *Reminder notifications* turns them off.
+  - Alarms the app doesn't represent are kept as they are: e-mail alarms, alarms at a fixed time, and alarms relative to the end.
 - Optimistic updates. A failed save is rolled back with a visible message.
 - Visible-range loading with adjacent-month prefetch and cancellation of obsolete loads.
 - **Search** (**Ctrl+F**) covers every stored event, not just what is on screen: two years back and two years ahead, including occurrences of recurring series. Every word must appear in the title, location or description (ignoring case). Upcoming matches come first, then earlier ones. **Enter** or **↓** jumps to the results, and opening a result shows its date and opens it in the editor. **Esc** closes the search. Hidden calendars are not searched.
@@ -194,7 +200,7 @@ See [docs/architecture.md](docs/architecture.md).
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
 3. CalDAV (Nextcloud reference) with offline queue ✔
 4. Google Calendar and Microsoft Graph ✔ (Google checked live; Microsoft tested against an API fake, live check pending)
-5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions. Next: reminders and notifications, conflict review, accessibility, packaging, user guide, profiling.
+5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, reminders and notifications. Next: conflict review, accessibility, packaging, user guide, profiling.
 
 ## License
 

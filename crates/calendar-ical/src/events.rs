@@ -223,6 +223,55 @@ fn is_cancelled(c: &Component) -> bool {
 /// Cancelled overrides become EXDATEs of the master. A cancelled one-off
 /// event yields no master. Objects holding only overrides (e.g. a single
 /// invitation instance) return them with `master: None`.
+/// Minutes before the start for a VALARM the model represents: a DISPLAY
+/// or AUDIO alarm triggered at or before the start. Others (absolute
+/// time, relative to the end, e-mail, after the start) are left alone.
+fn reminder_minutes(alarm: &Component) -> Option<u32> {
+    let action = alarm.property("ACTION")?.value.trim().to_ascii_uppercase();
+    if action != "DISPLAY" && action != "AUDIO" {
+        return None;
+    }
+    let trigger = alarm.property("TRIGGER")?;
+    if trigger
+        .param("VALUE")
+        .is_some_and(|v| v.eq_ignore_ascii_case("DATE-TIME"))
+        || trigger
+            .param("RELATED")
+            .is_some_and(|r| r.eq_ignore_ascii_case("END"))
+    {
+        return None;
+    }
+    let d = parse_duration(trigger.value.trim()).ok()?;
+    let seconds = d.days.checked_mul(86_400)?.checked_add(d.seconds)?;
+    if seconds > 0 {
+        return None;
+    }
+    u32::try_from(-seconds / 60)
+        .ok()
+        .filter(|m| *m <= calendar_core::MAX_REMINDER_MINUTES)
+}
+
+fn reminders(c: &Component) -> Vec<u32> {
+    calendar_core::normalize_reminders(c.children("VALARM").filter_map(reminder_minutes).collect())
+}
+
+/// A VALARM for a reminder `minutes` before the start.
+fn alarm(minutes: u32, title: &str) -> Component {
+    let mut a = Component::new("VALARM");
+    a.set(Property::new("ACTION", "DISPLAY"));
+    let trigger = if minutes == 0 {
+        "PT0S".to_owned()
+    } else {
+        format!("-PT{minutes}M")
+    };
+    a.set(Property::new("TRIGGER", trigger));
+    a.set(Property::new(
+        "DESCRIPTION",
+        escape_text(if title.is_empty() { "Reminder" } else { title }),
+    ));
+    a
+}
+
 pub fn read_events(calendar: &Component) -> Result<ObjectEvents, IcalError> {
     let mut warnings = Vec::new();
     let vevents: Vec<&Component> = calendar.children("VEVENT").collect();
@@ -265,6 +314,7 @@ pub fn read_events(calendar: &Component) -> Result<ObjectEvents, IcalError> {
                 None
             } else {
                 Some(EventData {
+                    reminders: reminders(c),
                     title: text(c, "SUMMARY"),
                     description: text(c, "DESCRIPTION"),
                     location: text(c, "LOCATION"),
@@ -307,6 +357,7 @@ pub fn read_events(calendar: &Component) -> Result<ObjectEvents, IcalError> {
             continue;
         }
         overrides.push(EventData {
+            reminders: reminders(c),
             title: text(c, "SUMMARY"),
             description: text(c, "DESCRIPTION"),
             location: text(c, "LOCATION"),
@@ -446,6 +497,14 @@ fn apply(
             c.remove("EXDATE");
             c.remove("RDATE");
         }
+    }
+    // Alarms: only the ones the model represents are replaced; others
+    // (e-mail, absolute, relative to the end) stay as they are.
+    if reminders(c) != event.reminders {
+        c.components
+            .retain(|a| a.name != "VALARM" || reminder_minutes(a).is_none());
+        c.components
+            .extend(event.reminders.iter().map(|m| alarm(*m, &event.title)));
     }
     if let Some(key) = &event.recurrence_id {
         let current = c

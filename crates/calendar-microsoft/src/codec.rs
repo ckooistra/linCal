@@ -139,6 +139,7 @@ pub fn event_content(e: &Value) -> Result<(EventContent, Vec<String>), String> {
     };
     Ok((
         EventContent {
+            reminders: reminders(e),
             title: str_field(e, "subject").unwrap_or("").to_owned(),
             description: description(e),
             location: str_field(&e["location"], "displayName")
@@ -150,6 +151,19 @@ pub fn event_content(e: &Value) -> Result<(EventContent, Vec<String>), String> {
         },
         warnings,
     ))
+}
+
+/// Outlook has at most one reminder per event.
+fn reminders(e: &Value) -> Vec<u32> {
+    if e.get("isReminderOn").and_then(Value::as_bool) != Some(true) {
+        return Vec::new();
+    }
+    e.get("reminderMinutesBeforeStart")
+        .and_then(Value::as_u64)
+        .and_then(|m| u32::try_from(m).ok())
+        .filter(|m| *m <= calendar_core::MAX_REMINDER_MINUTES)
+        .into_iter()
+        .collect()
 }
 
 /// The key of the series slot that started at `t` (an `originalStart`).
@@ -306,6 +320,21 @@ pub fn patch(desired: &EventContent, base: Option<&EventContent>) -> Map<String,
     }
     if base.map(|b| &b.location) != Some(&desired.location) {
         body.insert("location".into(), json!({"displayName": desired.location}));
+    }
+    // Outlook keeps one reminder: the earliest one is sent. A new event
+    // without reminders keeps the mailbox default.
+    if base.map(|b| &b.reminders) != Some(&desired.reminders)
+        && (base.is_some() || !desired.reminders.is_empty())
+    {
+        match desired.reminders.iter().max() {
+            Some(m) => {
+                body.insert("isReminderOn".into(), json!(true));
+                body.insert("reminderMinutesBeforeStart".into(), json!(m));
+            }
+            None => {
+                body.insert("isReminderOn".into(), json!(false));
+            }
+        }
     }
     let timing_changed = base.map(|b| &b.timing) != Some(&desired.timing);
     if timing_changed {

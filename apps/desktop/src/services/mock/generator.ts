@@ -110,7 +110,7 @@ export function generateDataset(options: DatasetOptions): Dataset {
   const nextId = () => `sim-${seed}-${seq++}`;
 
   const push = (
-    e: Omit<CalendarEvent, "id" | "syncStatus" | "revision" | "recurrenceId" | "rrule">,
+    e: Omit<CalendarEvent, "id" | "syncStatus" | "revision" | "recurrenceId" | "rrule" | "reminders">,
   ) => {
     const id = nextId();
     const recurrenceId = e.seriesId ? String(timingBounds(e.timing).start) : null;
@@ -119,6 +119,7 @@ export function generateDataset(options: DatasetOptions): Dataset {
       id: e.seriesId ? `${e.seriesId}::${recurrenceId}` : id,
       recurrenceId,
       rrule: e.seriesId ? "FREQ=WEEKLY" : null,
+      reminders: [],
       syncStatus: "synced",
       revision: 1,
     });

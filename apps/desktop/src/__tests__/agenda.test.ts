@@ -14,6 +14,7 @@ function event(id: string, timing: EventTiming, title = id): CalendarEvent {
     seriesId: null,
     recurrenceId: null,
     rrule: null,
+    reminders: [],
     syncStatus: "saved",
     revision: 1,
   };

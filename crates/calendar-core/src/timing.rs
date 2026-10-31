@@ -148,6 +148,14 @@ impl EventDraft {
         if self.title.chars().count() > MAX_TITLE_CHARS {
             return Err(CoreError::TitleTooLong);
         }
+        if let Some(reminders) = &self.reminders
+            && (reminders.len() > crate::model::MAX_REMINDERS
+                || reminders
+                    .iter()
+                    .any(|m| *m > crate::model::MAX_REMINDER_MINUTES))
+        {
+            return Err(CoreError::InvalidReminders);
+        }
         self.timing.validate()
     }
 }

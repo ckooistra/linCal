@@ -3,6 +3,7 @@
   import type { Calendar, CalendarEvent, EventDraft, EventTiming, Resolution } from "../types/calendar";
   import type { SeriesScope } from "../stores/events.svelte";
   import { buildRule, defaultForm, isPreset, parseRule, REPEAT_PRESETS, type RuleForm } from "../services/recurrence";
+  import { MAX_REMINDERS, normalizeReminders, REMINDER_PRESETS, reminderLabel } from "../services/reminders";
   import RepeatEditor from "./RepeatEditor.svelte";
   import TimeField from "./TimeField.svelte";
   import {
@@ -30,6 +31,8 @@
     onclose: () => void;
     /** Resolve a sync conflict or failure for this event. */
     onresolve?: (resolution: Resolution) => void;
+    /** How many reminders a calendar holds (Outlook: one). */
+    reminderLimit?: (calendarId: string) => number;
     /** The event changed (e.g. through sync) since the editor opened. */
     newer?: boolean;
     onshownewer?: () => void;
@@ -45,6 +48,7 @@
     ondelete,
     onclose,
     onresolve,
+    reminderLimit = () => MAX_REMINDERS,
     newer = false,
     onshownewer,
   }: Props = $props();
@@ -104,6 +108,9 @@
     init.rrule === null ? "none" : isPreset(init.rrule) ? init.rrule : initForm ? "custom" : "keep",
   );
   let ruleForm = $state<RuleForm>(initForm ?? defaultForm(initStart));
+  let reminders = $state<number[]>(untrack(() => [...(event?.reminders ?? [])]));
+  const limit = $derived(reminderLimit(calendarId));
+  const reminderChoices = $derived(REMINDER_PRESETS.filter((m) => !reminders.includes(m)));
   const keptLabel = init.rrule === "" ? "On specific dates" : `Custom (${init.rrule})`;
   let allDay = $state(init.allDay);
   let startDate = $state(init.startDate);
@@ -195,10 +202,24 @@
       error = invalid;
       return;
     }
-    const draft: EventDraft = { calendarId, title: title.trim(), description, location, timing: t, rrule: currentRule(t) };
+    if (reminders.length > limit) {
+      error = limit === 1 ? "This calendar holds one reminder per event." : `This calendar holds at most ${limit} reminders per event.`;
+      return;
+    }
+    const draft: EventDraft = {
+      calendarId,
+      title: title.trim(),
+      description,
+      location,
+      timing: t,
+      rrule: currentRule(t),
+      reminders: normalizeReminders(reminders),
+    };
     if (recurring && event) {
-      const { calendarId: c, title: ti, description: d, location: l, timing: tm, rrule: r } = event;
-      const unchanged = JSON.stringify(draft) === JSON.stringify({ calendarId: c, title: ti, description: d, location: l, timing: tm, rrule: r });
+      const { calendarId: c, title: ti, description: d, location: l, timing: tm, rrule: r, reminders: rm } = event;
+      const unchanged =
+        JSON.stringify(draft) ===
+        JSON.stringify({ calendarId: c, title: ti, description: d, location: l, timing: tm, rrule: r, reminders: rm });
       if (unchanged) return onclose();
       void ask({ action: "save", draft });
       return;
@@ -381,6 +402,44 @@
         {#if repeat === "custom"}
           <RepeatEditor bind:form={ruleForm} start={ruleStart} />
         {/if}
+        <div class="reminders" role="group" aria-labelledby="reminders-label">
+          <span id="reminders-label">Reminders</span>
+          {#if reminders.length > 0}
+            <ul>
+              {#each normalizeReminders(reminders) as minutes (minutes)}
+                <li>
+                  <span>{reminderLabel(minutes)}</span>
+                  <button
+                    type="button"
+                    class="remove"
+                    aria-label={`Remove reminder ${reminderLabel(minutes)}`}
+                    title="Remove"
+                    onclick={() => (reminders = reminders.filter((m) => m !== minutes))}>×</button
+                  >
+                </li>
+              {/each}
+            </ul>
+          {/if}
+          {#if reminders.length < limit}
+            <select
+              aria-label="Add reminder"
+              value=""
+              onchange={(e) => {
+                const value = e.currentTarget.value;
+                e.currentTarget.value = "";
+                if (value !== "") reminders = [...reminders, Number(value)];
+              }}
+            >
+              <option value="" disabled>{reminders.length ? "Add another reminder…" : "Add a reminder…"}</option>
+              {#each reminderChoices as minutes (minutes)}
+                <option value={minutes}>{reminderLabel(minutes)}</option>
+              {/each}
+            </select>
+          {/if}
+          {#if limit === 1}
+            <p class="hint">This calendar holds one reminder per event.</p>
+          {/if}
+        </div>
         <label class="full">
           <span>Location</span>
           <input bind:value={location} autocomplete="off" />
@@ -520,6 +579,41 @@
   }
   .actions button {
     white-space: nowrap;
+  }
+  .reminders {
+    display: grid;
+    gap: 0.3rem;
+    font-size: 0.85rem;
+  }
+  .reminders > span {
+    color: var(--uc-text-muted);
+  }
+  .reminders ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .reminders li {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.1rem 0.25rem 0.1rem 0.6rem;
+    border: 1px solid var(--uc-border);
+    border-radius: 999px;
+    background: var(--uc-surface-alt);
+  }
+  .reminders .remove {
+    border: none;
+    background: transparent;
+    padding: 0 0.35rem;
+    line-height: 1.2;
+  }
+  .reminders .hint {
+    margin: 0;
+    color: var(--uc-text-muted);
   }
   .scope {
     margin-top: 1rem;

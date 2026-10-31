@@ -13,6 +13,8 @@ pub enum CoreError {
     InvalidOccurrenceKey(String),
     #[error("the title is too long")]
     TitleTooLong,
+    #[error("an event can have at most 5 reminders, each at most 4 weeks before")]
+    InvalidReminders,
     #[error("invalid time value")]
     InvalidTime,
     #[error("invalid date: {0}")]

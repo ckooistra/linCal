@@ -381,6 +381,13 @@
     windowControls.setNativeFrame(systemTitleBar).catch(() => {});
   });
 
+  // Desktop notifications for reminders (shown by the Rust side).
+  let notificationsOn = $state(initialSettings.notifications !== false);
+  function setNotifications(on: boolean) {
+    notificationsOn = on;
+    void backend.saveSetting("notifications", on);
+  }
+
   function setSystemTitleBar(on: boolean) {
     systemTitleBar = on;
     void backend.saveSetting("systemTitleBar", on);
@@ -478,6 +485,12 @@
     const result = store.remove(editor.event.id, scope);
     if (!result.ok) notifications.push(result.message);
     editor = null;
+  }
+
+  /** Outlook calendars hold one reminder per event. */
+  function reminderLimit(calendarId: string): number {
+    const accountId = calendars.get(calendarId)?.accountId;
+    return calendars.accounts.find((a) => a.id === accountId)?.provider === "microsoft" ? 1 : 5;
   }
 
   function draftOf(event: CalendarEvent): EventDraft {
@@ -700,6 +713,8 @@
     {themePreference}
     systemTitleBar={backend.kind === "desktop" ? systemTitleBar : undefined}
     onsystemtitlebar={setSystemTitleBar}
+    notifications={backend.kind === "desktop" ? notificationsOn : undefined}
+    onnotifications={setNotifications}
     simulationControls={backend.mock !== null}
     onaddaccount={backend.kind === "desktop" ? (kind) => void openAddAccount(kind) : undefined}
     onsignin={(id) => void signInAgain(id)}
@@ -800,6 +815,7 @@
       ondelete={deleteFromEditor}
       onclose={closeEditor}
       onresolve={backend.kind === "desktop" ? (resolution) => void resolveFromEditor(resolution) : undefined}
+      reminderLimit={reminderLimit}
       newer={editorNewer !== null}
       onshownewer={showNewerVersion}
     />

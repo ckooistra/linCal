@@ -94,11 +94,19 @@ impl Respond for Handler {
             ("GET", ["users", "me", "calendarList"]) => json_response(
                 200,
                 json!({"items": [
-                    {"id": "alice@example.com", "summary": "Alice", "accessRole": "owner", "primary": true, "backgroundColor": "#9FC6E7", "etag": "\"c1\""},
+                    {"id": "alice@example.com", "summary": "Alice", "accessRole": "owner", "primary": true, "backgroundColor": "#9FC6E7", "etag": "\"c1\"",
+                     "defaultReminders": [{"method": "popup", "minutes": 10}, {"method": "email", "minutes": 60}]},
                     {"id": "holidays@group", "summary": "Holidays", "accessRole": "reader"},
                     {"id": "busy@group", "summary": "Busy", "accessRole": "freeBusyReader"}
                 ]}),
             ),
+            ("GET", ["users", "me", "calendarList", cal]) => match *cal {
+                "alice@example.com" => json_response(
+                    200,
+                    json!({"id": cal, "defaultReminders": [{"method": "popup", "minutes": 10}]}),
+                ),
+                _ => error(404, "notFound"),
+            },
             ("GET", ["calendars", cal]) if *cal == "primary" => json_response(
                 200,
                 json!({"id": "alice@example.com", "timeZone": "Europe/Berlin"}),

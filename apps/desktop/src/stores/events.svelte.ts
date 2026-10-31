@@ -210,6 +210,7 @@ export class EventStore {
     const optimistic: CalendarEvent = {
       ...draft,
       id,
+      reminders: draft.reminders ?? [],
       seriesId: null,
       recurrenceId: null,
       rrule: draft.rrule ?? null,

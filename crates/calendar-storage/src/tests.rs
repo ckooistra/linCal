@@ -24,6 +24,7 @@ fn zoned(start: NaiveDateTime, minutes: i64) -> EventTiming {
 
 fn draft(calendar: &str, title: &str, timing: EventTiming, rrule: Option<&str>) -> EventDraft {
     EventDraft {
+        reminders: None,
         calendar_id: calendar.into(),
         title: title.into(),
         description: String::new(),
@@ -405,6 +406,68 @@ async fn search_matches_words_in_any_field_and_respects_overrides() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn reminders_are_stored_kept_and_follow_series_edits() {
+    let store = store_with_calendars().await;
+    let mut d = draft(
+        "cal-team",
+        "Daily",
+        zoned(local(2026, 6, 1, 9, 0), 30),
+        Some("FREQ=DAILY;COUNT=3"),
+    );
+    d.reminders = Some(vec![10]);
+    store.create_event("s", d).await.unwrap();
+    let occ = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+    assert!(occ.iter().all(|o| o.reminders == vec![10]));
+
+    // A moved occurrence without new reminders keeps the series' ones; one
+    // with its own keeps those through a series change.
+    let mut moved = draft(
+        "cal-team",
+        "Daily",
+        zoned(local(2026, 6, 2, 11, 0), 30),
+        None,
+    );
+    store
+        .update_occurrence(&occ[1].id, moved.clone(), BERLIN)
+        .await
+        .unwrap();
+    moved.timing = zoned(local(2026, 6, 3, 11, 0), 30);
+    moved.reminders = Some(vec![0]);
+    store
+        .update_occurrence(&occ[2].id, moved, BERLIN)
+        .await
+        .unwrap();
+    let mut all = draft(
+        "cal-team",
+        "Daily",
+        zoned(local(2026, 6, 1, 9, 0), 30),
+        Some("FREQ=DAILY;COUNT=3"),
+    );
+    all.reminders = Some(vec![5, 60]);
+    store.update_series(&occ[0].id, all).await.unwrap();
+    let after: Vec<Vec<u32>> = store
+        .query_range(month(2026, 6), BERLIN)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.reminders)
+        .collect();
+    assert_eq!(after, vec![vec![5, 60], vec![5, 60], vec![0]]);
+
+    // Survives a reopen-equivalent read, and `None` keeps them.
+    let mut single = draft("cal-work", "Call", zoned(local(2026, 6, 5, 9, 0), 30), None);
+    single.reminders = Some(vec![1440]);
+    store.create_event("one", single.clone()).await.unwrap();
+    single.title = "Call (moved)".into();
+    single.reminders = None;
+    store.update_event("one", single).await.unwrap();
+    assert_eq!(
+        store.get_event("one").await.unwrap().unwrap().reminders,
+        vec![1440]
     );
 }
 
@@ -1039,6 +1102,7 @@ mod sync {
         ObjectContent {
             uid: uid.into(),
             master: Some(EventContent {
+                reminders: Vec::new(),
                 title: title.into(),
                 description: String::new(),
                 location: String::new(),
@@ -1193,6 +1257,7 @@ mod sync {
         let (store, cal) = remote_store().await;
         let mut series = content("s", "Stand-up", Some("FREQ=DAILY;COUNT=3"));
         series.overrides.push(EventContent {
+            reminders: Vec::new(),
             title: "Stand-up (moved)".into(),
             description: String::new(),
             location: String::new(),
@@ -1851,6 +1916,7 @@ mod sync {
         let mut c = content("s", "Daily", Some("FREQ=DAILY;COUNT=5"));
         let key = OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, 3, 9, 0)));
         c.overrides.push(EventContent {
+            reminders: Vec::new(),
             title: "Moved".into(),
             description: String::new(),
             location: String::new(),

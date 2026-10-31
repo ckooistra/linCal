@@ -11,6 +11,9 @@
     /** Present in the desktop app: native window frame instead of the app's title bar. */
     systemTitleBar?: boolean | undefined;
     onsystemtitlebar?: (on: boolean) => void;
+    /** Desktop reminder notifications (desktop only). */
+    notifications?: boolean | undefined;
+    onnotifications?: (on: boolean) => void;
     /** Show latency/failure injection (in-memory preview only). */
     simulationControls?: boolean;
     ontogglecalendar: (id: string) => void;
@@ -36,6 +39,8 @@
     themePreference,
     systemTitleBar,
     onsystemtitlebar,
+    notifications,
+    onnotifications,
     simulationControls = true,
     ontogglecalendar,
     oncolor,
@@ -175,6 +180,12 @@
       <label class="check">
         <input type="checkbox" checked={systemTitleBar} onchange={(e) => onsystemtitlebar(e.currentTarget.checked)} />
         <span>Use system title bar</span>
+      </label>
+    {/if}
+    {#if onnotifications && notifications !== undefined}
+      <label class="check">
+        <input type="checkbox" checked={notifications} onchange={(e) => onnotifications(e.currentTarget.checked)} />
+        <span>Reminder notifications</span>
       </label>
     {/if}
   </section>

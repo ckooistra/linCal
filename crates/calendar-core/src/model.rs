@@ -155,6 +155,8 @@ pub struct CalendarEvent {
     pub timing: EventTiming,
     pub recurrence: Option<Recurrence>,
     pub series: Option<SeriesLink>,
+    /// Reminders, as minutes before the start (see [`Reminders`]).
+    pub reminders: Reminders,
     pub sync_status: SyncStatus,
     /// Incremented on every local change.
     pub revision: i64,
@@ -173,6 +175,26 @@ pub struct EventDraft {
     /// RRULE for a series (`None` = not recurring). Ignored when editing a
     /// single occurrence.
     pub rrule: Option<String>,
+    /// New reminders; `None` keeps the current ones (e.g. a drag).
+    pub reminders: Option<Reminders>,
+}
+
+/// Reminders of an event: minutes before its start (0 = at the start),
+/// ascending and without duplicates. Alarms the model cannot express
+/// (at a fixed time, relative to the end, e-mail) are not listed here; the
+/// providers keep them as they are.
+pub type Reminders = Vec<u32>;
+
+/// At most this many reminders per event.
+pub const MAX_REMINDERS: usize = 5;
+/// Furthest reminder: four weeks before (Google's limit).
+pub const MAX_REMINDER_MINUTES: u32 = 4 * 7 * 24 * 60;
+
+/// Sorts and de-duplicates reminders.
+pub fn normalize_reminders(mut reminders: Reminders) -> Reminders {
+    reminders.sort_unstable();
+    reminders.dedup();
+    reminders
 }
 
 /// Provider-neutral content of one remote event component (e.g. a VEVENT).
@@ -186,6 +208,7 @@ pub struct EventContent {
     pub recurrence: Option<Recurrence>,
     /// Present on overrides (modified occurrences) only.
     pub recurrence_id: Option<OccurrenceKey>,
+    pub reminders: Reminders,
 }
 
 /// The events of one remote object (one UID): an optional master and its
@@ -215,6 +238,7 @@ pub struct Occurrence {
     pub timing: EventTiming,
     /// RRULE of the series this occurrence was generated from.
     pub rrule: Option<String>,
+    pub reminders: Reminders,
     pub sync_status: SyncStatus,
     pub revision: i64,
 }
@@ -252,6 +276,7 @@ impl CalendarEvent {
             location: self.location.clone(),
             timing: self.timing.clone(),
             rrule: self.recurrence.as_ref().map(|r| r.rrule.clone()),
+            reminders: Some(self.reminders.clone()),
         }
     }
 
@@ -268,6 +293,7 @@ impl CalendarEvent {
             location: self.location.clone(),
             timing: self.timing.clone(),
             rrule: self.recurrence.as_ref().map(|r| r.rrule.clone()),
+            reminders: self.reminders.clone(),
             sync_status: self.sync_status,
             revision: self.revision,
         }

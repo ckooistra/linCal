@@ -102,6 +102,7 @@ export class MockEventSource implements EventSource {
     const event: CalendarEvent = {
       ...draft,
       id,
+      reminders: draft.reminders ?? [],
       seriesId: null,
       recurrenceId: null,
       rrule: draft.rrule ?? null,

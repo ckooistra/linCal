@@ -33,7 +33,10 @@ use calendar_core::{
     parse_occurrence_id,
 };
 
-use codec::{EventRow, decode_event, encode_keys, encode_timing, event_columns, index_range};
+use codec::{
+    EventRow, decode_event, encode_keys, encode_reminders, encode_timing, event_columns,
+    index_range,
+};
 
 /// Errors returned by [`Store`].
 #[derive(Debug, Error)]
@@ -57,6 +60,9 @@ pub enum StorageError {
     /// A repeat rule the calendar's provider cannot hold.
     #[error("{0}")]
     UnsupportedRecurrence(String),
+    /// More reminders than the calendar's provider can hold.
+    #[error("this calendar can hold at most {0} reminder(s) per event")]
+    TooManyReminders(usize),
     #[error("stored data is corrupt: {0}")]
     Corrupt(String),
     #[error("a background task failed")]
@@ -77,6 +83,7 @@ pub struct Store {
     pool: SqlitePool,
     /// Per provider kind: limits on the series its calendars can hold.
     recurrence_checks: std::sync::Arc<std::sync::RwLock<HashMap<ProviderKind, RecurrenceCheck>>>,
+    reminder_limits: std::sync::Arc<std::sync::RwLock<HashMap<ProviderKind, usize>>>,
     /// Bounds concurrent decode/expansion jobs: rapid navigation must not
     /// pile up CPU work for ranges nobody looks at any more.
     expansions: std::sync::Arc<tokio::sync::Semaphore>,
@@ -134,6 +141,7 @@ impl Store {
             pool,
             expansions: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_EXPANSIONS)),
             recurrence_checks: std::sync::Arc::default(),
+            reminder_limits: std::sync::Arc::default(),
         };
         store.run_fixups().await?;
         Ok(store)
@@ -146,6 +154,14 @@ impl Store {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(provider, check);
+    }
+
+    /// Registers how many reminders per event `provider`'s calendars hold.
+    pub fn set_reminder_limit(&self, provider: ProviderKind, max: usize) {
+        self.reminder_limits
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(provider, max);
     }
 
     pub async fn close(&self) {
@@ -414,7 +430,7 @@ impl Store {
             "INSERT INTO events (",
             event_columns!(),
             ", range_start_ms, range_end_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ))
         .bind(&event.id)
         .bind(&event.calendar_id)
@@ -434,6 +450,7 @@ impl Store {
         .bind(event.revision)
         .bind(event.created_at.timestamp_millis())
         .bind(event.updated_at.timestamp_millis())
+        .bind(encode_reminders(&event.reminders))
         .bind(range_start)
         .bind(range_end)
         .execute(&mut **tx)
@@ -465,8 +482,8 @@ impl Store {
         let done = sqlx::query(
             "UPDATE events SET calendar_id = ?, title = ?, description = ?, location = ?, \
              timing_kind = ?, start_value = ?, end_value = ?, time_zone = ?, rrule = ?, rdates = ?, \
-             exdates = ?, sync_status = ?, revision = ?, updated_at = ?, range_start_ms = ?, \
-             range_end_ms = ? WHERE id = ?",
+             exdates = ?, sync_status = ?, revision = ?, updated_at = ?, reminders = ?, \
+             range_start_ms = ?, range_end_ms = ? WHERE id = ?",
         )
         .bind(&event.calendar_id)
         .bind(&event.title)
@@ -482,6 +499,7 @@ impl Store {
         .bind(event.sync_status.as_str())
         .bind(event.revision)
         .bind(event.updated_at.timestamp_millis())
+        .bind(encode_reminders(&event.reminders))
         .bind(range_start)
         .bind(range_end)
         .bind(&event.id)
@@ -559,6 +577,45 @@ impl Store {
         Ok(())
     }
 
+    async fn provider_of(
+        tx: &mut Transaction<'_, Sqlite>,
+        calendar_id: &str,
+    ) -> Result<Option<ProviderKind>> {
+        let provider: Option<String> = sqlx::query_scalar(
+            "SELECT a.provider FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?",
+        )
+        .bind(calendar_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        Ok(provider.as_deref().and_then(ProviderKind::parse))
+    }
+
+    /// Refuses more reminders than the calendar's provider holds (see
+    /// [`Store::set_reminder_limit`]).
+    async fn check_reminders(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        calendar_id: &str,
+        reminders: Option<&Vec<u32>>,
+    ) -> Result<()> {
+        let Some(reminders) = reminders else {
+            return Ok(());
+        };
+        let Some(kind) = Self::provider_of(tx, calendar_id).await? else {
+            return Ok(());
+        };
+        let limit = self
+            .reminder_limits
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&kind)
+            .copied();
+        match limit {
+            Some(max) if reminders.len() > max => Err(StorageError::TooManyReminders(max)),
+            _ => Ok(()),
+        }
+    }
+
     /// Refuses a series that the calendar's provider cannot hold (see
     /// [`Store::set_recurrence_check`]).
     async fn check_series_supported(
@@ -568,13 +625,7 @@ impl Store {
         timing: &calendar_core::EventTiming,
         recurrence: &Recurrence,
     ) -> Result<()> {
-        let provider: Option<String> = sqlx::query_scalar(
-            "SELECT a.provider FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?",
-        )
-        .bind(calendar_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        let Some(kind) = provider.as_deref().and_then(ProviderKind::parse) else {
+        let Some(kind) = Self::provider_of(tx, calendar_id).await? else {
             return Ok(());
         };
         let check = self
@@ -644,6 +695,7 @@ impl Store {
         let recurrence = Self::meaningful(Self::validated(&draft)?);
         let now = now();
         let event = CalendarEvent {
+            reminders: draft.reminders.unwrap_or_default(),
             id: id.to_owned(),
             calendar_id: draft.calendar_id,
             title: draft.title,
@@ -660,6 +712,8 @@ impl Store {
         let mut event = event;
         let mut tx = self.pool.begin().await?;
         Self::writable_calendar(&mut tx, &event.calendar_id).await?;
+        self.check_reminders(&mut tx, &event.calendar_id, Some(&event.reminders))
+            .await?;
         if let Some(rec) = &event.recurrence {
             self.check_series_supported(&mut tx, &event.calendar_id, &event.timing, rec)
                 .await?;
@@ -680,6 +734,8 @@ impl Store {
         let current = Self::load(&mut tx, id).await?;
         Self::writable_calendar(&mut tx, &current.calendar_id).await?;
         Self::writable_calendar(&mut tx, &draft.calendar_id).await?;
+        self.check_reminders(&mut tx, &draft.calendar_id, draft.reminders.as_ref())
+            .await?;
         if current.series.is_some() && draft.calendar_id != current.calendar_id {
             return Err(StorageError::Unsupported(
                 "a single occurrence cannot move to another calendar",
@@ -720,6 +776,7 @@ impl Store {
                 .await?;
         }
         let updated = CalendarEvent {
+            reminders: draft.reminders.unwrap_or_else(|| current.reminders.clone()),
             calendar_id: draft.calendar_id,
             title: draft.title,
             description: draft.description,
@@ -771,6 +828,8 @@ impl Store {
         };
         Self::writable_calendar(tx, &master.calendar_id).await?;
         Self::writable_calendar(tx, &draft.calendar_id).await?;
+        self.check_reminders(tx, &draft.calendar_id, draft.reminders.as_ref())
+            .await?;
         Self::check_move(tx, &master.calendar_id, &draft.calendar_id).await?;
         draft.validate()?;
         // If the edited occurrence was moved on its own, measure the change
@@ -808,6 +867,10 @@ impl Store {
             self.check_series_supported(tx, &draft.calendar_id, &timing, rec)
                 .await?;
         }
+        let reminders = draft
+            .reminders
+            .clone()
+            .unwrap_or_else(|| master.reminders.clone());
         let keep_overrides = recurrence.is_some() && shift.is_some();
         if !keep_overrides {
             sqlx::query("DELETE FROM events WHERE series_id = ?")
@@ -845,8 +908,20 @@ impl Store {
                     .execute(&mut **tx)
                     .await?;
             }
+            // Reminders likewise, where an override kept the series' ones.
+            if reminders != master.reminders {
+                sqlx::query(
+                    "UPDATE events SET reminders = ? WHERE series_id = ? AND reminders = ?",
+                )
+                .bind(encode_reminders(&reminders))
+                .bind(&series_id)
+                .bind(encode_reminders(&master.reminders))
+                .execute(&mut **tx)
+                .await?;
+            }
         }
         let updated = CalendarEvent {
+            reminders: reminders.clone(),
             calendar_id: draft.calendar_id,
             title: draft.title,
             description: draft.description,
@@ -865,6 +940,7 @@ impl Store {
                 edited.title.clone_from(&updated.title);
                 edited.description.clone_from(&updated.description);
                 edited.location.clone_from(&updated.location);
+                edited.reminders.clone_from(&updated.reminders);
                 edited.timing = draft.timing.clone();
                 edited.revision += 1;
                 edited.updated_at = updated.updated_at;
@@ -1039,6 +1115,8 @@ impl Store {
             return Err(StorageError::NotFound(occurrence.to_owned()));
         };
         Self::writable_calendar(&mut tx, &master.calendar_id).await?;
+        self.check_reminders(&mut tx, &master.calendar_id, draft.reminders.as_ref())
+            .await?;
         if draft.calendar_id != master.calendar_id {
             return Err(StorageError::Unsupported(
                 "a single occurrence cannot move to another calendar",
@@ -1048,6 +1126,9 @@ impl Store {
         let (event, exists) = match Self::load(&mut tx, occurrence).await {
             Ok(existing) => (
                 CalendarEvent {
+                    reminders: draft
+                        .reminders
+                        .unwrap_or_else(|| existing.reminders.clone()),
                     title: draft.title,
                     description: draft.description,
                     location: draft.location,
@@ -1065,6 +1146,7 @@ impl Store {
                 }
                 (
                     CalendarEvent {
+                        reminders: draft.reminders.unwrap_or_else(|| master.reminders.clone()),
                         id: occurrence.to_owned(),
                         calendar_id: master.calendar_id.clone(),
                         title: draft.title,

@@ -33,6 +33,7 @@ pub(crate) struct EventRow {
     pub revision: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    pub reminders: String,
 }
 
 /// Column list matching [`EventRow`], as a literal so queries stay static.
@@ -40,7 +41,7 @@ macro_rules! event_columns {
     () => {
         "id, calendar_id, title, description, location, timing_kind, start_value, end_value, \
          time_zone, rrule, rdates, exdates, series_id, recurrence_id, sync_status, revision, \
-         created_at, updated_at"
+         created_at, updated_at, reminders"
     };
 }
 pub(crate) use event_columns;
@@ -154,7 +155,14 @@ pub(crate) fn decode_event(row: EventRow) -> Result<CalendarEvent, StorageError>
         }),
         _ => None,
     };
+    let reminders = row
+        .reminders
+        .split(',')
+        .filter(|m| !m.is_empty())
+        .map(|m| m.parse().map_err(|_| corrupt("reminders", &row.reminders)))
+        .collect::<Result<_, _>>()?;
     Ok(CalendarEvent {
+        reminders,
         id: row.id,
         calendar_id: row.calendar_id,
         title: row.title,
@@ -169,6 +177,15 @@ pub(crate) fn decode_event(row: EventRow) -> Result<CalendarEvent, StorageError>
         created_at: time_ms(row.created_at),
         updated_at: time_ms(row.updated_at),
     })
+}
+
+/// Reminders as stored: comma-separated minutes.
+pub(crate) fn encode_reminders(reminders: &[u32]) -> String {
+    reminders
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Zone-independent index bounds (epoch ms) of an event row.

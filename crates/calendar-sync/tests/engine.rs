@@ -255,6 +255,7 @@ fn draft(calendar: &str, title: &str) -> EventDraft {
             .unwrap(),
     );
     EventDraft {
+        reminders: None,
         calendar_id: calendar.into(),
         title: title.into(),
         description: String::new(),
@@ -343,6 +344,25 @@ async fn pulls_then_pushes_local_creates_edits_and_deletes() {
         e.events.lock().unwrap().last(),
         Some(SyncEvent::Synced { changed: true, .. })
     ));
+}
+
+#[tokio::test]
+async fn calendars_read_by_older_readers_are_read_again_once() {
+    let e = env().await;
+    e.server.put_raw(&format!("{CAL}a.ics"), &ics("a", "One"));
+    e.server.put_raw(&format!("{CAL}b.ics"), &ics("b", "Two"));
+    assert_eq!(e.engine.sync_account("acct").await.unwrap().downloaded, 2);
+    assert_eq!(e.engine.sync_account("acct").await.unwrap().downloaded, 0);
+    // As after an update that taught the readers something new.
+    e.store.set_reader_version(&e.calendar_id, 0).await.unwrap();
+    e.server
+        .objects
+        .lock()
+        .unwrap()
+        .remove(&format!("{CAL}b.ics"));
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!((report.downloaded, report.deleted), (1, 1));
+    assert_eq!(e.engine.sync_account("acct").await.unwrap().downloaded, 0);
 }
 
 #[tokio::test]

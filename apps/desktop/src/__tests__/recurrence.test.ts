@@ -82,3 +82,18 @@ describe("describeRule", () => {
     );
   });
 });
+
+describe("reminderLabel", () => {
+  it("reads naturally", async () => {
+    const { reminderLabel, normalizeReminders } = await import("../services/reminders");
+    expect(reminderLabel(0)).toBe("At start");
+    expect(reminderLabel(1)).toBe("1 minute before");
+    expect(reminderLabel(15)).toBe("15 minutes before");
+    expect(reminderLabel(60)).toBe("1 hour before");
+    expect(reminderLabel(90)).toBe("1 hour 30 minutes before");
+    expect(reminderLabel(1440)).toBe("1 day before");
+    expect(reminderLabel(2880 + 60)).toBe("2 days 1 hour before");
+    expect(reminderLabel(20160)).toBe("2 weeks before");
+    expect(normalizeReminders([60, 5, 60, 0])).toEqual([0, 5, 60]);
+  });
+});

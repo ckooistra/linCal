@@ -42,6 +42,8 @@ pub struct RemoteCalendarState {
     pub supports_sync: bool,
     pub sync_token: Option<String>,
     pub ctag: Option<String>,
+    /// Provider reader version the events were last read with.
+    pub reader_version: i64,
 }
 
 /// A remote object received from the server.
@@ -580,7 +582,7 @@ impl Store {
 
     pub async fn remote_calendars(&self, account_id: &str) -> Result<Vec<RemoteCalendarState>> {
         let rows = sqlx::query(
-            "SELECT id, remote_url, name, read_only, supports_sync, sync_token, ctag FROM calendars \
+            "SELECT id, remote_url, name, read_only, supports_sync, sync_token, ctag, reader_version FROM calendars \
              WHERE account_id = ? AND remote_url IS NOT NULL ORDER BY sort_order",
         )
         .bind(account_id)
@@ -596,8 +598,19 @@ impl Store {
                 supports_sync: r.get::<i64, _>("supports_sync") != 0,
                 sync_token: r.get("sync_token"),
                 ctag: r.get("ctag"),
+                reader_version: r.get("reader_version"),
             })
             .collect())
+    }
+
+    /// Records that a calendar's objects were all read with `version`.
+    pub async fn set_reader_version(&self, calendar_id: &str, version: i64) -> Result<()> {
+        sqlx::query("UPDATE calendars SET reader_version = ? WHERE id = ?")
+            .bind(version)
+            .bind(calendar_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn set_account_status(
@@ -703,6 +716,7 @@ impl Store {
     ) -> Result<()> {
         let now = now();
         let row = |id: String, e: &EventContent, series: Option<SeriesLink>| CalendarEvent {
+            reminders: e.reminders.clone(),
             id,
             calendar_id: calendar_id.to_owned(),
             title: e.title.clone(),
@@ -1019,6 +1033,7 @@ impl Store {
             let event = decode_event(row)?;
             let lone_key = lone.get(&event.id).copied();
             let content = EventContent {
+                reminders: event.reminders,
                 title: event.title,
                 description: event.description,
                 location: event.location,

@@ -88,6 +88,7 @@ fn draft(calendar: &str, title: &str, day: u32, rrule: Option<&str>) -> EventDra
             .unwrap(),
     );
     EventDraft {
+        reminders: None,
         calendar_id: calendar.into(),
         title: title.into(),
         description: String::new(),
@@ -103,6 +104,7 @@ fn draft(calendar: &str, title: &str, day: u32, rrule: Option<&str>) -> EventDra
 
 fn as_draft(o: &Occurrence) -> EventDraft {
     EventDraft {
+        reminders: None,
         calendar_id: o.calendar_id.clone(),
         title: o.title.clone(),
         description: o.description.clone(),
@@ -202,6 +204,37 @@ async fn microsoft_account_round_trip() {
             .unwrap()
             .approximated,
         0
+    );
+
+    // Reminders on the single event: Outlook holds one.
+    let planning = occurrences(&store)
+        .await
+        .into_iter()
+        .find(|o| o.title == "Planning")
+        .unwrap();
+    let mut d = as_draft(&planning);
+    d.reminders = Some(vec![5, 60]);
+    assert!(matches!(
+        store.update_event(&planning.event_id, d.clone()).await,
+        Err(StorageError::TooManyReminders(1))
+    ));
+    d.reminders = Some(vec![60]);
+    store.update_event(&planning.event_id, d).await.unwrap();
+    assert_eq!(engine.sync_account(&id).await.unwrap().uploaded, 1);
+    {
+        let st = fake.state.lock().unwrap();
+        let a = &st.events["cal-1"]["A"].1;
+        assert_eq!(a["isReminderOn"], true);
+        assert_eq!(a["reminderMinutesBeforeStart"], 60);
+    }
+    assert_eq!(
+        store
+            .get_event(&planning.event_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .reminders,
+        vec![60]
     );
 
     // Edit one occurrence (it becomes an exception) and cancel another.

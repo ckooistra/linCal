@@ -184,6 +184,7 @@ describe("EventStore with recurring occurrences", () => {
       seriesId: "s",
       recurrenceId: String(day),
       rrule: "FREQ=DAILY",
+      reminders: [],
       syncStatus: "saved" as const,
       revision: 1,
     });
@@ -306,6 +307,7 @@ describe("EventStore ordering (audit F13, F14, F20)", () => {
     vi.spyOn(source, "createEvent").mockImplementationOnce(async (id, d) => ({
       ...d,
       id,
+      reminders: d.reminders ?? [],
       seriesId: null,
       recurrenceId: null,
       rrule: null,

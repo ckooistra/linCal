@@ -143,6 +143,7 @@ async fn ics_subscription_round_trip() {
 
     // Read-only.
     let draft = EventDraft {
+        reminders: None,
         calendar_id: cal.clone(),
         title: "Mine".into(),
         description: String::new(),

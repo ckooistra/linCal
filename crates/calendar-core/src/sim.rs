@@ -214,6 +214,7 @@ impl Builder {
         let location = self.rng.pick(&LOCATIONS).to_string();
         let epoch = chrono::DateTime::<Utc>::UNIX_EPOCH;
         self.events.push(CalendarEvent {
+            reminders: Vec::new(),
             id,
             calendar_id: calendar_id.into(),
             title: title.into(),

@@ -126,6 +126,15 @@ async fn google_account_round_trip() {
     let report = engine.sync_account(&id).await.unwrap();
     assert_eq!(report.downloaded, 1);
     assert_eq!(titles(&store).await, vec!["Stand-up"; 3]);
+    // The series uses the calendar's default reminders (popup ones only).
+    assert!(
+        store
+            .query_range(june(), TZ)
+            .await
+            .unwrap()
+            .iter()
+            .all(|o| o.reminders == vec![10])
+    );
 
     // Rename the series locally: only the title travels, attendees stay.
     let master_id = store.query_range(june(), TZ).await.unwrap()[0]
@@ -135,14 +144,37 @@ async fn google_account_round_trip() {
     let master = store.get_event(&master_id).await.unwrap().unwrap();
     let mut draft = master.draft();
     draft.title = "Daily".into();
-    store.update_event(&master_id, draft).await.unwrap();
+    store.update_event(&master_id, draft.clone()).await.unwrap();
     assert_eq!(engine.sync_account(&id).await.unwrap().uploaded, 1);
     {
         let s = fake.state.lock().unwrap();
         let e = &s.events["alice@example.com"]["abc"].1;
         assert_eq!(e["summary"], "Daily");
         assert_eq!(e["attendees"][0]["email"], "bob@example.com");
+        // Unchanged reminders are not sent: the defaults stay in use.
+        assert!(e.get("reminders").is_none());
     }
+
+    // Own reminders replace the defaults on the server.
+    draft.reminders = Some(vec![0, 30]);
+    store.update_event(&master_id, draft).await.unwrap();
+    assert_eq!(engine.sync_account(&id).await.unwrap().uploaded, 1);
+    assert_eq!(
+        fake.state.lock().unwrap().events["alice@example.com"]["abc"].1["reminders"],
+        json!({"useDefault": false, "overrides": [
+            {"method": "popup", "minutes": 0}, {"method": "popup", "minutes": 30}
+        ]})
+    );
+    engine.sync_account(&id).await.unwrap();
+    assert_eq!(
+        store
+            .get_event(&master_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .reminders,
+        vec![0, 30]
+    );
 
     // Create locally: uploaded once, not duplicated by the next pass.
     let start = resolve_local(
@@ -156,6 +188,7 @@ async fn google_account_round_trip() {
         .create_event(
             "local-1",
             EventDraft {
+                reminders: None,
                 calendar_id: cal.clone(),
                 title: "Dentist".into(),
                 description: String::new(),
@@ -212,6 +245,7 @@ async fn google_account_round_trip() {
         .update_occurrence(
             &third.id,
             EventDraft {
+                reminders: None,
                 calendar_id: cal.clone(),
                 title: third.title.clone(),
                 description: String::new(),
@@ -230,6 +264,7 @@ async fn google_account_round_trip() {
             &occ[1].id,
             "local-tail",
             EventDraft {
+                reminders: None,
                 calendar_id: cal.clone(),
                 title: "Later".into(),
                 description: String::new(),

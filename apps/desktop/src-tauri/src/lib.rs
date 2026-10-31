@@ -12,13 +12,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use calendar_storage::Store;
 use calendar_sync::{
-    CredentialStore, KeyringCredentials, MemoryCredentials, SyncEngine, default_factory,
+    CredentialStore, DueReminder, KeyringCredentials, MemoryCredentials, SyncEngine, SyncEvent,
+    default_factory,
 };
 use tauri::{Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
-use commands::{AppState, Sync};
+use commands::{AppState, NOTIFICATIONS_SETTING, Sync};
 
 /// How often remote accounts are checked when nothing else triggers a sync.
 const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -49,6 +53,43 @@ fn data_dir(app: &tauri::App) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|e| e.to_string())
 }
 
+/// The system's time zone (for all-day and floating events), UTC if unknown.
+fn system_zone() -> chrono_tz::Tz {
+    iana_time_zone::get_timezone()
+        .ok()
+        .and_then(|name| name.parse().ok())
+        .unwrap_or(chrono_tz::UTC)
+}
+
+/// Shows a reminder as a desktop notification.
+fn notify(app: &tauri::AppHandle, reminder: &DueReminder) {
+    let tz = system_zone();
+    let when = if reminder.all_day {
+        "Today".to_owned()
+    } else {
+        let at = reminder.start.with_timezone(&tz).format("%H:%M");
+        match reminder.minutes_before {
+            0 => format!("Now, {at}"),
+            m if m < 60 => format!("In {m} min, {at}"),
+            m if m % 1440 == 0 => format!("In {} day(s), {at}", m / 1440),
+            m => format!("In {} h {} min, {at}", m / 60, m % 60).replace(" 0 min", ""),
+        }
+    };
+    let body = if reminder.location.is_empty() {
+        when
+    } else {
+        format!("{when} · {}", reminder.location)
+    };
+    let title = if reminder.title.is_empty() {
+        "(No title)"
+    } else {
+        &reminder.title
+    };
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("[reminders] could not show a notification: {e}");
+    }
+}
+
 fn open_store(app: &tauri::App) -> Result<Store, String> {
     let dir = data_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -61,16 +102,46 @@ fn open_store(app: &tauri::App) -> Result<Store, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let store = open_store(app);
+            let notifications = Arc::new(AtomicBool::new(true));
+            // Reminders: shown while the app runs (not in benchmark runs).
+            let reminders = match &store {
+                Ok(store) if !bench::enabled() => {
+                    if let Ok(settings) = tauri::async_runtime::block_on(store.settings()) {
+                        let on = settings
+                            .get(NOTIFICATIONS_SETTING)
+                            .and_then(|v| v.as_bool());
+                        notifications.store(on != Some(false), Ordering::Relaxed);
+                    }
+                    let handle = app.handle().clone();
+                    let enabled = Arc::clone(&notifications);
+                    let (reminders, run) =
+                        calendar_sync::reminder_loop(store.clone(), system_zone, move |r| {
+                            if enabled.load(Ordering::Relaxed) {
+                                notify(&handle, &r);
+                            }
+                        });
+                    tauri::async_runtime::spawn(run);
+                    Some(reminders)
+                }
+                _ => None,
+            };
             let sync = match &store {
                 Ok(store) => {
                     let handle = app.handle().clone();
+                    let wake = reminders.clone();
                     let engine = Arc::new(SyncEngine::new(
                         store.clone(),
                         credentials(),
                         default_factory(),
                         Arc::new(move |event| {
+                            if let (SyncEvent::Synced { changed: true, .. }, Some(wake)) =
+                                (&event, &wake)
+                            {
+                                wake.changed();
+                            }
                             let _ = handle.emit("sync-event", event);
                         }),
                     ));
@@ -100,7 +171,12 @@ pub fn run() {
                     None
                 }
             };
-            app.manage(AppState { store, sync });
+            app.manage(AppState {
+                store,
+                sync,
+                reminders,
+                notifications,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

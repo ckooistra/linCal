@@ -133,6 +133,7 @@ describe("EventEditor sync conflicts", () => {
       seriesId: null,
       recurrenceId: null,
       rrule: null,
+      reminders: [],
       syncStatus: "conflict",
       revision: 2,
     };
@@ -204,6 +205,7 @@ describe("EventEditor keeps untouched times exactly (audit F09)", () => {
       seriesId: null,
       recurrenceId: null,
       rrule: null,
+      reminders: [],
       syncStatus: "saved",
       revision: 1,
     };
@@ -240,6 +242,7 @@ describe("EventEditor notices newer versions", () => {
       seriesId: null,
       recurrenceId: null,
       rrule: null,
+      reminders: [],
       syncStatus: "synced",
       revision: 1,
     };

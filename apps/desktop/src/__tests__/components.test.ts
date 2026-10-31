@@ -73,6 +73,7 @@ describe("EventEditor", () => {
       location: "",
       timing,
       rrule: null,
+      reminders: [],
     }, "series");
     // Read-only calendars are not offered as targets.
     expect(screen.queryByRole("option", { name: "Holidays" })).toBeNull();
@@ -110,6 +111,7 @@ describe("EventEditor", () => {
       revision: 1,
       recurrenceId: null,
   rrule: null,
+  reminders: [],
     };
     render(EventEditor, {
       event,
@@ -140,6 +142,7 @@ describe("EventEditor with recurring events", () => {
     seriesId: "series-1",
     recurrenceId: "20260615T070000Z",
     rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+    reminders: [],
     syncStatus: "saved",
     revision: 1,
   };
@@ -231,6 +234,7 @@ describe("EventEditor custom repeat", () => {
       seriesId: "s",
       recurrenceId: "x",
       rrule,
+      reminders: [],
       syncStatus: "saved",
       revision: 1,
     });
@@ -242,6 +246,43 @@ describe("EventEditor custom repeat", () => {
     const repeat = screen.getByLabelText("Repeat") as HTMLSelectElement;
     expect(repeat.selectedOptions[0]?.textContent).toBe("Custom (FREQ=MONTHLY;BYMONTHDAY=1,15)");
     expect(screen.queryByRole("group", { name: "Custom repeat" })).toBeNull();
+  });
+});
+
+describe("EventEditor reminders", () => {
+  const start = parseIsoDate("2026-06-16").getTime() + 9 * 3_600_000;
+  const timing = { kind: "timed" as const, start, end: start + 3_600_000, timeZone: "Europe/Berlin" };
+  const props = {
+    event: null,
+    timing,
+    calendars: simulatedCalendars(),
+    defaultCalendarId: "cal-work",
+    readOnly: false,
+    ondelete: noop,
+    onclose: noop,
+  };
+
+  it("adds and removes reminders", async () => {
+    const onsave = vi.fn((_draft: unknown, _scope: unknown) => null);
+    render(EventEditor, { ...props, onsave });
+    const add = () => screen.getByLabelText("Add reminder");
+    await fireEvent.change(add(), { target: { value: "1440" } });
+    await fireEvent.change(add(), { target: { value: "15" } });
+    await fireEvent.change(add(), { target: { value: "0" } });
+    expect(screen.getByText("1 day before")).toBeTruthy();
+    // Chosen ones are not offered again.
+    expect(screen.queryByRole("option", { name: "15 minutes before" })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Remove reminder At start" }));
+    await fireEvent.input(screen.getByLabelText("Title"), { target: { value: "Dentist" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onsave).toHaveBeenCalledWith(expect.objectContaining({ reminders: [15, 1440] }), "series");
+  });
+
+  it("offers one reminder where the calendar holds one", async () => {
+    render(EventEditor, { ...props, onsave: () => null, reminderLimit: () => 1 });
+    await fireEvent.change(screen.getByLabelText("Add reminder"), { target: { value: "30" } });
+    expect(screen.queryByLabelText("Add reminder")).toBeNull();
+    expect(screen.getByText("This calendar holds one reminder per event.")).toBeTruthy();
   });
 });
 

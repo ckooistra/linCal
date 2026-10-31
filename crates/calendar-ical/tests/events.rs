@@ -123,6 +123,7 @@ fn unchanged_objects_are_written_back_unchanged() {
 #[test]
 fn creates_new_objects_that_read_back_identically() {
     let master = EventData {
+        reminders: Vec::new(),
         title: "Planning; review, notes".into(),
         description: "Line 1\nLine 2".into(),
         location: String::new(),
@@ -139,6 +140,7 @@ fn creates_new_objects_that_read_back_identically() {
         recurrence_id: None,
     };
     let moved = EventData {
+        reminders: Vec::new(),
         title: "Planning (later)".into(),
         description: String::new(),
         location: String::new(),
@@ -376,4 +378,44 @@ fn approximations_produce_warnings() {
     ));
     let obj = read_events(&parse(&text).unwrap()).unwrap();
     assert_eq!(obj.warnings.len(), 2, "{:?}", obj.warnings);
+}
+
+#[test]
+fn reminders_read_and_write_only_the_alarms_they_represent() {
+    let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\nBEGIN:VEVENT\r\nUID:r1\r\n\
+DTSTART:20261102T080000Z\r\nDTEND:20261102T090000Z\r\nSUMMARY:Dentist\r\n\
+BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nDESCRIPTION:x\r\nEND:VALARM\r\n\
+BEGIN:VALARM\r\nACTION:AUDIO\r\nTRIGGER;RELATED=START:-P1D\r\nEND:VALARM\r\n\
+BEGIN:VALARM\r\nACTION:EMAIL\r\nTRIGGER:-PT30M\r\nSUMMARY:mail\r\nDESCRIPTION:m\r\nATTENDEE:mailto:a@b\r\nEND:VALARM\r\n\
+BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER;VALUE=DATE-TIME:20261101T180000Z\r\nDESCRIPTION:x\r\nEND:VALARM\r\n\
+BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER;RELATED=END:PT0S\r\nDESCRIPTION:x\r\nEND:VALARM\r\n\
+BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:PT5M\r\nDESCRIPTION:after\r\nEND:VALARM\r\n\
+END:VEVENT\r\nEND:VCALENDAR\r\n";
+    let cal = parse(ics).unwrap();
+    let mut master = read_events(&cal).unwrap().master.unwrap();
+    assert_eq!(master.reminders, vec![15, 1440]);
+
+    // Unchanged reminders: the alarms are left exactly as they were.
+    let same = write_events(Some(&cal), "r1", Some(&master), &[], now()).to_ics();
+    assert_eq!(same.matches("BEGIN:VALARM").count(), 6);
+    assert!(same.contains("TRIGGER;RELATED=START:-P1D"));
+
+    // Changed: the two represented alarms are replaced, the others stay.
+    master.reminders = vec![0, 60];
+    let out = write_events(Some(&cal), "r1", Some(&master), &[], now()).to_ics();
+    assert_eq!(out.matches("BEGIN:VALARM").count(), 6);
+    assert!(!out.contains("-PT15M") && !out.contains("-P1D"));
+    assert!(out.contains("TRIGGER:PT0S") && out.contains("TRIGGER:-PT60M"));
+    assert!(
+        out.contains("ACTION:EMAIL")
+            && out.contains("VALUE=DATE-TIME")
+            && out.contains("RELATED=END")
+    );
+    let back = read_events(&parse(&out).unwrap()).unwrap().master.unwrap();
+    assert_eq!(back.reminders, vec![0, 60]);
+
+    // A new event gets display alarms with the title.
+    let fresh = write_events(None, "r2", Some(&back), &[], now()).to_ics();
+    assert_eq!(fresh.matches("BEGIN:VALARM").count(), 2);
+    assert!(fresh.contains("DESCRIPTION:Dentist"));
 }

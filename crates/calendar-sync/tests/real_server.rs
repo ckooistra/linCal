@@ -102,6 +102,7 @@ fn timing(day: u32, hour: u32) -> EventTiming {
 
 fn draft(calendar: &str, title: &str, timing: EventTiming, rrule: Option<&str>) -> EventDraft {
     EventDraft {
+        reminders: None,
         calendar_id: calendar.into(),
         title: title.into(),
         description: String::new(),

@@ -309,6 +309,7 @@ pub fn expand(
             location: master.location.clone(),
             timing,
             rrule: Some(recurrence.rrule.clone()),
+            reminders: master.reminders.clone(),
             sync_status: master.sync_status,
             revision: master.revision,
         });
@@ -632,6 +633,7 @@ mod tests {
 
     fn series(timing: EventTiming, rrule: &str) -> CalendarEvent {
         CalendarEvent {
+            reminders: Vec::new(),
             id: "s".into(),
             calendar_id: "cal".into(),
             title: "Series".into(),

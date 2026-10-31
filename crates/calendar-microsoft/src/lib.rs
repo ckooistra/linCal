@@ -44,7 +44,7 @@ pub const SCOPES: &[&str] = &["offline_access", "User.Read", "Calendars.ReadWrit
 /// its cancelled occurrences (only returned when selected).
 const SERIES_SELECT: &str = "id,iCalUId,subject,body,location,start,end,isAllDay,isCancelled,\
 originalStartTimeZone,originalEndTimeZone,recurrence,type,seriesMasterId,originalStart,\
-cancelledOccurrences,exceptionOccurrences,changeKey";
+cancelledOccurrences,exceptionOccurrences,changeKey,isReminderOn,reminderMinutesBeforeStart";
 
 /// Versions of series start with this, so they are told apart from ETags.
 const SERIES_VERSION: &str = "series:";

@@ -71,6 +71,8 @@ export interface CalendarEvent {
   recurrenceId: string | null;
   /** RRULE of the series (e.g. `FREQ=WEEKLY;BYDAY=MO`), if recurring. */
   rrule: string | null;
+  /** Reminders as minutes before the start (0 = at the start), ascending. */
+  reminders: number[];
   syncStatus: SyncStatus;
   /** Monotonic revision, bumped on every change. */
   revision: number;
@@ -80,7 +82,11 @@ export interface CalendarEvent {
 export type EventDraft = Pick<
   CalendarEvent,
   "calendarId" | "title" | "description" | "location" | "timing"
-> & { rrule?: string | null };
+> & {
+  rrule?: string | null;
+  /** New reminders; absent keeps the current ones (e.g. a drag). */
+  reminders?: number[];
+};
 
 /**
  * What an edit or delete applies to: a one-off event, a single occurrence

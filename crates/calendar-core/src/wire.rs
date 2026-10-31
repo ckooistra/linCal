@@ -44,6 +44,9 @@ pub struct WireDraft {
     pub timing: WireTiming,
     #[serde(default)]
     pub rrule: Option<String>,
+    /// Minutes before the start; absent keeps the current reminders.
+    #[serde(default)]
+    pub reminders: Option<Vec<u32>>,
 }
 
 /// An occurrence as the UI's `CalendarEvent`.
@@ -59,6 +62,7 @@ pub struct WireEvent {
     pub series_id: Option<String>,
     pub recurrence_id: Option<String>,
     pub rrule: Option<String>,
+    pub reminders: Vec<u32>,
     pub sync_status: SyncStatus,
     pub revision: i64,
 }
@@ -152,6 +156,10 @@ impl WireDraft {
             // "" is kept: it is the rule of an RDATE-only series (storage
             // treats it as "not recurring" unless the series has dates).
             rrule: self.rrule.as_ref().map(|r| r.trim().to_owned()),
+            reminders: self
+                .reminders
+                .clone()
+                .map(crate::model::normalize_reminders),
         };
         draft.validate()?;
         Ok(draft)
@@ -170,6 +178,7 @@ impl WireEvent {
             series_id: o.series_id.clone(),
             recurrence_id: o.recurrence_id.map(|k| k.to_string()),
             rrule: o.rrule.clone(),
+            reminders: o.reminders.clone(),
             sync_status: o.sync_status,
             revision: o.revision,
         }

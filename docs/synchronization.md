@@ -100,6 +100,14 @@ All event history is synced (the database is the local source). Rendering stays 
 | Crash during sync | Pull transactions are atomic; queued uploads are replayed |
 | Password missing from keyring | Account shows *Could not read the account password*; re-add the account |
 
+## Reading again after an update
+
+Each calendar remembers the version of the provider readers its events were read with (`calendars.reader_version`). When an update teaches the readers something new, `calendar-sync::READER_VERSION` goes up. The next pass then lists such a calendar in full and treats every object as changed, so existing events gain the new data. Version 1 added reminders. Deletions are detected as usual, and objects with queued local changes are not overwritten.
+
+## Reminder notifications
+
+`calendar-sync::reminders` runs beside the sync scheduler, without polling. It looks for reminders due in the window since its last check, shows them through the desktop shell, and sleeps until the next one (at most an hour). Local edits and sync passes that changed data wake it early. Because the window is half-open, no reminder is shown twice, and none is skipped when the loop runs late. After the computer was asleep, missed reminders are shown only for events that haven't ended.
+
 ## Splitting a series ("this and following")
 
 A split is two ordinary changes: the original series is uploaded with its shortened rule, and the new series is created like any new event. Both go through the queue, version checks and conflicts as usual.

@@ -65,6 +65,10 @@ pub struct GoogleProvider {
     tokens: Arc<TokenSource>,
     api: Url,
     client_secret: Option<String>,
+    /// `defaultReminders` per calendar href, from the calendar list or
+    /// fetched when first needed. Stored with each object, because events
+    /// that "use the defaults" have no reminders of their own.
+    defaults: std::sync::Mutex<HashMap<String, Value>>,
 }
 
 fn oauth_error(e: OAuthError) -> ProviderError {
@@ -115,8 +119,8 @@ fn series_etag(events: &[Value]) -> String {
     format!("\"g{hash:016x}\"")
 }
 
-fn series_data(events: &[Value], time_zone: Option<&str>) -> String {
-    json!({ "timeZone": time_zone, "events": events }).to_string()
+fn series_data(events: &[Value], time_zone: Option<&str>, defaults: &Value) -> String {
+    json!({ "timeZone": time_zone, "defaultReminders": defaults, "events": events }).to_string()
 }
 
 /// (calendar href, Google event id or `None` for a not-yet-created object).
@@ -142,6 +146,7 @@ impl GoogleProvider {
             tokens,
             api,
             client_secret: None,
+            defaults: std::sync::Mutex::default(),
         })
     }
 
@@ -332,12 +337,49 @@ impl GoogleProvider {
         master_id: &str,
         events: &[Value],
         zone: Option<&str>,
+        defaults: &Value,
     ) -> RemoteObject {
         RemoteObject {
             href: format!("{calendar_href}events/{master_id}"),
             etag: Some(series_etag(events)),
-            data: series_data(events, zone),
+            data: series_data(events, zone, defaults),
         }
+    }
+
+    /// The default reminders of a calendar (by href).
+    async fn defaults_for(&self, calendar_href: &str) -> ProviderResult<Value> {
+        let cached = self
+            .defaults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(calendar_href)
+            .cloned();
+        if let Some(defaults) = cached {
+            return Ok(defaults);
+        }
+        // `…/calendars/<id>/` → `…/users/me/calendarList/<id>` (still encoded).
+        let id = calendar_href
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .ok_or_else(|| invalid("bad calendar href"))?;
+        let url = format!(
+            "{}/users/me/calendarList/{id}",
+            self.api.as_str().trim_end_matches('/')
+        );
+        let (status, body) = self
+            .send(Method::GET, &url, None, None, &[StatusCode::NOT_FOUND])
+            .await?;
+        let defaults = if status == StatusCode::NOT_FOUND {
+            json!([])
+        } else {
+            body.get("defaultReminders").cloned().unwrap_or(json!([]))
+        };
+        self.defaults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(calendar_href.to_owned(), defaults.clone());
+        Ok(defaults)
     }
 
     /// The account's e-mail address (the id of the primary calendar).
@@ -392,6 +434,13 @@ impl CalendarProvider for GoogleProvider {
                     if role == "freeBusyReader" || c["deleted"].as_bool() == Some(true) {
                         continue;
                     }
+                    self.defaults
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(
+                            self.calendar_href(id),
+                            c.get("defaultReminders").cloned().unwrap_or(json!([])),
+                        );
                     out.push(RemoteCalendar {
                         href: self.calendar_href(id),
                         name: c["summaryOverride"]
@@ -477,6 +526,7 @@ impl CalendarProvider for GoogleProvider {
             ..ChangeSet::default()
         };
         let href_of = |id: &str| format!("{}events/{id}", calendar.href);
+        let defaults = self.defaults_for(&calendar.href).await?;
 
         if cursor.is_none() {
             // Complete listing: every series is here with all its members.
@@ -487,7 +537,7 @@ impl CalendarProvider for GoogleProvider {
                     continue;
                 }
                 events.sort_by_key(|e| (is_exception(e), e["id"].as_str().map(str::to_owned)));
-                let object = self.object(&calendar.href, &id, &events, zone.as_deref());
+                let object = self.object(&calendar.href, &id, &events, zone.as_deref(), &defaults);
                 listed.insert(object.href.clone());
                 if known.get(object.href.as_str()).copied().flatten() != object.etag.as_deref() {
                     changes.upserted.push(object);
@@ -514,6 +564,7 @@ impl CalendarProvider for GoogleProvider {
                         &id,
                         &members,
                         z.as_deref().or(zone.as_deref()),
+                        &defaults,
                     )),
                     None if known.contains_key(href.as_str()) => changes.deleted.push(href),
                     None => {}
@@ -586,7 +637,8 @@ impl CalendarProvider for GoogleProvider {
             .fetch_series(&calendar, &master_id)
             .await?
             .ok_or_else(|| ProviderError::NotFound(href.to_owned()))?;
-        let object = self.object(&calendar, &master_id, &members, zone.as_deref());
+        let defaults = self.defaults_for(&calendar).await?;
+        let object = self.object(&calendar, &master_id, &members, zone.as_deref(), &defaults);
         Ok(WriteResult {
             href: object.href,
             etag: object.etag,
@@ -596,10 +648,17 @@ impl CalendarProvider for GoogleProvider {
 
     async fn get_object(&self, href: &str) -> ProviderResult<Option<RemoteObject>> {
         let (calendar, _, master_id) = split_href(href)?;
-        Ok(self
-            .fetch_series(&calendar, &master_id)
-            .await?
-            .map(|(members, zone)| self.object(&calendar, &master_id, &members, zone.as_deref())))
+        let Some((members, zone)) = self.fetch_series(&calendar, &master_id).await? else {
+            return Ok(None);
+        };
+        let defaults = self.defaults_for(&calendar).await?;
+        Ok(Some(self.object(
+            &calendar,
+            &master_id,
+            &members,
+            zone.as_deref(),
+            &defaults,
+        )))
     }
 
     async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()> {

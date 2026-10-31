@@ -23,6 +23,7 @@ const timed: CalendarEvent = {
   revision: 1,
   recurrenceId: null,
   rrule: null,
+  reminders: [],
 };
 
 describe("svarMapping", () => {

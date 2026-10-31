@@ -117,6 +117,11 @@ fn damaged() -> ProviderError {
 
 /// Default factory: providers for CalDAV and Google accounts from their
 /// stored config and secret.
+/// Version of what the provider readers understand. Calendars read with an
+/// older version are listed in full once, so stored events gain what the
+/// readers learned since. 1: reminders.
+pub const READER_VERSION: i64 = 1;
+
 pub fn default_factory() -> ProviderFactory {
     Arc::new(
         |account: &RemoteAccount, secret: &str| match account.account.provider {
@@ -290,6 +295,8 @@ impl SyncEngine {
     ) -> Self {
         // Outlook can hold fewer repeat rules than iCalendar.
         store.set_recurrence_check(ProviderKind::Microsoft, calendar_microsoft::pattern::check);
+        // Outlook events have a single reminder.
+        store.set_reminder_limit(ProviderKind::Microsoft, 1);
         Self {
             store,
             credentials,
@@ -835,11 +842,19 @@ impl SyncEngine {
                     conditional_writes: true,
                 },
             };
-            let known = self.store.known_objects(&state.calendar_id).await?;
-            let changes = match provider
-                .fetch_changes(&remote, state.sync_token.as_deref(), &known)
-                .await
-            {
+            let mut known = self.store.known_objects(&state.calendar_id).await?;
+            // Read with older readers: a full listing in which every object
+            // counts as changed (deletions are still detected).
+            let reread = state.reader_version < READER_VERSION;
+            let cursor = if reread {
+                for (_, etag) in &mut known {
+                    *etag = None;
+                }
+                None
+            } else {
+                state.sync_token.as_deref()
+            };
+            let changes = match provider.fetch_changes(&remote, cursor, &known).await {
                 Ok(c) => c,
                 // A calendar we lost access to should not stop the others.
                 Err(ProviderError::Forbidden(_) | ProviderError::NotFound(_)) => continue,
@@ -862,6 +877,11 @@ impl SyncEngine {
                 .await?;
             for (href, reason) in &applied.failed {
                 eprintln!("[sync] skipped {href}: {reason}");
+            }
+            if reread {
+                self.store
+                    .set_reader_version(&state.calendar_id, READER_VERSION)
+                    .await?;
             }
             report.downloaded += applied.applied;
             report.deleted += applied.deleted;

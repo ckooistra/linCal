@@ -21,7 +21,7 @@ crates/
 ├── calendar-google/          Google Calendar API v3 provider + JSON codec (series = master + exceptions)
 ├── calendar-microsoft/       Microsoft Graph provider + JSON codec (calendarView delta over a moving window)
 ├── calendar-ics/             Read-only iCalendar feed subscriptions (one object per UID, conditional GET)
-├── calendar-sync/            SyncEngine (push → calendars → pull), scheduler, account sign-in, CredentialStore (keyring / memory)
+├── calendar-sync/            SyncEngine (push → calendars → pull), scheduler, reminder notifications loop, account sign-in, CredentialStore (keyring / memory)
 ├── calendar-core/            No I/O, no Tauri
 │   ├── model.rs              Account, Calendar, CalendarEvent, EventTiming, Recurrence, SeriesLink, Occurrence, SyncStatus
 │   ├── timing.rs             Instants for zoned/floating/all-day timings, DST-gap/overlap resolution, validation
@@ -193,7 +193,7 @@ Commands:
 
 Each decodes its arguments and calls one storage method. Errors reach the UI as `{code, message}` with readable text; database details go to stderr, never to the UI.
 
-The database opens in `setup`. If it can't be opened, the app still starts and shows the reason. Outside benchmark runs, setup then removes demo data left by older versions, and creates the *Personal* calendar (account `local`, never synchronized) if no local account exists. Benchmark runs (`UC_BENCH=1`) use a temporary database, and `UC_DATA_DIR` overrides the location for testing.
+The database opens in `setup`. If it can't be opened, the app still starts and shows the reason. Outside benchmark runs, setup then removes demo data left by older versions, and creates the *Personal* calendar (account `local`, never synchronized) if no local account exists. It also starts the reminder loop, which shows due reminders through `tauri-plugin-notification`; the `notifications` setting turns them off. Benchmark runs (`UC_BENCH=1`) use a temporary database, and `UC_DATA_DIR` overrides the location for testing.
 
 The capability file grants only `core:default` and the window controls; the opener plugin, which opens the browser for OAuth sign-in, is called from Rust only. The CSP restricts everything to `self`, plus inline styles for SVAR.
 

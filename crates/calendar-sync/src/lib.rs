@@ -14,6 +14,7 @@
 
 pub mod credentials;
 pub mod engine;
+pub mod reminders;
 pub mod scheduler;
 
 pub use calendar_oauth::OAuthError;
@@ -25,6 +26,7 @@ pub use engine::{
     BrowserOpener, CalDavConfig, IcsConfig, OAuthConfig, SyncEngine, SyncError, SyncEvent,
     SyncProblem, SyncReport, backoff, codec_for, default_factory, user_message,
 };
+pub use reminders::{DueReminder, RemindersHandle, reminder_loop};
 pub use scheduler::{SchedulerHandle, scheduler};
 /// Signal used to cancel a long operation (account setup).
 pub use tokio::sync::Notify as CancelSignal;
