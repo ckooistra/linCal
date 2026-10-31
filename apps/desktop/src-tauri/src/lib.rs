@@ -81,6 +81,12 @@ pub fn run() {
                         if let Err(e) = tauri::async_runtime::block_on(store.remove_simulated()) {
                             eprintln!("[storage] could not remove simulated data: {e}");
                         }
+                        // Somewhere to put events without any account.
+                        if let Err(e) =
+                            tauri::async_runtime::block_on(store.ensure_local_calendar())
+                        {
+                            eprintln!("[storage] could not create the local calendar: {e}");
+                        }
                         tauri::async_runtime::spawn(run);
                     }
                     Some(Sync {
@@ -101,6 +107,7 @@ pub fn run() {
             commands::list_accounts,
             commands::list_calendars,
             commands::query_range,
+            commands::search_events,
             commands::create_event,
             commands::update_event,
             commands::delete_event,

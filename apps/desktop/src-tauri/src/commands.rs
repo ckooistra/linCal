@@ -169,6 +169,35 @@ pub async fn query_range(
         .collect())
 }
 
+/// Most search results returned per call.
+const MAX_SEARCH_RESULTS: usize = 500;
+
+#[tauri::command]
+pub async fn search_events(
+    state: State<'_, AppState>,
+    text: String,
+    range: WireRange,
+    time_zone: String,
+    limit: usize,
+    latest: bool,
+) -> CommandResult<Vec<WireEvent>> {
+    let tz = zone(&time_zone)?;
+    let found = state
+        .store()?
+        .search(
+            &text,
+            range.to_range()?,
+            tz,
+            limit.min(MAX_SEARCH_RESULTS),
+            latest,
+        )
+        .await?;
+    Ok(found
+        .iter()
+        .map(|o| WireEvent::from_occurrence(o, &tz))
+        .collect())
+}
+
 #[tauri::command]
 pub async fn create_event(
     state: State<'_, AppState>,

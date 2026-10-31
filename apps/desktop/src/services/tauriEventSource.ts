@@ -8,7 +8,7 @@ import type {
   EventId,
 } from "../types/calendar";
 import { invoke } from "./bridge";
-import type { EventSource } from "./eventSource";
+import type { EventSource, SearchOptions } from "./eventSource";
 import { localTimeZone } from "./time";
 
 function abortError(): DOMException {
@@ -42,6 +42,20 @@ export class TauriEventSource implements EventSource {
     const result = await invoke<CalendarEvent[]>("query_range", {
       range: { start: range.start, end: range.end },
       timeZone: this.timeZone,
+    });
+    if (signal?.aborted) throw abortError();
+    return result;
+  }
+
+  async search(text: string, range: DateRange, options: SearchOptions): Promise<CalendarEvent[]> {
+    const { signal, limit, latest = false } = options;
+    if (signal?.aborted) throw abortError();
+    const result = await invoke<CalendarEvent[]>("search_events", {
+      text,
+      range: { start: range.start, end: range.end },
+      timeZone: this.timeZone,
+      limit,
+      latest,
     });
     if (signal?.aborted) throw abortError();
     return result;

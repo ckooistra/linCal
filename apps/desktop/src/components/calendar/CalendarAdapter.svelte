@@ -41,8 +41,6 @@
     theme: Theme;
     initialView: CalendarViewKind;
     initialDate: Date;
-    /** Case-insensitive title filter; empty shows everything. */
-    search: string;
     /** Week/day time grid: working hours only, or the whole day. */
     hours: DayHours;
     onready: (controller: CalendarViewController) => void;
@@ -58,7 +56,6 @@
     theme,
     initialView,
     initialDate,
-    search,
     hours,
     onready,
     onstatechange,
@@ -292,22 +289,13 @@
     });
   }
 
-  // Visibility and search are SVAR view filters: they only re-run layout.
+  // Visibility is a SVAR view filter: it only re-runs layout.
   $effect(() => {
     void instance;
     const hidden = calendars.hidden;
     exec("filter-events", {
       tag: "visibility",
       filter: hidden.size ? (e: SvarEvent) => !hidden.has(e.calendarId) : null,
-    });
-  });
-
-  $effect(() => {
-    void instance;
-    const query = search.trim().toLowerCase();
-    exec("filter-events", {
-      tag: "search",
-      filter: query ? (e: SvarEvent) => e.text.toLowerCase().includes(query) : null,
     });
   });
 

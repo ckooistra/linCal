@@ -2,10 +2,10 @@
 
 A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma first), designed to unify CalDAV, Google Calendar, Microsoft 365 and ICS subscriptions behind one responsive interface. The app needs no hosted backend, telemetry or developer-run account.
 
-> **Status: Milestone 4 (Google and Microsoft) in progress.**
+> **Status: Milestone 5 (production quality) in progress.** Milestones 1–4 are complete.
 > - **CalDAV** (Nextcloud, Fastmail, Radicale, Baïkal, …): syncs both ways with an offline queue, validated against Nextcloud.
 > - **Google Calendar and Microsoft 365 / Outlook.com:** accounts sign in with OAuth and sync through the same engine. Both are tested against faithful API fakes, and Google also with a live account; Microsoft still needs a live check. Live use needs an OAuth client registration ([how](docs/provider-integration.md#registering-oauth-clients)).
-> - Everything is stored locally in SQLite. Simulated demo calendars remain available. See [Roadmap](#roadmap).
+> - Everything is stored locally in SQLite. A *Personal* calendar on this computer works without any account. See [Roadmap](#roadmap).
 
 ![Month view](docs/screenshots/light-month.png)
 
@@ -46,7 +46,9 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - Tauri 2 desktop shell with a Svelte 5 + TypeScript (strict) + Vite frontend.
 - Week and day views show the full day (opening at 07:00) or, with the **Work hours / 24 h** toggle, just 08:00–18:00. The choice is remembered.
 - Month, week and day views powered by the MIT-licensed [SVAR Svelte Calendar](https://github.com/svar-widgets/calendar), kept behind an adapter so it can be replaced.
-- Multiple simulated accounts and calendars, including read-only ones. Each calendar has a colour picker and a visibility toggle.
+- **Agenda view** (**A**): one month as a list grouped by day, opening at today. Events spanning several days appear on each of them. **↑/↓** move between events; **Enter** opens one.
+- A **Personal** calendar *on this computer* is always there, so events can be added without any account. It is never synchronized.
+- Multiple accounts and calendars, including read-only ones. Each calendar has a colour picker and a visibility toggle.
 - Event creation and editing (click, drag-to-create, or **N**), drag/resize to move events, and timed and all-day events.
 - **Local persistence** in SQLite (WAL, migrations). Events, calendar colours, hidden calendars, theme and dataset choice survive restarts. The database lives at `~/.local/share/org.universalcalendar.desktop/calendar.db`.
 - **Recurring events** (RRULE, RDATE including RDATE-only series, EXDATE, moved occurrences, cancelled series) expanded by the Rust core for the visible range only, in the series' time zone so wall-clock times hold across DST. Old hourly, daily and weekly series jump straight to the visible range. Unsupported cases (custom VTIMEZONE rules, `RANGE=THISANDFUTURE`) are shown approximately and flagged:
@@ -55,7 +57,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   - **Repeat presets:** daily, weekdays, weekly, monthly, yearly. Custom rules are kept.
 - Optimistic updates. A failed save is rolled back with a visible message.
 - Visible-range loading with adjacent-month prefetch and cancellation of obsolete loads.
-- Debounced search over loaded events.
+- **Search** (**Ctrl+F**) covers every stored event, not just what is on screen: two years back and two years ahead, including occurrences of recurring series. Every word must appear in the title, location or description (ignoring case). Upcoming matches come first, then earlier ones. **Enter** or **↓** jumps to the results, and opening a result shows its date and opens it in the editor. **Esc** closes the search. Hidden calendars are not searched.
 - Dark theme by default, with Light and System options. The app draws its own title bar in the same theme. Settings → *Use system title bar* switches back to the desktop's native frame.
 - Keyboard shortcuts:
 
@@ -63,7 +65,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   |---|---|
   | `T` | Today |
   | `N` | New event |
-  | `M` / `W` / `D` | Month / week / day view |
+  | `M` / `W` / `D` / `A` | Month / week / day / agenda view |
   | `J` / `K` | Next / previous |
   | `H` | Week/day: toggle working hours (08–18) / full day |
   | `Ctrl+F` | Search |
@@ -72,7 +74,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 
   Shortcuts don't fire while you're typing in a field.
 - Deterministic data generator (100 / 1,000 / 5,000 events, written in Rust), a scripted UI benchmark that runs in the real WebKitGTK window, and a storage benchmark. See [docs/performance.md](docs/performance.md).
-- The desktop app starts empty: add a CalDAV, Google or Microsoft account from the sidebar. Simulated demo events exist only in the browser preview and in benchmark runs (which use a throw-away database); demo data left by earlier versions is removed on startup. Visibility choices are remembered per calendar.
+- The desktop app starts with just the Personal calendar. Add CalDAV, Google or Microsoft accounts from the sidebar. Simulated demo events exist only in the browser preview and in benchmark runs (which use a throw-away database); demo data left by earlier versions is removed on startup. Visibility choices are remembered per calendar.
 
 ## Supported platforms
 
@@ -184,8 +186,8 @@ See [docs/architecture.md](docs/architecture.md).
 1. Desktop foundation and performance prototype ✔
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
 3. CalDAV (Nextcloud reference) with offline queue ✔
-4. **Google Calendar and Microsoft Graph** ← current (implemented; Google checked live, Microsoft awaiting a live check)
-5. Production quality: recurrence editing, notifications, agenda view, ICS subscriptions, packaging
+4. Google Calendar and Microsoft Graph ✔ (Google checked live; Microsoft tested against an API fake, live check pending)
+5. **Production quality** ← current. Done: agenda view, full-database search, local calendar. Next: recurrence editing ("this and following"), ICS subscriptions, reminders and notifications, conflict review, accessibility, packaging, user guide, profiling.
 
 ## License
 

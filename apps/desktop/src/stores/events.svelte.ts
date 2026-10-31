@@ -1,4 +1,4 @@
-import { isAbortError, SourceError, type EventSource } from "../services/eventSource";
+import { isAbortError, SourceError, type EventSource, type SearchOptions } from "../services/eventSource";
 import { eventBounds, overlaps, validateTiming } from "../services/time";
 import type {
   CalendarEvent,
@@ -103,6 +103,11 @@ export class EventStore {
       if (overlaps(eventBounds(event), range)) result.push(event);
     }
     return result;
+  }
+
+  /** Searches all stored events (not just the cache); see `EventSource.search`. */
+  search(text: string, range: DateRange, options: SearchOptions): Promise<CalendarEvent[]> {
+    return this.#source.search(text, range, options);
   }
 
   /** Swap the data source (e.g. a different simulated dataset) and drop the cache. */

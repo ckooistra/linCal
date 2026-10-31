@@ -54,6 +54,26 @@ describe("MockEventSource", () => {
     expect(source.size).toBe(0);
   });
 
+  it("searches every word in title, location and description, with limits", async () => {
+    const source = new MockEventSource({ ...dataset(), events: [] });
+    const day = (d: number) => ({
+      ...draft,
+      timing: { ...draft.timing, start: Date.UTC(2026, 5, d, 8), end: Date.UTC(2026, 5, d, 9) } as const,
+    });
+    await source.createEvent("a", { ...day(1), title: "Team review", location: "Room Ü" });
+    await source.createEvent("b", { ...day(2), title: "Review", description: "quarterly team" });
+    await source.createEvent("c", { ...day(3), title: "Lunch" });
+    const june = { start: Date.UTC(2026, 5, 1), end: Date.UTC(2026, 6, 1) };
+    const ids = async (text: string, limit = 10, latest = false) =>
+      (await source.search(text, june, { limit, latest })).map((e) => e.id);
+    expect(await ids("REVIEW team")).toEqual(["a", "b"]);
+    expect(await ids("room ü")).toEqual(["a"]);
+    expect(await ids("review lunch")).toEqual([]);
+    expect(await ids("  ")).toEqual([]);
+    expect(await ids("review", 1)).toEqual(["a"]);
+    expect(await ids("review", 1, true)).toEqual(["b"]);
+  });
+
   it("rejects writes to read-only calendars", async () => {
     const source = new MockEventSource(dataset());
     await expect(source.createEvent("x", { ...draft, calendarId: "cal-holidays" })).rejects.toBeInstanceOf(

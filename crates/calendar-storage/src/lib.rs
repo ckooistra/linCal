@@ -237,8 +237,46 @@ impl Store {
 
     /// Occurrences overlapping `range` as seen from `display_tz`, sorted by start.
     pub async fn query_range(&self, range: TimeRange, display_tz: Tz) -> Result<Vec<Occurrence>> {
+        let rows = self.rows_near(&range).await?;
+        self.expand(rows, range, display_tz).await
+    }
+
+    /// Occurrences in `range` whose title, location or description contain
+    /// every word of `text` (ignoring case), sorted by start. At most `limit`
+    /// are returned: the earliest, or with `latest` the latest ones.
+    pub async fn search(
+        &self,
+        text: &str,
+        range: TimeRange,
+        display_tz: Tz,
+        limit: usize,
+        latest: bool,
+    ) -> Result<Vec<Occurrence>> {
+        let terms: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut rows = self.rows_matching(&range, &terms).await?;
+        rows.retain(|row| {
+            let haystack =
+                format!("{}\n{}\n{}", row.title, row.location, row.description).to_lowercase();
+            terms.iter().all(|t| haystack.contains(t.as_str()))
+        });
+        let mut found = self.expand(rows, range, display_tz).await?;
+        if found.len() > limit {
+            if latest {
+                found.drain(..found.len() - limit);
+            } else {
+                found.truncate(limit);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Rows that may have occurrences in `range` (with slack for zones).
+    async fn rows_near(&self, range: &TimeRange) -> Result<Vec<EventRow>> {
         let slack = MAX_ZONE_OFFSET.num_milliseconds();
-        let rows: Vec<EventRow> = sqlx::query_as(concat!(
+        Ok(sqlx::query_as(concat!(
             "SELECT ",
             event_columns!(),
             " FROM events WHERE range_start_ms < ? AND range_end_ms > ?"
@@ -246,8 +284,46 @@ impl Store {
         .bind(range.end.timestamp_millis().saturating_add(slack))
         .bind(range.start.timestamp_millis().saturating_sub(slack))
         .fetch_all(&self.pool)
-        .await?;
+        .await?)
+    }
 
+    /// Like [`Self::rows_near`], but only rows that may contain every term.
+    /// SQLite's `LIKE` folds ASCII letters only, so it pre-filters by the
+    /// ASCII terms; callers apply the exact (Unicode) match. A non-ASCII
+    /// character whose lower case is ASCII (the Kelvin sign) is not found
+    /// by an ASCII term.
+    async fn rows_matching(&self, range: &TimeRange, terms: &[String]) -> Result<Vec<EventRow>> {
+        let slack = MAX_ZONE_OFFSET.num_milliseconds();
+        let mut query = sqlx::QueryBuilder::<Sqlite>::new(concat!(
+            "SELECT ",
+            event_columns!(),
+            " FROM events WHERE range_start_ms < "
+        ));
+        query.push_bind(range.end.timestamp_millis().saturating_add(slack));
+        query.push(" AND range_end_ms > ");
+        query.push_bind(range.start.timestamp_millis().saturating_sub(slack));
+        for term in terms.iter().filter(|t| t.is_ascii()) {
+            let pattern = format!(
+                "%{}%",
+                term.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
+            query.push(" AND (title || char(10) || location || char(10) || description) LIKE ");
+            query.push_bind(pattern);
+            query.push(" ESCAPE '\\'");
+        }
+        Ok(query.build_query_as().fetch_all(&self.pool).await?)
+    }
+
+    /// Decodes `rows` and expands their series within `range`, sorted by
+    /// start. Occurrences overridden by a separate row are left out.
+    async fn expand(
+        &self,
+        rows: Vec<EventRow>,
+        range: TimeRange,
+        display_tz: Tz,
+    ) -> Result<Vec<Occurrence>> {
         let master_ids: Vec<&str> = rows
             .iter()
             .filter(|r| r.rrule.is_some())
@@ -987,6 +1063,34 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(done.rows_affected() > 0)
+    }
+
+    /// Creates the calendar kept only on this computer ("Personal") unless
+    /// a local account exists. Returns whether it was created.
+    pub async fn ensure_local_calendar(&self) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT id FROM accounts WHERE provider = 'local' LIMIT 1")
+                .fetch_optional(&mut *tx)
+                .await?;
+        if exists.is_some() {
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO accounts (id, name, provider, created_at) \
+             VALUES ('local', 'On this computer', 'local', ?)",
+        )
+        .bind(Utc::now().timestamp_millis())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO calendars (id, account_id, name, color, sort_order) \
+             VALUES ('local-personal', 'local', 'Personal', '#2f9e44', 0)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     // --- settings ---------------------------------------------------------

@@ -137,4 +137,8 @@ export interface DateRange {
   end: number;
 }
 
+/** Views drawn by the calendar grid widget. */
 export type CalendarViewKind = "month" | "week" | "day";
+
+/** Every view: the grid views plus the agenda list. */
+export type AppView = CalendarViewKind | "agenda";

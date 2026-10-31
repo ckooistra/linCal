@@ -10,10 +10,12 @@
   } from "./components/calendar/types";
   import { parseDayHours } from "./components/calendar/types";
   import AddAccountDialog from "./components/AddAccountDialog.svelte";
+  import AgendaView from "./components/AgendaView.svelte";
   import OAuthAccountDialog from "./components/OAuthAccountDialog.svelte";
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
   import EventEditor from "./components/EventEditor.svelte";
   import PerfPanel from "./components/PerfPanel.svelte";
+  import SearchResults from "./components/SearchResults.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import SyncProblemsDialog from "./components/SyncProblemsDialog.svelte";
   import Toasts from "./components/Toasts.svelte";
@@ -25,11 +27,12 @@
   import { measureInteraction, nextPaint, observeLongTasks } from "./services/perf";
   import { resolveShortcut } from "./services/shortcuts";
   import { parseThemePreference, resolveTheme, watchSystemDark, type ThemePreference } from "./services/theme";
-  import { HOUR, localTimeZone, parseIsoDate } from "./services/time";
+  import { HOUR, eventBounds, localTimeZone, parseIsoDate } from "./services/time";
   import { CalendarsStore } from "./stores/calendars.svelte";
   import { EventStore, type SeriesScope } from "./stores/events.svelte";
   import { Notifications } from "./stores/notifications.svelte";
   import type {
+    AppView,
     CalendarEvent,
     CalendarViewKind,
     EventDraft,
@@ -268,10 +271,37 @@
     void measureInteraction(`nav-${direction}`, () => controller?.navigate(direction));
   }
 
-  function setView(view: CalendarViewKind) {
-    if (view === viewState.view) return;
-    void measureInteraction(`view-${view}`, () => controller?.setView(view));
+  /** The agenda replaces the grid widget; these say where the grid reopens. */
+  let agenda = $state(false);
+  let gridView = $state<CalendarViewKind>("month");
+  let viewDate = $state.raw(new Date());
+
+  /** Where to open another view: today if it is shown, else the middle of what is shown. */
+  function shownDate(): Date {
+    const { start, end } = viewState.range;
+    const now = Date.now();
+    if (end <= start || (now >= start && now < end)) return new Date(now);
+    return new Date(start + (end - start) / 2);
   }
+
+  function setView(view: AppView) {
+    if (view === viewState.view) return;
+    void measureInteraction(`view-${view}`, () => {
+      if (view === "agenda") {
+        viewDate = shownDate();
+        agenda = true;
+      } else if (agenda) {
+        viewDate = shownDate();
+        gridView = view;
+        agenda = false;
+      } else {
+        controller?.setView(view);
+      }
+    });
+  }
+
+  /** Resolves when the results for the current query are set (benchmarks). */
+  let searchShown: ((ms: number) => void) | null = null;
 
   function onSearchInput(text: string) {
     searchText = text;
@@ -281,6 +311,36 @@
         searchQuery = text;
       });
     }, SEARCH_DEBOUNCE_MS);
+  }
+
+  function clearSearch(): void {
+    clearTimeout(searchTimer);
+    searchText = "";
+    searchQuery = "";
+  }
+
+  /** Focus the first result once shown (after Enter in the search box). */
+  let focusResults = false;
+
+  function submitSearch(): void {
+    if (!searchText.trim()) return;
+    if (searchText === searchQuery && searchFocusFirst()) return;
+    clearTimeout(searchTimer);
+    focusResults = true;
+    searchQuery = searchText;
+  }
+
+  function searchFocusFirst(): boolean {
+    const first = document.querySelector<HTMLElement>(".search-overlay button.item");
+    first?.focus();
+    return first !== null;
+  }
+
+  /** Opens a search result: shows its date and opens it in the editor. */
+  function revealEvent(event: CalendarEvent): void {
+    clearSearch();
+    controller?.goToDate(new Date(eventBounds(event).start));
+    openEditor({ mode: "edit", id: event.id, event });
   }
 
   // --- theme ----------------------------------------------------------------
@@ -377,7 +437,7 @@
   function openEditor(request: EditorRequest) {
     editorNewer = null;
     if (request.mode === "edit") {
-      const event = store.get(request.id);
+      const event = store.get(request.id) ?? request.event;
       if (!event) return;
       editor = { key: ++editorKey, event, timing: event.timing };
     } else {
@@ -426,6 +486,11 @@
 
   function onKeydown(e: KeyboardEvent) {
     if (editor || addingAccount || removing) return; // Dialogs handle their own keys.
+    if (e.key === "Escape" && searchQuery) {
+      clearSearch();
+      searchInput?.focus();
+      return;
+    }
     const action = resolveShortcut(e);
     if (!action) return;
     e.preventDefault();
@@ -444,6 +509,8 @@
         return setView("week");
       case "view-day":
         return setView("day");
+      case "view-agenda":
+        return setView("agenda");
       case "search":
         searchInput?.focus();
         searchInput?.select();
@@ -452,7 +519,7 @@
         perfOpen = !perfOpen;
         return;
       case "toggle-hours":
-        if (viewState.view !== "month") setDayHours(dayHours === "work" ? "full" : "work");
+        if (viewState.view === "week" || viewState.view === "day") setDayHours(dayHours === "work" ? "full" : "work");
         return;
     }
   }
@@ -541,6 +608,8 @@
     setSearch: (query) => {
       searchText = query;
       searchQuery = query;
+      if (!query) return;
+      return new Promise<number>((resolve) => (searchShown = resolve));
     },
     createEvent: () => {
       const id = defaultCalendarId;
@@ -599,7 +668,7 @@
       store.loadError ??
       (benchStatus ||
         (backend.kind === "desktop"
-          ? `${calendars.calendars.length} calendars · saved locally`
+          ? `${calendars.calendars.length} ${calendars.calendars.length === 1 ? "calendar" : "calendars"} · saved locally`
           : `${datasetSize.toLocaleString()} simulated events · ${calendars.calendars.length} calendars · browser preview (not saved)`)),
   );
 </script>
@@ -653,22 +722,51 @@
       onview={setView}
       onnew={() => void measureInteraction("open-editor", () => openEditor({ mode: "create", timing: defaultTiming() }))}
       onsearch={onSearchInput}
+      onsearchsubmit={submitSearch}
     />
-    <div class="calendar">
-      <CalendarAdapter
-        {store}
-        {calendars}
-        {theme}
-        initialView="month"
-        initialDate={new Date()}
-        search={searchQuery}
-        hours={dayHours}
-        onready={(c) => (controller = c)}
-        onstatechange={(s) => (viewState = s)}
-        oneditor={(request) => void measureInteraction("open-editor", () => openEditor(request))}
-        onmove={moveEvent}
-        onreject={(message) => notifications.push(message)}
-      />
+    <div class="calendar" class:searching={searchQuery.trim() !== ""}>
+      {#if agenda}
+        <AgendaView
+          {store}
+          {calendars}
+          initialDate={viewDate}
+          onready={(c) => (controller = c)}
+          onstatechange={(s) => (viewState = s)}
+          onopen={(event) => void measureInteraction("open-editor", () => openEditor({ mode: "edit", id: event.id, event }))}
+        />
+      {:else}
+        <CalendarAdapter
+          {store}
+          {calendars}
+          {theme}
+          initialView={gridView}
+          initialDate={viewDate}
+          hours={dayHours}
+          onready={(c) => (controller = c)}
+          onstatechange={(s) => (viewState = s)}
+          oneditor={(request) => void measureInteraction("open-editor", () => openEditor(request))}
+          onmove={moveEvent}
+          onreject={(message) => notifications.push(message)}
+        />
+      {/if}
+      {#if searchQuery.trim()}
+        <div class="search-overlay">
+          <SearchResults
+            query={searchQuery}
+            {store}
+            {calendars}
+            onopen={(event) => void measureInteraction("open-editor", () => revealEvent(event))}
+            onsearched={(ms) => {
+              searchShown?.(ms);
+              searchShown = null;
+              if (focusResults) {
+                focusResults = false;
+                void tick().then(searchFocusFirst);
+              }
+            }}
+          />
+        </div>
+      {/if}
     </div>
     <footer class="status" role="status">{statusLine}</footer>
   </main>
@@ -765,8 +863,19 @@
     min-height: 0;
   }
   .calendar {
+    position: relative;
     flex: 1;
     min-height: 0;
+  }
+  /* Results cover the calendar, which stays mounted but is not painted. */
+  .calendar.searching > :global(:not(.search-overlay)) {
+    visibility: hidden;
+  }
+  .search-overlay {
+    position: absolute;
+    inset: 0;
+    background: var(--uc-bg);
+    z-index: 5;
   }
   .status {
     padding: 0.25rem 0.75rem;

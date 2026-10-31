@@ -4,6 +4,7 @@ export type ShortcutAction =
   | "view-month"
   | "view-week"
   | "view-day"
+  | "view-agenda"
   | "search"
   | "previous"
   | "next"
@@ -46,6 +47,8 @@ export function resolveShortcut(e: KeyInput): ShortcutAction | null {
       return "view-week";
     case "d":
       return "view-day";
+    case "a":
+      return "view-agenda";
     case "j":
       return "next";
     case "k":

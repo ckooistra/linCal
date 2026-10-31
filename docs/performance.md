@@ -1,6 +1,6 @@
 # Performance
 
-Responsiveness is a first-class requirement. This page records targets, method, the **measured** results for Milestone 1, and what they do and don't show.
+Responsiveness is a first-class requirement. This page records targets, method, the **measured** results per milestone, and what they do and don't show.
 
 ## Targets (from the project spec; goals, not guarantees)
 
@@ -47,6 +47,42 @@ Whatever remains after JS + layout is paint and compositing, plus any async foll
 - ~8% all-day or multi-day events.
 
 The scenarios run at 100, 1,000 and 5,000 events.
+
+## Results: Milestone 5, agenda and search, 2026-10-31
+
+Same VM and Xvfb setup (software rendering), so these remain a pessimistic baseline.
+
+Raw data: [`benchmarks/20261031-171422-vm-xvfb-m5.json`](benchmarks/20261031-171422-vm-xvfb-m5.json). Storage numbers come from `bench_queries`.
+
+Search now covers the whole database through `search_events` instead of filtering the loaded range. The benchmark runs four queries (`stand`, `review`, `zzz-no-match`, `gym`) the way the UI does: two years ahead (first 200 matches) and two years back (latest 50).
+
+### Storage: search (release build, p50 / p95 ms)
+
+| Dataset | First version (rows filtered in Rust) | With SQL `LIKE` prefilter |
+|---|---:|---:|
+| 100 | 2.3–3.1 | 0.4–1.9 |
+| 1,000 | 22–24 | 1.2–3.0 |
+| 5,000 | 84–132 | 4.9–10.7 |
+
+The first version read every row of the four-year window before matching. Now SQLite discards non-matching rows first, using `LIKE` on ASCII words. Rust then applies the exact Unicode-aware match.
+
+### UI: search, p50 / p95 ms
+
+| Step | 100 events | 1,000 events | 5,000 events | Target |
+|---|---|---|---|---|
+| query → results painted | 17 / 139 | 45 / 88 | 72 / 82 | < 100: ✔ at p50; p95 ✘ only for the first (cold) search |
+| of which the queries (IPC + SQLite) | 14 / 21 | 19 / 22 | 21 / 30 | |
+| close search (calendar repainted) | 19 / 24 | 31 / 34 | 46 / 46 | |
+
+Two changes brought the 5,000-event p50 down from 258 ms. The *query* time is the SQL prefilter above. Most of the rest was paint:
+- **Results are drawn 50 upcoming / 20 earlier at a time**, with *Show more*. Drawing 250 rows cost about 100 ms under software rendering.
+- **The calendar under the results is `visibility: hidden`.** It stays mounted (no SVAR rebuild), but WebKit no longer paints its event boxes under the opaque overlay. Before this, both opening and closing search grew with the number of events in the month.
+
+The old in-view filter measured 15 / 51 ms at 1,000 events. The new search does more (every stored event, every recurring occurrence) and stays within the target from 1,000 events up.
+
+**A one-off 1.5 s stall** appears in month navigation (p95) at 5,000 events in most of these runs. Probing per step showed one navigation stalling while our code took 3 ms of it. The stall is time-triggered, not caused by search: replacing the 1,000-event search phase with a plain 600 ms wait reproduces it, and without the wait it falls into an unmeasured phase (as in the pre-search baseline run). The likely suspects are a WebKit GC or memory timer under the VM. It needs checking on real hardware.
+
+The agenda view isn't benchmarked separately yet. It reads the same cached range as month view, and draws at most one month of rows.
 
 ## Results: Milestone 2 (SQLite + Rust core), 2026-10-29
 

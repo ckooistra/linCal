@@ -1,4 +1,4 @@
-import type { CalendarViewKind, DateRange, EventId, EventTiming } from "../../types/calendar";
+import type { AppView, CalendarEvent, CalendarViewKind, DateRange, EventId, EventTiming } from "../../types/calendar";
 
 /**
  * Contract between the application and whatever widget renders the
@@ -6,20 +6,22 @@ import type { CalendarViewKind, DateRange, EventId, EventTiming } from "../../ty
  * widget only needs to implement the same props and controller.
  */
 export interface CalendarViewController {
+  /** Switch between grid views (the agenda ignores it). */
   setView(view: CalendarViewKind): void;
   navigate(direction: "previous" | "next" | "today"): void;
   goToDate(date: Date): void;
 }
 
 export interface CalendarViewState {
-  view: CalendarViewKind;
+  view: AppView;
   /** Human-readable label of the visible range, e.g. "October 2026". */
   label: string;
   range: DateRange;
 }
 
 export type EditorRequest =
-  | { mode: "edit"; id: EventId }
+  /** `event` opens an occurrence that may not be cached yet (e.g. a search result). */
+  | { mode: "edit"; id: EventId; event?: CalendarEvent }
   | { mode: "create"; timing: EventTiming };
 
 export interface MoveRequest {

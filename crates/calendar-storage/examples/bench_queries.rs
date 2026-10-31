@@ -1,4 +1,4 @@
-//! Storage benchmark: dataset load and visible-range query latency against
+//! Storage benchmark: dataset load, visible-range query and search latency against
 //! an on-disk SQLite database (WAL), including recurrence expansion.
 //!
 //!     cargo run --release -p calendar-storage --example bench_queries
@@ -77,6 +77,28 @@ async fn main() {
                 samples.push(t.elapsed().as_secs_f64() * 1e3);
             }
             report(&format!("{size}: query {label}"), samples, last);
+        }
+
+        // Search as the UI runs it: two years ahead (first 200), two back (latest 50).
+        let day = |d: i64| {
+            resolve_local(
+                &TZ,
+                (anchor + Duration::days(d)).and_hms_opt(0, 0, 0).unwrap(),
+            )
+        };
+        for query in ["stand", "review", "zzz-no-match", "gym"] {
+            let mut samples = Vec::new();
+            let mut last = 0;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let (ahead, back) = tokio::join!(
+                    store.search(query, TimeRange::new(day(0), day(730)), TZ, 200, false),
+                    store.search(query, TimeRange::new(day(-730), day(0)), TZ, 50, true),
+                );
+                last = ahead.unwrap().len() + back.unwrap().len();
+                samples.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            report(&format!("{size}: search \"{query}\""), samples, last);
         }
         store.close().await;
     }

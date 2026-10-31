@@ -4,13 +4,12 @@
 Build a fast, local-first, free and open-source desktop calendar for Linux (primarily KDE Plasma) that unifies multiple calendar services. The UI must remain responsive during network access, synchronization, and database activity. Preserve a path to Windows and macOS support.
 
 ## Current priority
-**Implement Milestone 4: Google Calendar and Microsoft Graph** (see `PROJECT_SPEC.md` §14), alongside the existing CalDAV support. Settle the provider-contract questions in `docs/provider-integration.md` first. Use official native-app OAuth flows (PKCE, loopback redirect), and do not embed confidential client secrets.
+**Implement Milestone 5: Production quality** (see `PROJECT_SPEC.md` §14), in small vertical slices: agenda view and search, recurrence editing, ICS subscriptions, reminders and notifications, conflict handling, accessibility, packaging, user documentation, and profiling.
 
 Status:
 - Milestones 1–3 are complete. Milestone 3 (CalDAV) has been validated against the user's Nextcloud.
 - Milestone 3 audit findings have been addressed, except performance on target KDE hardware (F19), which still needs measuring there.
-- Milestone 4: Google verified with a live account; Microsoft (including whole-series editing) passes the API-fake tests and still needs a live check.
-- Do not start Milestone 5 until Milestone 4 is accepted.
+- Milestone 4 is accepted (31 October 2026). Google is verified with a live account. Microsoft passes the API-fake tests and still needs a live check once a client ID is registered.
 
 ## Required stack
 - **Desktop:** Tauri 2

@@ -3,6 +3,10 @@ import { fireEvent, render, screen } from "@testing-library/svelte";
 import Sidebar from "../components/Sidebar.svelte";
 import EventEditor from "../components/EventEditor.svelte";
 import TimeField from "../components/TimeField.svelte";
+import SearchResults from "../components/SearchResults.svelte";
+import AgendaView from "../components/AgendaView.svelte";
+import { MockEventSource } from "../services/mock/mockEventSource";
+import { EventStore } from "../stores/events.svelte";
 import { CalendarsStore } from "../stores/calendars.svelte";
 import { simulatedAccounts, simulatedCalendars } from "../services/mock/generator";
 import { parseIsoDate } from "../services/time";
@@ -248,5 +252,76 @@ describe("EventEditor time handling", () => {
     expect(saved.timing.end - saved.timing.start).toBe(90 * 60_000);
     // Crosses midnight: the end date moved to the next day.
     expect(new Date(saved.timing.end).getDate()).toBe(16);
+  });
+});
+
+describe("SearchResults", () => {
+  it("lists upcoming then earlier matches and opens one", async () => {
+    const source = new MockEventSource({ accounts: simulatedAccounts(), calendars: simulatedCalendars(), events: [] });
+    const now = Date.now();
+    const day = 86_400_000;
+    const add = (id: string, title: string, start: number) =>
+      source.createEvent(id, {
+        calendarId: "cal-work",
+        title,
+        description: "",
+        location: "",
+        timing: { kind: "timed", start, end: start + 3_600_000, timeZone: null },
+      });
+    await add("past", "Dentist check", now - 7 * day);
+    await add("next", "Dentist appointment", now + 2 * day);
+    await add("other", "Lunch", now + day);
+    const calendars = calendarsStore();
+    calendars.setChoices({ "cal-work": true });
+    const store = new EventStore(source, { isReadOnly: () => false, onError: noop });
+    const onopen = vi.fn();
+    render(SearchResults, { query: "dentist", store, calendars, onopen });
+    expect(await screen.findByText(/2 events match/)).toBeTruthy();
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings.indexOf("Upcoming")).toBeLessThan(headings.indexOf("Earlier"));
+    expect(screen.queryByText("Lunch")).toBeNull();
+    await fireEvent.click(screen.getByText("Dentist appointment"));
+    expect(onopen).toHaveBeenCalledWith(expect.objectContaining({ id: "next" }));
+  });
+});
+
+describe("AgendaView", () => {
+  it("lists the month by day, navigates by month and opens events", async () => {
+    const source = new MockEventSource({ accounts: simulatedAccounts(), calendars: simulatedCalendars(), events: [] });
+    const at = (date: string, hour: number) => parseIsoDate(date).getTime() + hour * 3_600_000;
+    const add = (id: string, title: string, start: number, calendarId = "cal-work") =>
+      source.createEvent(id, {
+        calendarId,
+        title,
+        description: "",
+        location: "",
+        timing: { kind: "timed", start, end: start + 3_600_000, timeZone: null },
+      });
+    await add("june", "Planning", at("2026-06-03", 9));
+    await add("july", "Retro", at("2026-07-08", 14));
+    await add("hidden", "Secret", at("2026-06-04", 9), "cal-personal");
+    const calendars = calendarsStore();
+    calendars.setChoices({ "cal-work": true, "cal-personal": false });
+    const store = new EventStore(source, { isReadOnly: () => false, onError: noop });
+    const onopen = vi.fn();
+    const states: string[] = [];
+    let controller: { navigate(d: "previous" | "next" | "today"): void } | null = null;
+    render(AgendaView, {
+      store,
+      calendars,
+      initialDate: parseIsoDate("2026-06-15"),
+      onready: (c: typeof controller) => (controller = c),
+      onstatechange: (s: { view: string; label: string }) => states.push(`${s.view} ${s.label}`),
+      onopen,
+    });
+    expect(await screen.findByText("Planning")).toBeTruthy();
+    expect(screen.queryByText("Secret")).toBeNull();
+    expect(screen.queryByText("Retro")).toBeNull();
+    expect(states.at(-1)).toMatch(/^agenda June 2026/);
+    controller!.navigate("next");
+    expect(await screen.findByText("Retro")).toBeTruthy();
+    expect(states.at(-1)).toMatch(/^agenda July 2026/);
+    await fireEvent.click(screen.getByText("Retro"));
+    expect(onopen).toHaveBeenCalledWith(expect.objectContaining({ id: "july" }));
   });
 });

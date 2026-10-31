@@ -794,8 +794,8 @@ Document measured performance and regressions.
 # 14. Development Milestones
 
 > **Status (October 2026):**
-> - Done: Milestones 1–3. CalDAV is validated against Nextcloud and the October audit's findings are addressed.
-> - In progress: Milestone 4.
+> - Done: Milestones 1–4. CalDAV is validated against Nextcloud, Google against a live account, and Microsoft against an API fake.
+> - In progress: Milestone 5.
 
 Implement the project incrementally.
 

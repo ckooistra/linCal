@@ -7,7 +7,7 @@ import type {
   EventDraft,
   EventId,
 } from "../../types/calendar";
-import { SourceError, type EventSource } from "../eventSource";
+import { matchesSearch, searchTerms, SourceError, type EventSource, type SearchOptions } from "../eventSource";
 import { eventBounds } from "../time";
 import type { Dataset } from "./generator";
 
@@ -84,6 +84,14 @@ export class MockEventSource implements EventSource {
       if (entry.end > range.start) result.push(entry.event);
     }
     return result;
+  }
+
+  async search(text: string, range: DateRange, options: SearchOptions): Promise<CalendarEvent[]> {
+    await this.#delay(options.signal);
+    const terms = searchTerms(text);
+    if (terms.length === 0) return [];
+    const found = this.queryRangeSync(range).filter((event) => matchesSearch(event, terms));
+    return options.latest ? found.slice(-options.limit) : found.slice(0, options.limit);
   }
 
   async createEvent(id: EventId, draft: EventDraft): Promise<CalendarEvent> {

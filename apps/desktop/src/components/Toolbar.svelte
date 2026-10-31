@@ -1,18 +1,20 @@
 <script lang="ts">
-  import type { CalendarViewKind } from "../types/calendar";
+  import type { AppView } from "../types/calendar";
   import type { DayHours } from "./calendar/types";
 
   interface Props {
     label: string;
-    view: CalendarViewKind;
+    view: AppView;
     loading: boolean;
     search: string;
     hours: DayHours;
     onhours: (hours: DayHours) => void;
     onnavigate: (direction: "previous" | "next" | "today") => void;
-    onview: (view: CalendarViewKind) => void;
+    onview: (view: AppView) => void;
     onnew: () => void;
     onsearch: (query: string) => void;
+    /** Enter or Down in the search box: go to the results. */
+    onsearchsubmit: () => void;
     searchInput?: HTMLInputElement | undefined;
   }
 
@@ -27,13 +29,15 @@
     onview,
     onnew,
     onsearch,
+    onsearchsubmit,
     searchInput = $bindable(),
   }: Props = $props();
 
-  const views: { id: CalendarViewKind; label: string; key: string }[] = [
+  const views: { id: AppView; label: string; key: string }[] = [
     { id: "month", label: "Month", key: "M" },
     { id: "week", label: "Week", key: "W" },
     { id: "day", label: "Day", key: "D" },
+    { id: "agenda", label: "Agenda", key: "A" },
   ];
 </script>
 
@@ -55,14 +59,17 @@
       bind:this={searchInput}
       oninput={(e) => onsearch(e.currentTarget.value)}
       onkeydown={(e) => {
-        if (e.key === "Escape") {
+        if (e.key === "Enter" || e.key === "ArrowDown") {
+          e.preventDefault();
+          onsearchsubmit();
+        } else if (e.key === "Escape") {
           onsearch("");
           e.currentTarget.value = "";
           e.currentTarget.blur();
         }
       }}
     />
-    {#if view !== "month"}
+    {#if view === "week" || view === "day"}
       <button
         type="button"
         class="hours"

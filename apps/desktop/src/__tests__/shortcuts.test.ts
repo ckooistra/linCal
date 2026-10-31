@@ -12,6 +12,7 @@ describe("resolveShortcut", () => {
     ["m", "view-month"],
     ["w", "view-week"],
     ["d", "view-day"],
+    ["a", "view-agenda"],
     ["T", "today"],
     ["h", "toggle-hours"],
   ])("maps %s to %s", (k, action) => {

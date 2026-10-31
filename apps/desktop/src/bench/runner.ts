@@ -28,7 +28,8 @@ export interface BenchHarness {
   visibleEditableIds(): string[];
   openEditor(id: string): void;
   closeEditor(): void;
-  setSearch(query: string): void;
+  /** Resolves once the results are set, with the search's own duration (IPC + SQLite) in ms. */
+  setSearch(query: string): void | Promise<number>;
   createEvent(): string | null;
   /** Move an event by `minutes` through the same path as a completed drag. */
   moveEvent(id: string, minutes: number): void;
@@ -138,8 +139,19 @@ export async function runBenchmarks(
       await measureInteraction("rename-event", () => h.renameEvent(id, `Renamed ${i}`), log);
     }
 
-    for (const query of ["stand", "review", "zzz-no-match", "gym", ""]) {
-      await measureInteraction("search", () => h.setSearch(query), log);
+    // "search": query to painted results; "search-query": the data-source
+    // part of it; "search-clear": closing the results.
+    for (const query of ["stand", "review", "zzz-no-match", "gym"]) {
+      let queryMs = 0;
+      await measureInteraction(
+        "search",
+        async () => {
+          queryMs = (await h.setSearch(query)) ?? 0;
+        },
+        log,
+      );
+      log.record("search-query", { script: queryMs, layout: queryMs, paint: queryMs });
+      await measureInteraction("search-clear", () => h.setSearch(""), log);
     }
 
     // Drag proxy: move one event every frame through the completed-drag path.

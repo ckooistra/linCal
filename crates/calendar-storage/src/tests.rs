@@ -313,6 +313,102 @@ async fn single_occurrence_edits_and_deletes() {
 }
 
 #[tokio::test]
+async fn search_matches_words_in_any_field_and_respects_overrides() {
+    let store = store_with_calendars().await;
+    let mut lunch = draft(
+        "cal-work",
+        "Lunch",
+        zoned(local(2026, 6, 3, 12, 0), 60),
+        None,
+    );
+    lunch.location = "Café Über".into();
+    store.create_event("lunch", lunch).await.unwrap();
+    store
+        .create_event(
+            "s",
+            draft(
+                "cal-team",
+                "Daily sync",
+                zoned(local(2026, 6, 1, 9, 0), 30),
+                Some("FREQ=DAILY;COUNT=5"),
+            ),
+        )
+        .await
+        .unwrap();
+    // The third occurrence is renamed and no longer matches "sync".
+    let third = store
+        .query_range(month(2026, 6), BERLIN)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|o| o.title == "Daily sync")
+        .nth(2)
+        .unwrap()
+        .id;
+    store
+        .update_occurrence(
+            &third,
+            draft(
+                "cal-team",
+                "Daily retro",
+                zoned(local(2026, 6, 3, 9, 0), 30),
+                None,
+            ),
+            BERLIN,
+        )
+        .await
+        .unwrap();
+
+    let search = |text: &'static str, limit, latest| {
+        let store = store.clone();
+        async move {
+            store
+                .search(text, month(2026, 6), BERLIN, limit, latest)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|o| (o.timing.start_key().to_string(), o.title))
+                .collect::<Vec<_>>()
+        }
+    };
+    // Case- and accent-aware, across fields, every word must match.
+    assert_eq!(search("über", 10, false).await.len(), 1);
+    assert_eq!(search("LUNCH café", 10, false).await.len(), 1);
+    assert!(search("lunch retro", 10, false).await.is_empty());
+    assert!(search("   ", 10, false).await.is_empty());
+    // Series: only occurrences that still match.
+    let sync = search("SYNC", 10, false).await;
+    assert_eq!(sync.len(), 4);
+    assert_eq!(search("retro", 10, false).await.len(), 1);
+    // Limits keep the earliest, or the latest.
+    assert_eq!(search("sync", 2, false).await, sync[..2].to_vec());
+    assert_eq!(search("sync", 2, true).await, sync[2..].to_vec());
+    // LIKE wildcards in the text are literal.
+    let mut sale = draft(
+        "cal-work",
+        "Sale 50% off_today",
+        zoned(local(2026, 6, 4, 12, 0), 60),
+        None,
+    );
+    sale.description = "C:\\temp".into();
+    store.create_event("sale", sale).await.unwrap();
+    assert_eq!(search("50%", 10, false).await.len(), 1);
+    assert!(search("5%", 10, false).await.is_empty());
+    assert_eq!(search("off_today", 10, false).await.len(), 1);
+    assert!(search("off_t_day", 10, false).await.is_empty());
+    assert_eq!(search("c:\\temp", 10, false).await.len(), 1);
+    assert!(search("sale_", 10, false).await.is_empty());
+    // Outside the range: nothing.
+    assert!(
+        store
+            .search("sync", month(2026, 7), BERLIN, 10, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn series_edits_shift_start_exceptions_and_overrides() {
     let store = store_with_calendars().await;
     store
@@ -455,6 +551,36 @@ async fn simulated_dataset_loads_and_queries() {
             .filter(|o| o.recurrence_id == Some(slot))
             .count()
             == 1
+    );
+}
+
+#[tokio::test]
+async fn creates_one_local_calendar() {
+    let store = Store::open_in_memory().await.unwrap();
+    assert!(store.ensure_local_calendar().await.unwrap());
+    assert!(!store.ensure_local_calendar().await.unwrap());
+    let accounts = store.list_accounts().await.unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].provider, ProviderKind::Local);
+    let calendars = store.list_calendars().await.unwrap();
+    assert_eq!(calendars.len(), 1);
+    assert!(!calendars[0].read_only);
+    store
+        .create_event(
+            "e",
+            draft(
+                &calendars[0].id,
+                "Mine",
+                zoned(local(2026, 6, 1, 9, 0), 30),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    // Not a synchronized account: nothing is queued.
+    assert_eq!(
+        store.get_event("e").await.unwrap().unwrap().sync_status,
+        SyncStatus::Saved
     );
 }
 

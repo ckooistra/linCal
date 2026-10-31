@@ -48,9 +48,11 @@ apps/desktop/
     │   ├── bridge.ts         The only module that imports @tauri-apps/api
     │   ├── mock/             Test and preview fixture (no persistence, pre-expanded recurrence)
     │   ├── recurrence.ts     Repeat presets for the editor
+    │   ├── agenda.ts         Groups occurrences into days for the agenda and search results
     │   └── time.ts, shortcuts.ts, theme.ts, perf.ts
     ├── stores/               EventStore (range cache, optimistic writes, change feed), calendars, notifications
     ├── components/calendar/  Widget adapter: the only code that imports SVAR
+    ├── components/AgendaView.svelte, AgendaList.svelte, SearchResults.svelte  Lists drawn without SVAR
     └── components/, bench/, App.svelte
 ```
 
@@ -103,6 +105,8 @@ The details (queue semantics, conflicts, recovery) are in [synchronization.md](s
 5. Every occurrence has a stable id: `<seriesId>::<recurrenceId>` for occurrences of a series, otherwise the event id.
 
 The viewer's IANA zone is sent with every call, so all-day dates and floating times resolve exactly as the UI renders them.
+
+**Search** (`search_events`) uses the same path over a wider range. The UI asks for two years ahead (the first 200 matches) and two years back (the latest 50). Rows are filtered in Rust before decoding: every word must occur in the title, location or description, compared after Unicode lower-casing, which SQLite's `LIKE` would not do. Only the matching series are then expanded. An override whose text no longer matches is left out, even if its series matches, and vice versa.
 
 ### Writing
 
@@ -161,11 +165,13 @@ SVAR keeps its own internal event store, and changing its `events` prop rebuilds
 - passes `events` once and then uses SVAR's action bus;
 - **intercepts** SVAR's own moves, edits, creates and clicks and routes them through `EventStore`;
 - refuses moves of read-only events;
-- implements visibility and search as SVAR view filters;
+- implements visibility as a SVAR view filter;
 - applies colours through one generated stylesheet;
 - loads both theme stylesheets with `fonts={false}`, so nothing is fetched from SVAR's CDN.
 
 A new `invalidated` change makes it reload the visible window. To replace SVAR, implement the same props and `CalendarViewController` from `components/calendar/types.ts`.
+
+The **agenda** (SVAR's own agenda is a PRO feature) is a separate list component implementing the same controller. It loads its month through `EventStore`. `App.svelte` swaps it for the grid adapter and reopens the grid at the date the agenda showed. **Search results** cover the calendar while a query is entered; the calendar stays mounted underneath.
 
 ## Tauri layer
 
@@ -173,7 +179,7 @@ Commands:
 
 | Group | Commands |
 |---|---|
-| Data | `list_accounts`, `list_calendars`, `query_range`, `create_event`, `update_event`, `delete_event` |
+| Data | `list_accounts`, `list_calendars`, `query_range`, `search_events`, `create_event`, `update_event`, `delete_event` |
 | Preferences | `set_calendar_color`, `get_settings`, `set_setting` |
 | Simulation | `load_simulated_dataset` (benchmark runs only; replaces simulated accounts only) |
 | Accounts & sync | `add_caldav_account`, `remove_account`, `sync_now`, `account_statuses`, `resolve_conflict` |
@@ -181,7 +187,7 @@ Commands:
 
 Each decodes its arguments and calls one storage method. Errors reach the UI as `{code, message}` with readable text; database details go to stderr, never to the UI.
 
-The database opens in `setup`. If it can't be opened, the app still starts and shows the reason. Benchmark runs (`UC_BENCH=1`) use a temporary database, and `UC_DATA_DIR` overrides the location for testing.
+The database opens in `setup`. If it can't be opened, the app still starts and shows the reason. Outside benchmark runs, setup then removes demo data left by older versions, and creates the *Personal* calendar (account `local`, never synchronized) if no local account exists. Benchmark runs (`UC_BENCH=1`) use a temporary database, and `UC_DATA_DIR` overrides the location for testing.
 
 The capability file grants only `core:default` and the window controls; the opener plugin, which opens the browser for OAuth sign-in, is called from Rust only. The CSP restricts everything to `self`, plus inline styles for SVAR.
 
