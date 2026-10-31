@@ -243,10 +243,46 @@ async fn two_clients_stay_in_sync() {
         format!("{tag} meeting by B")
     );
 
+    // "This and following" in A from the third occurrence: two series on
+    // the server; B sees the earlier part unchanged and the later one moved.
+    let tail = format!("{tag}-tail");
+    a.store
+        .update_following(
+            &weekly_a[2].id,
+            &tail,
+            draft(
+                &a.calendar,
+                &format!("{tag} weekly later"),
+                timing(16, 10),
+                Some("FREQ=WEEKLY;COUNT=2"),
+            ),
+        )
+        .await
+        .unwrap();
+    a.sync().await;
+    b.sync().await;
+    let split_b: Vec<(String, EventTiming)> = b
+        .find(&format!("{tag} weekly"))
+        .await
+        .into_iter()
+        .map(|o| (o.title, o.timing))
+        .collect();
+    assert_eq!(
+        split_b,
+        vec![
+            (format!("{tag} weekly"), timing(2, 8)),
+            (format!("{tag} weekly (special)"), timing(10, 17)),
+            (format!("{tag} weekly later"), timing(16, 10)),
+            (format!("{tag} weekly later"), timing(23, 10)),
+        ]
+    );
+    let weekly_a = a.find(&format!("{tag} weekly")).await;
+
     // Clean up from A; B sees the deletions.
     let one = a.find(&format!("{tag} meeting")).await.remove(0);
     a.store.delete_event(&one.id).await.unwrap();
     a.store.delete_series(&weekly_a[0].id).await.unwrap();
+    a.store.delete_series(&weekly_a[3].id).await.unwrap();
     a.sync().await;
     b.sync().await;
     assert!(b.find(&tag).await.is_empty(), "deletions propagate");

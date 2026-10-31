@@ -391,7 +391,8 @@ impl ObjectCodec for GraphCodec {
     /// * `{"op": "patch", "id", "etag", "body"}`: the master or an exception;
     /// * `{"op": "patchInstance", "key", "body"}`: an occurrence that is not
     ///   an exception yet (it becomes one);
-    /// * `{"op": "cancelInstance", "key"}`: an occurrence to delete.
+    /// * `{"op": "cancelInstance", "key"}`: an occurrence to delete;
+    /// * `{"op": "delete", "id"}`: an exception the series no longer has.
     fn write(
         &self,
         base: Option<&str>,
@@ -445,6 +446,33 @@ impl ObjectCodec for GraphCodec {
                 .filter(|k| !base_exdates.contains(k))
             {
                 ops.push(json!({"op": "cancelInstance", "key": key_json(key)}));
+            }
+        }
+        if let (Some(desired), Some(m)) = (&content.master, &base_event) {
+            // Exceptions the series no longer generates (it was cut short,
+            // e.g. by "this and following"). After the master's guarded
+            // change, since removing them changes the series' version too.
+            for x in exceptions(m) {
+                let Some(key) = instance_key(x, m) else {
+                    continue;
+                };
+                let kept = content.overrides.iter().any(|o| {
+                    o.recurrence_id.is_some_and(|k| {
+                        k == key || renamed.iter().any(|(c, b)| *c == k && *b == key)
+                    })
+                });
+                let generated = desired.recurrence.as_ref().is_some_and(|rec| {
+                    calendar_core::recurrence::has_occurrence(
+                        &desired.timing,
+                        rec,
+                        &key,
+                        &chrono_tz::UTC,
+                    )
+                    .unwrap_or(true)
+                });
+                if !kept && !generated {
+                    ops.push(json!({"op": "delete", "id": str_field(x, "id")}));
+                }
             }
         }
         let base_overrides = base_content

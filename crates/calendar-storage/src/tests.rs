@@ -409,6 +409,181 @@ async fn search_matches_words_in_any_field_and_respects_overrides() {
 }
 
 #[tokio::test]
+async fn this_and_following_splits_the_series() {
+    let store = store_with_calendars().await;
+    store
+        .create_event(
+            "s",
+            draft(
+                "cal-team",
+                "Daily",
+                zoned(local(2026, 6, 1, 9, 0), 30),
+                Some("FREQ=DAILY;COUNT=8"),
+            ),
+        )
+        .await
+        .unwrap();
+    let ids = |v: &[Occurrence]| v.iter().map(|o| o.id.clone()).collect::<Vec<_>>();
+    let occ = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+    let all = ids(&occ);
+    // A moved occurrence on each side, and one cancelled later on.
+    for (i, title) in [(1, "Early move"), (5, "Late move")] {
+        let mut d = draft("cal-team", title, occ[i].timing.clone(), None);
+        d.timing = zoned(local(2026, 6, 1 + i as u32, 11, 0), 30);
+        store.update_occurrence(&all[i], d, BERLIN).await.unwrap();
+    }
+    store.delete_occurrence(&all[6]).await.unwrap();
+
+    // From the 4th: one hour later and renamed.
+    let edited = store
+        .update_following(
+            &all[3],
+            "tail",
+            draft(
+                "cal-team",
+                "Standup",
+                zoned(local(2026, 6, 4, 10, 0), 30),
+                Some("FREQ=DAILY;COUNT=8"),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.id, "tail");
+    let master = store.get_event("s").await.unwrap().unwrap();
+    assert_eq!(master.recurrence.unwrap().rrule, "FREQ=DAILY;COUNT=3");
+    // The form sent the series' own rule: the remaining 5 continue.
+    assert_eq!(
+        store
+            .get_event("tail")
+            .await
+            .unwrap()
+            .unwrap()
+            .recurrence
+            .unwrap()
+            .rrule,
+        "FREQ=DAILY;COUNT=5"
+    );
+    let after = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+    let shown: Vec<(u32, u32, String)> = after
+        .iter()
+        .map(|o| {
+            use chrono::{Datelike, Timelike};
+            let EventTiming::Zoned { start, .. } = o.timing else {
+                unreachable!()
+            };
+            let t = start.with_timezone(&BERLIN);
+            (t.day(), t.hour(), o.title.clone())
+        })
+        .collect();
+    let row = |d, h, t: &str| (d, h, t.to_owned());
+    assert_eq!(
+        shown,
+        vec![
+            row(1, 9, "Daily"),
+            row(2, 11, "Early move"),
+            row(3, 9, "Daily"),
+            row(4, 10, "Standup"),
+            row(5, 10, "Standup"),
+            // The later override joined the new series and kept its own
+            // time and title, as with an edit of all events.
+            row(6, 11, "Late move"),
+            // 7 June stays cancelled; 8 June is the last of 5.
+            row(8, 10, "Standup"),
+        ]
+    );
+    assert!(after[5].id.starts_with("tail::"));
+
+    // Delete from the 5 June occurrence on: the new series keeps one.
+    let fifth = after
+        .iter()
+        .find(|o| o.title == "Standup" && o.id.contains("0605"))
+        .unwrap();
+    store.delete_following(&fifth.id).await.unwrap();
+    let left = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+    assert_eq!(
+        left.iter().map(|o| o.title.as_str()).collect::<Vec<_>>(),
+        vec!["Daily", "Early move", "Daily", "Standup"]
+    );
+    assert_eq!(store.event_count().await.unwrap(), 3);
+
+    // From the first occurrence it is the whole series.
+    let first = left[0].id.clone();
+    store.delete_following(&first).await.unwrap();
+    assert_eq!(
+        titles(&store, month(2026, 6)).await,
+        vec!["Standup".to_owned()]
+    );
+    let only = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+    let edited = store
+        .update_following(
+            &only[0].id,
+            "unused",
+            draft(
+                "cal-team",
+                "Once",
+                zoned(local(2026, 6, 4, 10, 0), 30),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.id, "tail");
+    assert!(edited.recurrence.is_none());
+    assert!(store.get_event("unused").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn this_and_following_without_count_uses_until() {
+    let store = store_with_calendars().await;
+    let all_day = EventTiming::AllDay {
+        start_date: NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2026, 6, 2).unwrap(),
+    };
+    store
+        .create_event("w", draft("cal-team", "Bins", all_day, Some("FREQ=WEEKLY")))
+        .await
+        .unwrap();
+    let occ = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+    let mut d = draft(
+        "cal-team",
+        "Bins (new day)",
+        occ[2].timing.clone(),
+        Some("FREQ=WEEKLY"),
+    );
+    d.timing = EventTiming::AllDay {
+        start_date: NaiveDate::from_ymd_opt(2026, 6, 16).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2026, 6, 17).unwrap(),
+    };
+    store.update_following(&occ[2].id, "w2", d).await.unwrap();
+    let rule = store
+        .get_event("w")
+        .await
+        .unwrap()
+        .unwrap()
+        .recurrence
+        .unwrap()
+        .rrule;
+    assert_eq!(rule, "FREQ=WEEKLY;UNTIL=20260608");
+    let days: Vec<String> = store
+        .query_range(month(2026, 6), BERLIN)
+        .await
+        .unwrap()
+        .iter()
+        .map(|o| format!("{} {}", o.timing.start_key(), o.title))
+        .collect();
+    assert_eq!(
+        days,
+        vec![
+            "20260601 Bins",
+            "20260608 Bins",
+            "20260616 Bins (new day)",
+            "20260623 Bins (new day)",
+            "20260630 Bins (new day)",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn series_edits_shift_start_exceptions_and_overrides() {
     let store = store_with_calendars().await;
     store

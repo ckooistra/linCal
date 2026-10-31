@@ -134,7 +134,8 @@ fn prepare(
             .set_exdates(exdates);
         return Ok(Prepared { set, kind });
     }
-    let rule: RRule<Unvalidated> = recurrence.rrule.parse().map_err(invalid)?;
+    let rrule = until_in_utc(&recurrence.rrule, &kind, display_tz);
+    let rule: RRule<Unvalidated> = rrule.parse().map_err(invalid)?;
     // Validation fills in defaults (BYDAY, BYHOUR, ...) from the real start,
     // so a later set start below generates the same occurrences.
     let rule = rule.validate(dt_start).map_err(invalid)?;
@@ -166,6 +167,50 @@ fn prepare(
         .set_rdates(rdates)
         .set_exdates(exdates);
     Ok(Prepared { set, kind })
+}
+
+/// The rule with UNTIL as a UTC date-time, which the rule engine requires.
+/// RFC 5545 has UNTIL take DTSTART's form: a date for all-day series
+/// (inclusive: that whole day) and a local time for floating ones. Lenient
+/// forms are read the same way: a date ends a timed series at the end of
+/// that day, and a local time on a zoned series is in the series' zone.
+fn until_in_utc<'a>(rrule: &'a str, kind: &Kind, display_tz: &Tz) -> std::borrow::Cow<'a, str> {
+    let Some(value) = rrule.split(';').find_map(|p| {
+        let (name, value) = p.split_once('=')?;
+        name.trim()
+            .eq_ignore_ascii_case("UNTIL")
+            .then_some(value.trim())
+    }) else {
+        return rrule.into();
+    };
+    let Ok(key) = value.parse::<OccurrenceKey>() else {
+        return rrule.into(); // left for the rule engine to report
+    };
+    let zone = match kind {
+        Kind::Zoned { tz, .. } => *tz,
+        Kind::Floating { .. } => *display_tz,
+        Kind::AllDay { .. } => chrono_tz::UTC,
+    };
+    let utc = match key {
+        OccurrenceKey::Instant(_) => return rrule.into(),
+        OccurrenceKey::Floating(t) => resolve_local(&zone, t),
+        OccurrenceKey::Date(d) => match kind {
+            // All-day occurrences start at UTC midnight (see `prepare`).
+            Kind::AllDay { .. } => d.and_hms_opt(0, 0, 0).expect("valid").and_utc(),
+            _ => resolve_local(&zone, d.and_hms_opt(23, 59, 59).expect("valid")),
+        },
+    };
+    rrule
+        .split(';')
+        .map(|p| match p.split_once('=') {
+            Some((name, _)) if name.trim().eq_ignore_ascii_case("UNTIL") => {
+                format!("UNTIL={}", OccurrenceKey::Instant(utc))
+            }
+            _ => p.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+        .into()
 }
 
 /// Checks that a recurrence is valid for the given timing.
@@ -413,6 +458,125 @@ pub fn retime_series(master: &EventTiming, key: &OccurrenceKey, edited: &EventTi
             key_shift: None,
         },
     }
+}
+
+/// A series divided at one occurrence ("this and following").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Split {
+    /// The original series, ending before the split; `None` when the split
+    /// is at its first occurrence (nothing remains before it).
+    pub before: Option<Recurrence>,
+    /// Timing of the new series: the occurrence at the split, unedited.
+    pub after_timing: EventTiming,
+    /// Recurrence of the new series.
+    pub after: Recurrence,
+}
+
+/// Divides a series at `key`, which must be one of its occurrences (an
+/// EXDATE-cancelled one counts, an RDATE does not). The original keeps the
+/// occurrences before `key`: its rule ends with UNTIL at its last earlier
+/// occurrence, or with a reduced COUNT. The new series starts at `key` with
+/// the same rule and the remaining COUNT. RDATEs and EXDATEs go to the side
+/// they fall on.
+pub fn split_series(
+    timing: &EventTiming,
+    recurrence: &Recurrence,
+    key: &OccurrenceKey,
+) -> Result<Split, CoreError> {
+    if is_rdate_only(recurrence) {
+        return Err(CoreError::InvalidRecurrence(
+            "a series made only of dates cannot be split".into(),
+        ));
+    }
+    // Rule occurrences alone: COUNT counts them before EXDATEs apply.
+    let rule_only = Recurrence {
+        rrule: recurrence.rrule.clone(),
+        ..Recurrence::default()
+    };
+    let prepared = prepare(timing, &rule_only, &chrono_tz::UTC, None)?;
+    let count = prepared.set.get_rrule().first().and_then(|r| r.get_count());
+    let mut before = 0u32;
+    let mut last_before = None;
+    let mut at = None;
+    for start in prepared.set.into_iter().take(MAX_ITERATIONS) {
+        let (candidate, occurrence) = prepared.kind.occurrence(start);
+        if std::mem::discriminant(&candidate) != std::mem::discriminant(key) {
+            break;
+        }
+        if candidate == *key {
+            at = Some(occurrence);
+            break;
+        }
+        if candidate > *key {
+            break;
+        }
+        before += 1;
+        last_before = Some(candidate);
+    }
+    let Some(after_timing) = at else {
+        return Err(CoreError::InvalidRecurrence(format!(
+            "{key} is not an occurrence of the series"
+        )));
+    };
+    let kept = |end: String| -> String {
+        let mut parts: Vec<&str> = recurrence
+            .rrule
+            .split(';')
+            .filter(|p| {
+                let name = p
+                    .split('=')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_uppercase();
+                !p.trim().is_empty() && name != "COUNT" && name != "UNTIL"
+            })
+            .collect();
+        parts.push(&end);
+        parts.join(";")
+    };
+    let after_rule = match count {
+        Some(total) => kept(format!("COUNT={}", total - before)),
+        None => recurrence.rrule.clone(),
+    };
+    let after = Recurrence {
+        rrule: after_rule,
+        rdates: recurrence
+            .rdates
+            .iter()
+            .filter(|k| *k >= key)
+            .copied()
+            .collect(),
+        exdates: recurrence
+            .exdates
+            .iter()
+            .filter(|k| *k >= key)
+            .copied()
+            .collect(),
+    };
+    let before = last_before.map(|last| Recurrence {
+        rrule: match count {
+            Some(_) => kept(format!("COUNT={before}")),
+            None => kept(format!("UNTIL={last}")),
+        },
+        rdates: recurrence
+            .rdates
+            .iter()
+            .filter(|k| *k < key)
+            .copied()
+            .collect(),
+        exdates: recurrence
+            .exdates
+            .iter()
+            .filter(|k| *k < key)
+            .copied()
+            .collect(),
+    });
+    Ok(Split {
+        before,
+        after_timing,
+        after,
+    })
 }
 
 /// Zone-independent upper bound of a series for indexing (see
@@ -809,5 +973,129 @@ mod tests {
         let slot = |d| OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, d, 8, 0)));
         assert!(has_occurrence(&e.timing, rec, &slot(3), &BERLIN).unwrap());
         assert!(!has_occurrence(&e.timing, rec, &slot(4), &BERLIN).unwrap());
+    }
+
+    #[test]
+    fn splitting_keeps_every_occurrence_on_one_side() {
+        let all_day = |y, m, d| EventTiming::AllDay {
+            start_date: date(y, m, d),
+            end_date: date(y, m, d) + Duration::days(1),
+        };
+        let floating = EventTiming::Floating {
+            start: local(2026, 3, 20, 9, 0),
+            end: local(2026, 3, 20, 10, 0),
+        };
+        let cases = [
+            // Across the DST change, with COUNT.
+            (zoned(local(2026, 3, 25, 9, 0), 30), "FREQ=DAILY;COUNT=10"),
+            (
+                zoned(local(2026, 3, 2, 9, 0), 60),
+                "FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20260501T000000Z",
+            ),
+            (
+                zoned(local(2026, 1, 30, 18, 0), 60),
+                "FREQ=MONTHLY;BYDAY=-1FR",
+            ),
+            (zoned(local(2026, 1, 5, 8, 0), 15), "FREQ=WEEKLY;INTERVAL=2"),
+            (all_day(2026, 2, 14), "FREQ=YEARLY;COUNT=5"),
+            (all_day(2026, 3, 1), "FREQ=DAILY;INTERVAL=3"),
+            (floating, "FREQ=DAILY;COUNT=40"),
+        ];
+        let window = range(date(2025, 12, 1), date(2031, 1, 1));
+        for (timing, rule) in cases {
+            let mut original = series(timing.clone(), rule);
+            let first = run(&original, window);
+            // A cancelled occurrence on each side of the split.
+            let keys: Vec<OccurrenceKey> = first.iter().map(|o| o.recurrence_id.unwrap()).collect();
+            let rec = original.recurrence.as_mut().unwrap();
+            rec.exdates = vec![keys[1], keys[keys.len() - 2]];
+            let full = run(&original, window);
+            for at in [2, keys.len() / 2, keys.len() - 2] {
+                let split = split_series(&timing, original.recurrence.as_ref().unwrap(), &keys[at])
+                    .unwrap();
+                let mut head = original.clone();
+                head.recurrence = split.before.clone();
+                assert!(head.recurrence.is_some(), "{rule} at {at}");
+                let mut tail = original.clone();
+                tail.timing = split.after_timing.clone();
+                tail.recurrence = Some(split.after.clone());
+                let mut joined = run(&head, window);
+                joined.extend(run(&tail, window));
+                let starts_of = |v: &[Occurrence]| {
+                    let mut k: Vec<_> = v.iter().map(|o| o.recurrence_id.unwrap()).collect();
+                    k.sort();
+                    k
+                };
+                assert_eq!(starts_of(&joined), starts_of(&full), "{rule} split at {at}");
+                assert!(
+                    run(&tail, window)
+                        .iter()
+                        .all(|o| o.recurrence_id.unwrap() >= keys[at])
+                );
+            }
+            // At the first occurrence nothing remains before.
+            let split =
+                split_series(&timing, original.recurrence.as_ref().unwrap(), &keys[0]).unwrap();
+            assert_eq!(split.before, None);
+            assert_eq!(split.after_timing, timing);
+        }
+    }
+
+    #[test]
+    fn split_rules_and_refusals() {
+        let timing = zoned(local(2026, 6, 1, 9, 0), 30);
+        let rec = Recurrence {
+            rrule: "FREQ=DAILY;COUNT=10;INTERVAL=1".into(),
+            ..Recurrence::default()
+        };
+        let key = |d| OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, d, 9, 0)));
+        let split = split_series(&timing, &rec, &key(4)).unwrap();
+        assert_eq!(split.before.unwrap().rrule, "FREQ=DAILY;INTERVAL=1;COUNT=3");
+        assert_eq!(split.after.rrule, "FREQ=DAILY;INTERVAL=1;COUNT=7");
+        let open = Recurrence {
+            rrule: "FREQ=DAILY".into(),
+            ..Recurrence::default()
+        };
+        let split = split_series(&timing, &open, &key(4)).unwrap();
+        // UNTIL is the last earlier occurrence, in UTC (09:00 CEST).
+        assert_eq!(
+            split.before.unwrap().rrule,
+            "FREQ=DAILY;UNTIL=20260603T070000Z"
+        );
+        assert_eq!(split.after.rrule, "FREQ=DAILY");
+        // Not a slot of the series.
+        let off = OccurrenceKey::Instant(resolve_local(&BERLIN, local(2026, 6, 4, 10, 0)));
+        assert!(split_series(&timing, &open, &off).is_err());
+        assert!(split_series(&timing, &open, &OccurrenceKey::Date(date(2026, 6, 4))).is_err());
+    }
+
+    #[test]
+    fn until_takes_the_form_of_the_start() {
+        let all_day = EventTiming::AllDay {
+            start_date: date(2026, 1, 1),
+            end_date: date(2026, 1, 2),
+        };
+        let floating = EventTiming::Floating {
+            start: local(2026, 1, 1, 9, 0),
+            end: local(2026, 1, 1, 10, 0),
+        };
+        let timed = zoned(local(2026, 1, 1, 9, 0), 30);
+        let window = range(date(2025, 12, 1), date(2026, 2, 1));
+        for (timing, rule, expected) in [
+            (&all_day, "FREQ=DAILY;UNTIL=20260105", 5),
+            (&all_day, "FREQ=DAILY;UNTIL=20260105T000000Z", 5),
+            (&floating, "FREQ=DAILY;UNTIL=20260105T090000", 5),
+            (&floating, "FREQ=DAILY;UNTIL=20260105T085959", 4),
+            (&timed, "until=20260105;FREQ=DAILY", 5),
+            (&timed, "FREQ=DAILY;UNTIL=20260105T090000", 5),
+            (&timed, "FREQ=DAILY;UNTIL=20260105T080000Z", 5),
+            (&timed, "FREQ=DAILY;UNTIL=20260105T075959Z", 4),
+        ] {
+            assert_eq!(
+                run(&series(timing.clone(), rule), window).len(),
+                expected,
+                "{rule}"
+            );
+        }
     }
 }

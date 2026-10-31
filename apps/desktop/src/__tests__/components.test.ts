@@ -73,7 +73,7 @@ describe("EventEditor", () => {
       location: "",
       timing,
       rrule: null,
-    });
+    }, "series");
     // Read-only calendars are not offered as targets.
     expect(screen.queryByRole("option", { name: "Holidays" })).toBeNull();
   });
@@ -144,8 +144,8 @@ describe("EventEditor with recurring events", () => {
     revision: 1,
   };
 
-  it("keeps a custom rule, offers presets and both delete scopes", async () => {
-    const onsave = vi.fn((_draft: unknown) => null);
+  it("keeps the rule and asks which events a save or delete applies to", async () => {
+    const onsave = vi.fn((_draft: unknown, _scope: unknown) => null);
     const ondelete = vi.fn();
     render(EventEditor, {
       event: occurrence,
@@ -159,14 +159,89 @@ describe("EventEditor with recurring events", () => {
     });
     const repeat = screen.getByLabelText("Repeat") as HTMLSelectElement;
     expect(repeat.selectedOptions[0]?.textContent).toBe("Every weekday (Mon–Fri)");
-    expect(screen.getByRole("note").textContent).toContain("every event in this series");
-    await fireEvent.click(screen.getByRole("button", { name: "Delete this event" }));
-    expect(ondelete).toHaveBeenCalledWith("occurrence");
-    await fireEvent.click(screen.getByRole("button", { name: "Delete series" }));
-    expect(ondelete).toHaveBeenCalledWith("series");
+    // Delete: three choices, Back returns to the form.
+    await fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByRole("group", { name: /repeating event\. Delete:/ })).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await fireEvent.click(screen.getByRole("button", { name: "This and following events" }));
+    expect(ondelete).toHaveBeenCalledWith("following");
+
+    // Saving without changes just closes; a title change can be for this event only.
+    await fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(screen.queryByRole("group", { name: /repeating event/ })).toBeNull();
+    await fireEvent.input(screen.getByLabelText("Title"), { target: { value: "Sync" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "This event" }));
+    await fireEvent.click(screen.getByRole("button", { name: "This event" }));
+    expect(onsave).toHaveBeenLastCalledWith(expect.objectContaining({ title: "Sync" }), "occurrence");
+
+    // A new rule can't apply to one event.
     await fireEvent.change(repeat, { target: { value: "FREQ=MONTHLY" } });
     await fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(onsave.mock.calls[0]?.[0]).toMatchObject({ rrule: "FREQ=MONTHLY", title: "Stand-up" });
+    expect((screen.getByRole("button", { name: "This event" }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(screen.getByRole("button", { name: "All events" }));
+    expect(onsave).toHaveBeenLastCalledWith(expect.objectContaining({ rrule: "FREQ=MONTHLY" }), "series");
+  });
+});
+
+describe("EventEditor custom repeat", () => {
+  it("builds a rule from the custom fields", async () => {
+    // Tuesday 16 June 2026, 09:00.
+    const start = parseIsoDate("2026-06-16").getTime() + 9 * 3_600_000;
+    const onsave = vi.fn((_draft: unknown, _scope: unknown) => null);
+    render(EventEditor, {
+      event: null,
+      timing: { kind: "timed", start, end: start + 3_600_000, timeZone: "Europe/Berlin" },
+      calendars: simulatedCalendars(),
+      defaultCalendarId: "cal-work",
+      readOnly: false,
+      onsave,
+      ondelete: noop,
+      onclose: noop,
+    });
+    await fireEvent.change(screen.getByLabelText("Repeat"), { target: { value: "custom" } });
+    expect(screen.getByText("Every week on Tuesday")).toBeTruthy();
+    await fireEvent.input(screen.getByLabelText("Repeat every"), { target: { value: "2" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Thursday" }));
+    // The last selected day cannot be switched off.
+    await fireEvent.click(screen.getByRole("button", { name: "Tuesday" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Thursday" }));
+    expect(screen.getByRole("button", { name: "Thursday" }).getAttribute("aria-pressed")).toBe("true");
+    await fireEvent.change(screen.getByLabelText("Repeat ends"), { target: { value: "count" } });
+    await fireEvent.input(screen.getByLabelText("Number of times"), { target: { value: "6" } });
+    expect(screen.getByText("Every 2 weeks on Thursday, 6 times")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onsave).toHaveBeenCalledWith(
+      expect.objectContaining({ rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TH;COUNT=6" }),
+      "series",
+    );
+  });
+
+  it("opens an editable custom rule in the custom fields and keeps others as they are", async () => {
+    const start = parseIsoDate("2026-06-16").getTime() + 9 * 3_600_000;
+    const series = (rrule: string): CalendarEvent => ({
+      id: "s::x",
+      calendarId: "cal-work",
+      title: "Review",
+      description: "",
+      location: "",
+      timing: { kind: "timed", start, end: start + 3_600_000, timeZone: "Europe/Berlin" },
+      seriesId: "s",
+      recurrenceId: "x",
+      rrule,
+      syncStatus: "saved",
+      revision: 1,
+    });
+    const props = { calendars: simulatedCalendars(), defaultCalendarId: null, readOnly: false, ondelete: noop, onclose: noop };
+    const first = render(EventEditor, { ...props, event: series("FREQ=MONTHLY;BYDAY=3TU"), timing: series("").timing, onsave: () => null });
+    expect(screen.getByText("Every month on the third Tuesday")).toBeTruthy();
+    first.unmount();
+    render(EventEditor, { ...props, event: series("FREQ=MONTHLY;BYMONTHDAY=1,15"), timing: series("").timing, onsave: () => null });
+    const repeat = screen.getByLabelText("Repeat") as HTMLSelectElement;
+    expect(repeat.selectedOptions[0]?.textContent).toBe("Custom (FREQ=MONTHLY;BYMONTHDAY=1,15)");
+    expect(screen.queryByRole("group", { name: "Custom repeat" })).toBeNull();
   });
 });
 

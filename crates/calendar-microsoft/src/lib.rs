@@ -640,6 +640,18 @@ impl CalendarProvider for GraphProvider {
                             .await?;
                     }
                 }
+                Some("delete") => {
+                    let id = step["id"].as_str().ok_or_else(|| invalid("bad delete"))?;
+                    let url = self.event_url(id)?;
+                    self.send(
+                        Method::DELETE,
+                        url.as_str(),
+                        None,
+                        None,
+                        &[StatusCode::NOT_FOUND],
+                    )
+                    .await?;
+                }
                 Some(op @ ("patchInstance" | "cancelInstance")) => {
                     let master = master_id
                         .as_deref()

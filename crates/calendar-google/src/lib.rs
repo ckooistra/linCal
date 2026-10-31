@@ -568,6 +568,17 @@ impl CalendarProvider for GoogleProvider {
                     )
                     .await?;
                 }
+                Some("DELETE") => {
+                    let etag = op["etag"].as_str().filter(|_| conditional);
+                    self.send(
+                        Method::DELETE,
+                        &format!("{calendar}events/{event_id}"),
+                        etag,
+                        None,
+                        &[StatusCode::NOT_FOUND, StatusCode::GONE],
+                    )
+                    .await?;
+                }
                 _ => return Err(invalid("unknown write step")),
             }
         }

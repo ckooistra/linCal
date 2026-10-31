@@ -749,21 +749,33 @@ impl Store {
         occurrence: &str,
         draft: EventDraft,
     ) -> Result<CalendarEvent> {
+        let mut tx = self.pool.begin().await?;
+        let updated = self.update_series_in(&mut tx, occurrence, draft).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// [`Self::update_series`] within a transaction.
+    async fn update_series_in(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        occurrence: &str,
+        draft: EventDraft,
+    ) -> Result<CalendarEvent> {
         let (series_id, key) = parse_occurrence_id(occurrence)
             .ok_or_else(|| StorageError::NotFound(occurrence.to_owned()))?;
         let series_id = series_id.to_owned();
-        let mut tx = self.pool.begin().await?;
-        let master = Self::load(&mut tx, &series_id).await?;
+        let master = Self::load(tx, &series_id).await?;
         let Some(old_rec) = master.recurrence.clone() else {
             return Err(StorageError::NotFound(occurrence.to_owned()));
         };
-        Self::writable_calendar(&mut tx, &master.calendar_id).await?;
-        Self::writable_calendar(&mut tx, &draft.calendar_id).await?;
-        Self::check_move(&mut tx, &master.calendar_id, &draft.calendar_id).await?;
+        Self::writable_calendar(tx, &master.calendar_id).await?;
+        Self::writable_calendar(tx, &draft.calendar_id).await?;
+        Self::check_move(tx, &master.calendar_id, &draft.calendar_id).await?;
         draft.validate()?;
         // If the edited occurrence was moved on its own, measure the change
         // from where it is displayed, not from its original slot.
-        let edited_override = match Self::load(&mut tx, occurrence).await {
+        let edited_override = match Self::load(tx, occurrence).await {
             Ok(row) => Some(row),
             Err(StorageError::NotFound(_)) => None,
             Err(e) => return Err(e),
@@ -793,14 +805,14 @@ impl Store {
             }
         };
         if let Some(rec) = &recurrence {
-            self.check_series_supported(&mut tx, &draft.calendar_id, &timing, rec)
+            self.check_series_supported(tx, &draft.calendar_id, &timing, rec)
                 .await?;
         }
         let keep_overrides = recurrence.is_some() && shift.is_some();
         if !keep_overrides {
             sqlx::query("DELETE FROM events WHERE series_id = ?")
                 .bind(&series_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
         if keep_overrides {
@@ -809,7 +821,7 @@ impl Store {
             sqlx::query("UPDATE events SET calendar_id = ? WHERE series_id = ?")
                 .bind(&draft.calendar_id)
                 .bind(&series_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             for (column, old, new) in [
                 ("title", &master.title, &draft.title),
@@ -830,7 +842,7 @@ impl Store {
                     .bind(new)
                     .bind(&series_id)
                     .bind(old)
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await?;
             }
         }
@@ -846,7 +858,7 @@ impl Store {
             updated_at: now(),
             ..master
         };
-        Self::update_row(&mut tx, &updated).await?;
+        Self::update_row(tx, &updated).await?;
         if let (true, Some(shift)) = (keep_overrides, shift) {
             if let Some(mut edited) = edited_override {
                 // The occurrence the user edited takes the new details too.
@@ -856,19 +868,158 @@ impl Store {
                 edited.timing = draft.timing.clone();
                 edited.revision += 1;
                 edited.updated_at = updated.updated_at;
-                Self::update_row(&mut tx, &edited).await?;
+                Self::update_row(tx, &edited).await?;
             }
-            Self::shift_overrides(&mut tx, &series_id, &shift).await?;
+            Self::shift_overrides(tx, &series_id, &shift).await?;
             if let Some(rec) = &updated.recurrence {
-                Self::prune_overrides(&mut tx, &series_id, &updated.timing, rec).await?;
+                Self::prune_overrides(tx, &series_id, &updated.timing, rec).await?;
             }
         }
         let mut updated = updated;
-        if let Some(status) = Self::touch_event(&mut tx, &updated.calendar_id, &series_id).await? {
+        if let Some(status) = Self::touch_event(tx, &updated.calendar_id, &series_id).await? {
             updated.sync_status = status;
         }
-        tx.commit().await?;
         Ok(updated)
+    }
+
+    /// Changes the occurrence `occurrence` and all later ones ("this and
+    /// following"): the series is split there, the later part becomes a new
+    /// series `new_id` (taking the later modified occurrences along), and
+    /// the edit is applied to it as to a whole series. A `draft.rrule` equal
+    /// to the series' rule means "unchanged" (a COUNT continues with what
+    /// remains). At the first occurrence this is [`Self::update_series`].
+    /// Returns the new series.
+    pub async fn update_following(
+        &self,
+        occurrence: &str,
+        new_id: &str,
+        draft: EventDraft,
+    ) -> Result<CalendarEvent> {
+        if new_id.is_empty() || new_id.contains(calendar_core::model::OCCURRENCE_SEPARATOR) {
+            return Err(StorageError::Unsupported("invalid event id"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let Some((master, key, split)) = Self::split_at(&mut tx, occurrence).await? else {
+            drop(tx);
+            return self.update_series(occurrence, draft).await;
+        };
+        // The series' own rule, unchanged in the form, continues as it was:
+        // with the remaining COUNT, not a fresh one.
+        let mut draft = draft;
+        if draft.rrule.as_deref() == master.recurrence.as_ref().map(|r| r.rrule.as_str()) {
+            draft.rrule = Some(split.after.rrule.clone());
+        }
+        let now = now();
+        let tail = CalendarEvent {
+            id: new_id.to_owned(),
+            timing: split.after_timing,
+            recurrence: Some(split.after),
+            series: None,
+            sync_status: SyncStatus::Saved,
+            revision: 1,
+            created_at: now,
+            updated_at: now,
+            ..master.clone()
+        };
+        Self::insert(&mut tx, &tail).await?;
+        for (id, recurrence_id) in Self::overrides_from(&mut tx, &master.id, &key).await? {
+            sqlx::query(
+                "UPDATE events SET id = ?, series_id = ?, remote_href = NULL, \
+                 base_recurrence_id = NULL WHERE id = ?",
+            )
+            .bind(occurrence_id(new_id, &recurrence_id))
+            .bind(new_id)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        Self::truncate_series(&mut tx, master, split.before).await?;
+        let mut edited = self
+            .update_series_in(&mut tx, &occurrence_id(new_id, &key), draft)
+            .await?;
+        if let Some(url) = Self::calendar_remote(&mut tx, &edited.calendar_id).await? {
+            Self::attach_new_object(&mut tx, &edited.calendar_id, &url, new_id).await?;
+            edited.sync_status = SyncStatus::PendingSync;
+        }
+        tx.commit().await?;
+        Ok(edited)
+    }
+
+    /// Deletes `occurrence` and all later occurrences of its series. At the
+    /// first occurrence this deletes the series.
+    pub async fn delete_following(&self, occurrence: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let Some((master, key, split)) = Self::split_at(&mut tx, occurrence).await? else {
+            drop(tx);
+            return self.delete_series(occurrence).await;
+        };
+        for (id, _) in Self::overrides_from(&mut tx, &master.id, &key).await? {
+            Self::delete_row(&mut tx, &id).await?;
+        }
+        Self::truncate_series(&mut tx, master, split.before).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The writable series of `occurrence` and its split there; `None` when
+    /// the occurrence is the series' first.
+    async fn split_at(
+        tx: &mut Transaction<'_, Sqlite>,
+        occurrence: &str,
+    ) -> Result<Option<(CalendarEvent, OccurrenceKey, recurrence::Split)>> {
+        let (series_id, key) = parse_occurrence_id(occurrence)
+            .ok_or_else(|| StorageError::NotFound(occurrence.to_owned()))?;
+        let master = Self::load(tx, series_id).await?;
+        Self::writable_calendar(tx, &master.calendar_id).await?;
+        let Some(rec) = &master.recurrence else {
+            return Err(StorageError::NotFound(occurrence.to_owned()));
+        };
+        let split = recurrence::split_series(&master.timing, rec, &key)?;
+        Ok(split.before.is_some().then_some((master, key, split)))
+    }
+
+    /// Override rows of `series_id` at or after `key`, as (id, recurrence id).
+    async fn overrides_from(
+        tx: &mut Transaction<'_, Sqlite>,
+        series_id: &str,
+        key: &OccurrenceKey,
+    ) -> Result<Vec<(String, OccurrenceKey)>> {
+        let rows = sqlx::query("SELECT id, recurrence_id FROM events WHERE series_id = ?")
+            .bind(series_id)
+            .fetch_all(&mut **tx)
+            .await?;
+        let mut later = Vec::new();
+        for row in rows {
+            let text: String = row.get("recurrence_id");
+            let recurrence_id: OccurrenceKey = text
+                .parse()
+                .map_err(|_| StorageError::Corrupt(format!("recurrence id: {text}")))?;
+            if std::mem::discriminant(&recurrence_id) == std::mem::discriminant(key)
+                && recurrence_id >= *key
+            {
+                later.push((row.get("id"), recurrence_id));
+            }
+        }
+        Ok(later)
+    }
+
+    /// Gives a series the shortened recurrence of a split and records the
+    /// change for sync.
+    async fn truncate_series(
+        tx: &mut Transaction<'_, Sqlite>,
+        master: CalendarEvent,
+        recurrence: Option<Recurrence>,
+    ) -> Result<()> {
+        let truncated = CalendarEvent {
+            recurrence,
+            revision: master.revision + 1,
+            updated_at: now(),
+            sync_status: SyncStatus::Saved,
+            ..master
+        };
+        Self::update_row(tx, &truncated).await?;
+        Self::touch_event(tx, &truncated.calendar_id, &truncated.id).await?;
+        Ok(())
     }
 
     /// Changes a single occurrence of a series (creating or updating its

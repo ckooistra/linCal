@@ -266,6 +266,56 @@ async fn microsoft_account_round_trip() {
     engine.sync_account(&id).await.unwrap();
     assert!(!shown(&store).await.contains(&s(2, "Daily")));
 
+    // "This and following" from the moved 3 June occurrence: the series
+    // keeps 1–2 June, a new series takes 3–5 June (with 4 June still
+    // cancelled), and the old exception is removed from the first series.
+    let moved = occurrences(&store)
+        .await
+        .into_iter()
+        .find(|o| o.title == "Stand-up (moved)")
+        .unwrap();
+    let mut d = as_draft(&moved);
+    d.title = "Daily (new)".into();
+    d.rrule = Some("FREQ=DAILY;COUNT=3".into());
+    store
+        .update_following(&moved.id, "local-tail", d)
+        .await
+        .unwrap();
+    assert_eq!(engine.sync_account(&id).await.unwrap().uploaded, 2);
+    {
+        let st = fake.state.lock().unwrap();
+        let events = &st.events["cal-1"];
+        assert_eq!(
+            events["S"].1["recurrence"]["range"]["numberOfOccurrences"],
+            2
+        );
+        assert!(!events.contains_key("S.2026-06-03"));
+        let (tail_id, tail) = events
+            .iter()
+            .find(|(_, (_, e))| e["subject"] == "Daily (new)" && e["type"] == "seriesMaster")
+            .map(|(id, (_, e))| (id.clone(), e.clone()))
+            .unwrap();
+        assert_eq!(tail["recurrence"]["range"]["numberOfOccurrences"], 3);
+        assert_eq!(st.cancelled[&tail_id], vec!["2026-06-04".to_owned()]);
+    }
+    engine.sync_account(&id).await.unwrap();
+    let again = engine.sync_account(&id).await.unwrap();
+    assert_eq!((again.uploaded, again.downloaded), (0, 0));
+    assert_eq!(
+        shown(&store).await,
+        vec![
+            s(1, "Planning"),
+            s(1, "Daily"),
+            s(3, "Daily (new)"),
+            s(5, "Daily (new)"),
+        ]
+    );
+    let tail_first = occurrences(&store)
+        .await
+        .into_iter()
+        .find(|o| o.title == "Daily (new)")
+        .unwrap();
+
     // A new weekly series: created with its pattern; nothing is duplicated.
     store
         .create_event("local-1", draft(&cal, "Gym", 12, Some("FREQ=WEEKLY")))
@@ -317,6 +367,7 @@ async fn microsoft_account_round_trip() {
     // Delete the series and the single event; a server-side deletion of
     // the gym series arrives by delta.
     store.delete_series(&first.id).await.unwrap();
+    store.delete_series(&tail_first.id).await.unwrap();
     let planning = occurrences(&store)
         .await
         .into_iter()

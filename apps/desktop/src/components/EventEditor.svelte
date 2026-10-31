@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import type { Calendar, CalendarEvent, EventDraft, EventTiming, Resolution } from "../types/calendar";
   import type { SeriesScope } from "../stores/events.svelte";
-  import { repeatOptions } from "../services/recurrence";
+  import { buildRule, defaultForm, isPreset, parseRule, REPEAT_PRESETS, type RuleForm } from "../services/recurrence";
+  import RepeatEditor from "./RepeatEditor.svelte";
   import TimeField from "./TimeField.svelte";
   import {
     addIsoDays,
@@ -22,8 +23,9 @@
     calendars: readonly Calendar[];
     defaultCalendarId: string | null;
     readOnly: boolean;
-    onsave: (draft: EventDraft) => string | null;
-    /** For recurring events: delete just this occurrence or the whole series. */
+    /** Saves; for an occurrence of a series, `scope` says which events change. */
+    onsave: (draft: EventDraft, scope: SeriesScope) => string | null;
+    /** For recurring events: this occurrence, it and the later ones, or the whole series. */
     ondelete: (scope: SeriesScope) => void;
     onclose: () => void;
     /** Resolve a sync conflict or failure for this event. */
@@ -90,15 +92,30 @@
   let calendarId = $state(init.calendarId);
   let location = $state(init.location);
   let description = $state(init.description);
-  let rrule = $state<string | null>(init.rrule);
   const recurring = untrack(() => event?.seriesId != null);
-  const repeatChoices = repeatOptions(init.rrule);
+  // Repeat: "none", a preset rule, "custom" (edited in RepeatEditor), or
+  // "keep" for a rule the custom editor cannot show (kept as it is).
+  const initStart = untrack(() => {
+    const t = event?.timing ?? timing;
+    return t.kind === "all-day" ? parseIsoDate(t.startDate) : new Date(t.start);
+  });
+  const initForm = parseRule(init.rrule, initStart);
+  let repeat = $state(
+    init.rrule === null ? "none" : isPreset(init.rrule) ? init.rrule : initForm ? "custom" : "keep",
+  );
+  let ruleForm = $state<RuleForm>(initForm ?? defaultForm(initStart));
+  const keptLabel = init.rrule === "" ? "On specific dates" : `Custom (${init.rrule})`;
   let allDay = $state(init.allDay);
   let startDate = $state(init.startDate);
   let endDate = $state(init.endDate);
   let startTime = $state(init.startTime);
   let endTime = $state(init.endTime);
+  /** The series start as currently entered, which custom rules are relative to. */
+  const ruleStart = $derived(combineDateTime(startDate, allDay ? "00:00" : startTime) ?? initStart);
   let error = $state<string | null>(null);
+  /** Asking which occurrences of the series a save or delete applies to. */
+  let choosing = $state.raw<{ action: "save"; draft: EventDraft } | { action: "delete" } | null>(null);
+  let scopeGroup = $state<HTMLDivElement>();
 
   let dialog: HTMLDivElement;
   let titleInput: HTMLInputElement;
@@ -178,14 +195,68 @@
       error = invalid;
       return;
     }
-    error = onsave({ calendarId, title: title.trim(), description, location, timing: t, rrule });
+    const draft: EventDraft = { calendarId, title: title.trim(), description, location, timing: t, rrule: currentRule(t) };
+    if (recurring && event) {
+      const { calendarId: c, title: ti, description: d, location: l, timing: tm, rrule: r } = event;
+      const unchanged = JSON.stringify(draft) === JSON.stringify({ calendarId: c, title: ti, description: d, location: l, timing: tm, rrule: r });
+      if (unchanged) return onclose();
+      void ask({ action: "save", draft });
+      return;
+    }
+    error = onsave(draft, "series");
+  }
+
+  function currentRule(t: EventTiming): string | null {
+    switch (repeat) {
+      case "none":
+        return null;
+      case "keep":
+        return init.rrule;
+      case "custom":
+        return buildRule(ruleForm, ruleStart, t.kind === "all-day" ? "date" : t.timeZone === null ? "floating" : "zoned");
+      default:
+        return repeat;
+    }
+  }
+
+  function chooseRepeat(value: string): void {
+    // Opening the custom editor starts from the rule chosen so far.
+    if (value === "custom" && repeat !== "keep") {
+      ruleForm = parseRule(repeat === "none" ? null : repeat, ruleStart) ?? defaultForm(ruleStart);
+    }
+    repeat = value;
+  }
+
+  async function ask(question: NonNullable<typeof choosing>): Promise<void> {
+    error = null;
+    choosing = question;
+    await tick();
+    scopeGroup?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
+  }
+
+  /** "This event" only fits changes a single occurrence can hold. */
+  const singleAllowed = $derived(
+    choosing?.action !== "save" ||
+      (choosing.draft.rrule === event?.rrule && choosing.draft.calendarId === event?.calendarId),
+  );
+
+  function choose(scope: SeriesScope): void {
+    const question = choosing;
+    if (!question) return;
+    if (question.action === "delete") {
+      ondelete(scope);
+      return;
+    }
+    choosing = null;
+    error = onsave(question.draft, scope);
   }
 
   function keydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      onclose();
+      if (choosing) choosing = null;
+      else onclose();
     } else if (e.key === "Tab") {
       trapFocus(e);
     }
@@ -253,10 +324,6 @@
       {/if}
       {#if readOnly}
         <p class="note" role="note">This calendar is read-only.</p>
-      {:else if recurring}
-        <p class="note" role="note">
-          Saving applies to every event in this series. Drag an event in the calendar to move just that one.
-        </p>
       {/if}
       <fieldset disabled={readOnly}>
         <label class="full">
@@ -301,12 +368,19 @@
         </div>
         <label class="full">
           <span>Repeat</span>
-          <select bind:value={rrule}>
-            {#each repeatChoices as choice (choice.rrule)}
-              <option value={choice.rrule}>{choice.label}</option>
+          <select value={repeat} onchange={(e) => chooseRepeat(e.currentTarget.value)}>
+            {#each REPEAT_PRESETS as preset (preset.rrule)}
+              <option value={preset.rrule ?? "none"}>{preset.label}</option>
             {/each}
+            <option value="custom">Custom…</option>
+            {#if repeat === "keep" || init.rrule !== null && !isPreset(init.rrule) && !initForm}
+              <option value="keep">{keptLabel}</option>
+            {/if}
           </select>
         </label>
+        {#if repeat === "custom"}
+          <RepeatEditor bind:form={ruleForm} start={ruleStart} />
+        {/if}
         <label class="full">
           <span>Location</span>
           <input bind:value={location} autocomplete="off" />
@@ -319,21 +393,44 @@
       {#if error}
         <p class="error" role="alert">{error}</p>
       {/if}
-      <div class="actions">
-        {#if event && !readOnly}
-          {#if recurring}
-            <button type="button" class="danger" onclick={() => ondelete("occurrence")}>Delete this event</button>
-            <button type="button" class="danger" onclick={() => ondelete("series")}>Delete series</button>
-          {:else}
-            <button type="button" class="danger" onclick={() => ondelete("occurrence")}>Delete</button>
+      {#if choosing}
+        <div class="scope" role="group" aria-labelledby="scope-question" bind:this={scopeGroup}>
+          <p id="scope-question">
+            {choosing.action === "save" ? "This is a repeating event. Save the changes for:" : "This is a repeating event. Delete:"}
+          </p>
+          <div class="scope-choices">
+            <button type="button" class:danger={choosing.action === "delete"} disabled={!singleAllowed} onclick={() => choose("occurrence")}>
+              This event
+            </button>
+            <button type="button" class:danger={choosing.action === "delete"} onclick={() => choose("following")}>
+              This and following events
+            </button>
+            <button type="button" class:danger={choosing.action === "delete"} onclick={() => choose("series")}>
+              All events
+            </button>
+            <span class="spacer"></span>
+            <button type="button" onclick={() => (choosing = null)}>Back</button>
+          </div>
+          {#if !singleAllowed}
+            <p class="hint">A new repeat rule or calendar can't apply to a single event.</p>
           {/if}
-        {/if}
-        <span class="spacer"></span>
-        <button type="button" onclick={onclose}>{readOnly ? "Close" : "Cancel"}</button>
-        {#if !readOnly}
-          <button type="submit" class="primary">Save</button>
-        {/if}
-      </div>
+        </div>
+      {:else}
+        <div class="actions">
+          {#if event && !readOnly}
+            <button
+              type="button"
+              class="danger"
+              onclick={() => (recurring ? void ask({ action: "delete" }) : ondelete("occurrence"))}>Delete</button
+            >
+          {/if}
+          <span class="spacer"></span>
+          <button type="button" onclick={onclose}>{readOnly ? "Close" : "Cancel"}</button>
+          {#if !readOnly}
+            <button type="submit" class="primary">Save</button>
+          {/if}
+        </div>
+      {/if}
     </form>
   </div>
 </div>
@@ -423,5 +520,25 @@
   }
   .actions button {
     white-space: nowrap;
+  }
+  .scope {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    border: 1px solid var(--uc-border);
+    border-radius: 8px;
+    background: var(--uc-surface-alt);
+  }
+  .scope p {
+    margin: 0 0 0.6rem;
+  }
+  .scope-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .scope .hint {
+    margin: 0.6rem 0 0;
+    font-size: 0.8rem;
+    color: var(--uc-text-muted);
   }
 </style>

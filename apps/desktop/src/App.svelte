@@ -449,10 +449,9 @@
     editor = null;
   }
 
-  function saveEditor(draft: EventDraft): string | null {
+  function saveEditor(draft: EventDraft, scope: SeriesScope): string | null {
     if (!editor) return null;
-    // The editor edits whole series; dragging moves single occurrences.
-    const result = editor.event ? store.update(editor.event.id, draft, "series") : store.create(draft);
+    const result = editor.event ? store.update(editor.event.id, draft, scope) : store.create(draft);
     if (!result.ok) return result.message;
     editor = null;
     return null;

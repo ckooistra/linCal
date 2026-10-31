@@ -21,8 +21,8 @@ export type StoreChange =
   | { type: "invalidated" }
   | { type: "reset" };
 
-/** For occurrences of a series: change just this one, or the whole series. */
-export type SeriesScope = "occurrence" | "series";
+/** For occurrences of a series: just this one, this and all later ones, or the whole series. */
+export type SeriesScope = "occurrence" | "following" | "series";
 
 export type MutationResult = { ok: true; id: EventId } | { ok: false; message: string };
 
@@ -239,7 +239,8 @@ export class EventStore {
 
   /**
    * Edit an event. For an occurrence of a recurring series, `scope` chooses
-   * between changing only this occurrence and changing the whole series.
+   * between changing only this occurrence, it and the later ones (the
+   * series is split), and the whole series.
    */
   update(id: EventId, draft: EventDraft, scope: SeriesScope = "occurrence"): MutationResult {
     const previous = this.#events.get(id);
@@ -264,8 +265,9 @@ export class EventStore {
     this.#set(optimistic);
     this.#wrote(id);
     const generation = this.#sourceGeneration;
-    const affectsOthers = effective === "series" || rrule !== previous.rrule;
-    this.#source.updateEvent(id, { ...draft, rrule }, effective).then(
+    const affectsOthers = effective === "series" || effective === "following" || rrule !== previous.rrule;
+    const newId = effective === "following" ? (this.#options.newId?.() ?? newEventId()) : undefined;
+    this.#source.updateEvent(id, { ...draft, rrule }, effective, newId).then(
       (saved) => {
         if (generation !== this.#sourceGeneration) return;
         this.#wrote(id);
@@ -296,7 +298,8 @@ export class EventStore {
 
   /**
    * Delete an event. For an occurrence of a series, `scope` chooses between
-   * cancelling this occurrence and deleting the whole series.
+   * cancelling this occurrence, ending the series before it, and deleting
+   * the whole series.
    */
   remove(id: EventId, scope: SeriesScope = "occurrence"): MutationResult {
     const previous = this.#events.get(id);
@@ -305,9 +308,15 @@ export class EventStore {
       return { ok: false, message: "This event belongs to a read-only calendar." };
     }
     const effective: EditScope = previous.seriesId ? scope : "event";
+    const from = previous.recurrenceId ?? "";
     const removed =
-      effective === "series"
-        ? [...this.#events.values()].filter((e) => e.seriesId === previous.seriesId)
+      effective === "series" || effective === "following"
+        ? [...this.#events.values()].filter(
+            (e) =>
+              e.seriesId === previous.seriesId &&
+              // Recurrence ids of one series share a sortable format.
+              (effective === "series" || (e.recurrenceId ?? "") >= from),
+          )
         : [previous];
     for (const event of removed) {
       this.#tombstones.add(event.id);

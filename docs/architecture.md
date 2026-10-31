@@ -120,9 +120,14 @@ The viewer's IANA zone is sent with every call, so all-day dates and floating ti
 |---|---|---|
 | Edit or drag a one-off event | `event` | `update_event` |
 | Drag one occurrence of a series | `occurrence` | `update_occurrence`: creates or updates an override row |
-| Save the editor on a series occurrence | `series` | `update_series`: the series start moves by the same offset; EXDATEs and overrides move with it. Text changes reach overrides that hadn't customised that field. "Does not repeat" turns the series into the edited event. |
-| Delete this event (series) | `occurrence` | `delete_occurrence`: adds an EXDATE and drops the override |
-| Delete series | `series` | `delete_series`: overrides are removed by `ON DELETE CASCADE` |
+| Editor on a series occurrence: *this event* | `occurrence` | `update_occurrence` (as dragging) |
+| Editor: *all events* | `series` | `update_series`: the series start moves by the same offset; EXDATEs and overrides move with it. Text changes reach overrides that hadn't customised that field. "Does not repeat" turns the series into the edited event. |
+| Editor: *this and following events* | `following` | `update_following`: `recurrence::split_series` ends the series before the occurrence (UNTIL at its last earlier occurrence, or the COUNT so far) and a new series (id chosen by the UI) starts there with the remaining COUNT. Later overrides, EXDATEs and RDATEs move to it; then `update_series` applies the edit to the new series. An unchanged rule continues as before. At the first occurrence this is `update_series`. |
+| Delete: *this event* | `occurrence` | `delete_occurrence`: adds an EXDATE and drops the override |
+| Delete: *this and following* | `following` | `delete_following`: ends the series before the occurrence and drops later overrides |
+| Delete: *all events* | `series` | `delete_series`: overrides are removed by `ON DELETE CASCADE` |
+
+UNTIL is stored as written (RFC 5545 wants a date for all-day series and a local time for floating ones). Before evaluation it is converted to the UTC form the `rrule` crate requires; until October 2026 such rules were rejected.
 
 ### Time and recurrence model
 

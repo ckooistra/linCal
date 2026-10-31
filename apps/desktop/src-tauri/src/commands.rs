@@ -143,6 +143,8 @@ pub enum Scope {
     Occurrence,
     /// The whole series the occurrence belongs to.
     Series,
+    /// The occurrence and all later ones (the series is split there).
+    Following,
 }
 
 #[tauri::command]
@@ -221,6 +223,7 @@ pub async fn update_event(
     draft: WireDraft,
     scope: Scope,
     time_zone: String,
+    new_id: Option<String>,
 ) -> CommandResult<WireEvent> {
     let tz = zone(&time_zone)?;
     let store = state.store()?;
@@ -229,6 +232,15 @@ pub async fn update_event(
         Scope::Event => store.update_event(&id, draft).await?.as_occurrence(),
         Scope::Occurrence => store.update_occurrence(&id, draft, tz).await?,
         Scope::Series => store.update_series(&id, draft).await?.as_occurrence(),
+        Scope::Following => {
+            let new_id = new_id.ok_or(StorageError::Unsupported(
+                "an id for the new series is required",
+            ))?;
+            store
+                .update_following(&id, &new_id, draft)
+                .await?
+                .as_occurrence()
+        }
     };
     state.changed(occurrence.sync_status);
     Ok(WireEvent::from_occurrence(&occurrence, &tz))
@@ -246,6 +258,7 @@ pub async fn delete_event(
         Scope::Event => store.delete_event(&id).await?,
         Scope::Occurrence => store.delete_occurrence(&id).await?,
         Scope::Series => store.delete_series(&id).await?,
+        Scope::Following => store.delete_following(&id).await?,
     }
     if remote {
         state.changed(calendar_core::SyncStatus::PendingSync);

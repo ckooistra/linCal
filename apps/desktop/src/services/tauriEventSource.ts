@@ -65,8 +65,8 @@ export class TauriEventSource implements EventSource {
     return invoke<CalendarEvent>("create_event", { id, draft, timeZone: this.timeZone });
   }
 
-  updateEvent(id: EventId, draft: EventDraft, scope: EditScope): Promise<CalendarEvent> {
-    return invoke<CalendarEvent>("update_event", { id, draft, scope, timeZone: this.timeZone });
+  updateEvent(id: EventId, draft: EventDraft, scope: EditScope, newId?: EventId): Promise<CalendarEvent> {
+    return invoke<CalendarEvent>("update_event", { id, draft, scope, timeZone: this.timeZone, newId: newId ?? null });
   }
 
   deleteEvent(id: EventId, scope: EditScope): Promise<void> {

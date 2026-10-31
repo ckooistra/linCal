@@ -32,11 +32,13 @@ export interface EventSource {
   /** Create with a client-generated stable id so optimistic UI and persistence agree. */
   createEvent(id: EventId, draft: EventDraft): Promise<CalendarEvent>;
   /**
-   * Update a one-off event, a single occurrence, or a whole series (`id` is
-   * then any occurrence id of it). Series updates return the series' first
-   * occurrence; callers should reload affected ranges.
+   * Update a one-off event, a single occurrence, the occurrence and all
+   * later ones, or a whole series (`id` is then any occurrence id of it).
+   * "following" splits the series and needs `newId` for the later part.
+   * Series updates return the series' first occurrence; callers should
+   * reload affected ranges.
    */
-  updateEvent(id: EventId, draft: EventDraft, scope: EditScope): Promise<CalendarEvent>;
+  updateEvent(id: EventId, draft: EventDraft, scope: EditScope, newId?: EventId): Promise<CalendarEvent>;
   deleteEvent(id: EventId, scope: EditScope): Promise<void>;
 }
 

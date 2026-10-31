@@ -84,9 +84,10 @@ export type EventDraft = Pick<
 
 /**
  * What an edit or delete applies to: a one-off event, a single occurrence
- * of a series, or the whole series.
+ * of a series, the occurrence and all later ones ("this and following"),
+ * or the whole series.
  */
-export type EditScope = "event" | "occurrence" | "series";
+export type EditScope = "event" | "occurrence" | "following" | "series";
 
 export function isRecurring(event: Pick<CalendarEvent, "seriesId">): boolean {
   return event.seriesId !== null;

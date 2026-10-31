@@ -206,6 +206,7 @@ describe("EventEditor keeps untouched times exactly (audit F09)", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(onsave).toHaveBeenCalledWith(
       expect.objectContaining({ title: "Night shift (renamed)", timing: event.timing }),
+      "series",
     );
   });
 });

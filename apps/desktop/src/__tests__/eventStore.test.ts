@@ -200,12 +200,22 @@ describe("EventStore with recurring occurrences", () => {
 
     store.update("s::0", { ...occ(0), title: "Moved" }, "occurrence");
     await flush();
-    expect(update).toHaveBeenLastCalledWith("s::0", expect.objectContaining({ title: "Moved" }), "occurrence");
+    expect(update).toHaveBeenLastCalledWith(
+      "s::0",
+      expect.objectContaining({ title: "Moved" }),
+      "occurrence",
+      undefined,
+    );
     expect(changes.some((c) => c.type === "invalidated")).toBe(false);
 
     store.update("s::1", { ...occ(1), title: "Daily sync" }, "series");
     await flush();
-    expect(update).toHaveBeenLastCalledWith("s::1", expect.objectContaining({ title: "Daily sync" }), "series");
+    expect(update).toHaveBeenLastCalledWith(
+      "s::1",
+      expect.objectContaining({ title: "Daily sync" }),
+      "series",
+      undefined,
+    );
     expect(changes.at(-1)).toEqual({ type: "invalidated" });
     expect(store.covers(june)).toBe(false);
   });
@@ -230,6 +240,30 @@ describe("EventStore with recurring occurrences", () => {
     expect(store.get("s::0")?.id).toBe("s::0");
     expect(store.get("s::2")?.id).toBe("s::2");
     expect(errors).toEqual(["The event could not be deleted."]);
+  });
+
+  it("splits a series from an occurrence with a new id, and drops later cached occurrences on delete", async () => {
+    const { store, source, changes, occ } = seriesSetup();
+    vi.spyOn(source, "queryRange").mockResolvedValue([occ(0), occ(1), occ(2)]);
+    await store.load(june, "visible");
+    const update = vi.spyOn(source, "updateEvent").mockResolvedValue({ ...occ(1), title: "Later" });
+    store.update("s::1", { ...occ(1), title: "Later" }, "following");
+    await flush();
+    expect(update).toHaveBeenLastCalledWith(
+      "s::1",
+      expect.objectContaining({ title: "Later" }),
+      "following",
+      "new-0",
+    );
+    expect(changes.at(-1)).toEqual({ type: "invalidated" });
+
+    await store.load(june, "visible");
+    const del = vi.spyOn(source, "deleteEvent").mockResolvedValue();
+    store.remove("s::1", "following");
+    expect(del).toHaveBeenCalledWith("s::1", "following");
+    expect(store.get("s::0")).toBeDefined();
+    expect(store.get("s::1")).toBeUndefined();
+    expect(store.get("s::2")).toBeUndefined();
   });
 
   it("cancels a single occurrence without touching the others", async () => {

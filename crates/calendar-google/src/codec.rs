@@ -356,6 +356,39 @@ impl ObjectCodec for GoogleCodec {
                         }));
                     }
                 }
+                // Exceptions the series no longer generates (it was cut
+                // short, e.g. by "this and following") are removed rather
+                // than left orphaned.
+                if let Some(m) = &content.master {
+                    for e in events
+                        .iter()
+                        .filter(|e| is_exception(e) && !is_cancelled(e))
+                    {
+                        let Some(key) = original_key(e) else { continue };
+                        let kept = content.overrides.iter().any(|o| {
+                            o.recurrence_id.is_some_and(|k| {
+                                k == key || renamed.iter().any(|(c, b)| *c == k && *b == key)
+                            })
+                        });
+                        let generated = match &m.recurrence {
+                            Some(rec) => calendar_core::recurrence::has_occurrence(
+                                &m.timing,
+                                rec,
+                                &key,
+                                &chrono_tz::UTC,
+                            )
+                            .unwrap_or(true),
+                            None => false,
+                        };
+                        if !kept && !generated {
+                            ops.push(json!({
+                                "method": "DELETE",
+                                "eventId": str_field(e, "id"),
+                                "etag": str_field(e, "etag"),
+                            }));
+                        }
+                    }
+                }
             }
         }
         json!({ "uid": uid, "ops": ops }).to_string()

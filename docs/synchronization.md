@@ -100,6 +100,13 @@ All event history is synced (the database is the local source). Rendering stays 
 | Crash during sync | Pull transactions are atomic; queued uploads are replayed |
 | Password missing from keyring | Account shows *Could not read the account password*; re-add the account |
 
+## Splitting a series ("this and following")
+
+A split is two ordinary changes: the original series is uploaded with its shortened rule, and the new series is created like any new event. Both go through the queue, version checks and conflicts as usual.
+
+- **Google and Microsoft:** exceptions on the server that the shortened rule no longer generates are removed explicitly (Google `DELETE`, Graph `DELETE` after the guarded master change), so none are left orphaned. The new series gets its own exceptions.
+- **Not carried over:** details this app doesn't edit (attendees, reminders, conferencing) stay with the original series. The new series starts without them, and without links to meeting invitations.
+
 ## Not yet supported
 
 - Moving events between calendars once a synchronized calendar is involved (needs a server-side move, or delete + create).

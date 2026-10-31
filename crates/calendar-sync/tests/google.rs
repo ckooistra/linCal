@@ -201,4 +201,73 @@ async fn google_account_round_trip() {
     }
     assert_eq!(engine.sync_account(&id).await.unwrap().downloaded, 1);
     assert_eq!(titles(&store).await, vec!["Daily (moved)"; 3]);
+
+    // The third occurrence gets its own title; then "this and following"
+    // from the second: the series is cut short, the later part (with that
+    // exception) becomes a new series, and nothing is duplicated.
+    let occ = store.query_range(june(), TZ).await.unwrap();
+    let mut third = occ[2].clone();
+    third.title = "Last one".into();
+    store
+        .update_occurrence(
+            &third.id,
+            EventDraft {
+                calendar_id: cal.clone(),
+                title: third.title.clone(),
+                description: String::new(),
+                location: String::new(),
+                timing: third.timing.clone(),
+                rrule: None,
+            },
+            TZ,
+        )
+        .await
+        .unwrap();
+    engine.sync_account(&id).await.unwrap();
+    let occ = store.query_range(june(), TZ).await.unwrap();
+    store
+        .update_following(
+            &occ[1].id,
+            "local-tail",
+            EventDraft {
+                calendar_id: cal.clone(),
+                title: "Later".into(),
+                description: String::new(),
+                location: String::new(),
+                timing: occ[1].timing.clone(),
+                rrule: Some("FREQ=DAILY;COUNT=2".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.sync_account(&id).await.unwrap().uploaded, 2);
+    {
+        let s = fake.state.lock().unwrap();
+        let events = &s.events["alice@example.com"];
+        assert_eq!(
+            events["abc"].1["recurrence"],
+            json!(["RRULE:FREQ=DAILY;COUNT=1"])
+        );
+        assert_eq!(events["abc_20260603T070000Z"].1["status"], "cancelled");
+        let tail = events
+            .values()
+            .find(|(_, e)| e["summary"] == "Later" && e.get("recurringEventId").is_none())
+            .unwrap();
+        assert_eq!(tail.1["recurrence"], json!(["RRULE:FREQ=DAILY;COUNT=2"]));
+        let tail_id = tail.1["id"].as_str().unwrap();
+        assert!(
+            events
+                .values()
+                .any(|(_, e)| e["recurringEventId"] == tail_id
+                    && e["summary"] == "Last one"
+                    && e["status"] != "cancelled")
+        );
+    }
+    engine.sync_account(&id).await.unwrap();
+    let again = engine.sync_account(&id).await.unwrap();
+    assert_eq!((again.uploaded, again.downloaded), (0, 0));
+    assert_eq!(
+        titles(&store).await,
+        vec!["Daily (moved)", "Last one", "Later"]
+    );
 }
