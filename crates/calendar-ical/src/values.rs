@@ -177,6 +177,15 @@ const WINDOWS_ZONES: &[(&str, &str)] = &[
     ("New Zealand Standard Time", "Pacific/Auckland"),
 ];
 
+/// The Windows name of an IANA zone, for servers that prefer those
+/// (Exchange/Outlook), when it is one of the common zones known here.
+pub fn windows_zone_name(tz: Tz) -> Option<&'static str> {
+    WINDOWS_ZONES
+        .iter()
+        .find(|(_, iana)| *iana == tz.name())
+        .map(|(windows, _)| *windows)
+}
+
 /// Maps a TZID to an IANA zone: IANA names directly, Mozilla-style path
 /// prefixes (`/mozilla.org/.../Europe/Berlin`), common Windows names, and
 /// the `X-LIC-LOCATION` of a matching VTIMEZONE.

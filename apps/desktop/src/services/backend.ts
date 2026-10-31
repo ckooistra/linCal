@@ -82,10 +82,6 @@ async function desktopBackend(): Promise<Backend> {
   let startupError: string | null = null;
   try {
     settings = await loadSettings();
-    // First run: seed a simulated dataset so there is something to look at.
-    if ((await source.listAccounts()).length === 0) {
-      await loadSimulatedDataset(datasetSize(settings), source.timeZone);
-    }
   } catch (error) {
     startupError = message(error);
   }

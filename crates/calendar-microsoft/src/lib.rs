@@ -3,17 +3,22 @@
 //! * Sync uses `calendarView/delta`, which is bound to a date window. The
 //!   opaque cursor stores the window and the delta link; when the window
 //!   needs to move forward, a full listing of the new window replaces it.
-//! * Objects are instances (single events, occurrences, exceptions); see
-//!   [`codec`] and `docs/decisions/0005-google-and-microsoft.md`.
-//! * hrefs: calendar `…/me/calendars/<id>/`, object `…/me/calendars/<id>/events/<event id>`.
-//!   Graph assigns ids on create; creates send `transactionId` so a retry
-//!   does not duplicate, and report the new href.
+//! * Objects are single events or whole series (master with exceptions and
+//!   cancellations); see [`codec`] and
+//!   `docs/decisions/0005-google-and-microsoft.md`. The delta reports
+//!   instances; a changed occurrence or exception marks its series, which
+//!   is then read again in one request.
+//! * hrefs: calendar `…/me/calendars/<id>/`, object
+//!   `…/me/calendars/<id>/events/<event or series master id>`. Graph assigns
+//!   ids on create; creates send `transactionId` so a retry does not
+//!   duplicate, and report the new href.
 
 pub mod codec;
+pub mod pattern;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,9 +35,19 @@ use serde_json::Value;
 use url::Url;
 
 pub use codec::GraphCodec;
+use codec::{MASTER, etag_of, exceptions, instance_key, is_series, plan_key};
 
 pub const API_BASE: &str = "https://graph.microsoft.com/v1.0/";
 pub const SCOPES: &[&str] = &["offline_access", "User.Read", "Calendars.ReadWrite"];
+
+/// What a series is read with: the master, its exceptions (expanded) and
+/// its cancelled occurrences (only returned when selected).
+const SERIES_SELECT: &str = "id,iCalUId,subject,body,location,start,end,isAllDay,isCancelled,\
+originalStartTimeZone,originalEndTimeZone,recurrence,type,seriesMasterId,originalStart,\
+cancelledOccurrences,exceptionOccurrences,changeKey";
+
+/// Versions of series start with this, so they are told apart from ETags.
+const SERIES_VERSION: &str = "series:";
 
 /// Days of the past and future mirrored from Microsoft calendars.
 const WINDOW_PAST_DAYS: i64 = 365;
@@ -100,8 +115,25 @@ fn invalid(what: &str) -> ProviderError {
     ProviderError::InvalidResponse(what.to_owned())
 }
 
-fn etag_of(e: &Value) -> Option<String> {
-    e["@odata.etag"].as_str().map(str::to_owned)
+/// Version of an object: the ETag of a single event; for a series, a hash
+/// over the master, its exceptions and its cancellations (FNV-1a).
+fn version_of(e: &Value) -> Option<String> {
+    if !is_series(e) {
+        return etag_of(e);
+    }
+    let mut parts: Vec<String> = exceptions(e)
+        .map(|x| format!("{}={}", x["id"], etag_of(x).unwrap_or_default()))
+        .collect();
+    parts.sort_unstable();
+    parts.push(etag_of(e).unwrap_or_default());
+    parts.push(e["cancelledOccurrences"].to_string());
+    let hash = parts
+        .join("|")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+    Some(format!("{SERIES_VERSION}{hash:016x}"))
 }
 
 /// (calendar href, event id or `None` for an object not created yet).
@@ -261,9 +293,92 @@ impl GraphProvider {
         let id = e["id"].as_str()?;
         Some(RemoteObject {
             href: format!("{calendar_href}events/{id}"),
-            etag: etag_of(e),
+            etag: version_of(e),
             data: e.to_string(),
         })
+    }
+
+    /// A series master with its exceptions and cancellations; `None` if it
+    /// is gone.
+    async fn fetch_series(&self, master_id: &str) -> ProviderResult<Option<Value>> {
+        let mut url = self.event_url(master_id)?;
+        url.query_pairs_mut()
+            .append_pair("$select", SERIES_SELECT)
+            .append_pair("$expand", "exceptionOccurrences");
+        let (status, e) = self
+            .send(
+                Method::GET,
+                url.as_str(),
+                None,
+                None,
+                &[StatusCode::NOT_FOUND],
+            )
+            .await?;
+        Ok((status.is_success() && e["isCancelled"].as_bool() != Some(true)).then_some(e))
+    }
+
+    /// An event as stored here: a single event, or its whole series.
+    async fn read_event(&self, id: &str) -> ProviderResult<Option<Value>> {
+        let (status, e) = self
+            .send(
+                Method::GET,
+                self.event_url(id)?.as_str(),
+                None,
+                None,
+                &[StatusCode::NOT_FOUND],
+            )
+            .await?;
+        if !status.is_success() || e["isCancelled"].as_bool() == Some(true) {
+            return Ok(None);
+        }
+        if is_series(&e) {
+            return self.fetch_series(id).await;
+        }
+        Ok(Some(e))
+    }
+
+    /// The id of the occurrence of `master_id` that started at `key`.
+    async fn find_instance(
+        &self,
+        master_id: &str,
+        key: &calendar_core::OccurrenceKey,
+    ) -> ProviderResult<Option<String>> {
+        let Some(master) = self.read_event(master_id).await? else {
+            return Ok(None);
+        };
+        let day = match key {
+            calendar_core::OccurrenceKey::Instant(t) => t.date_naive(),
+            calendar_core::OccurrenceKey::Floating(t) => t.date(),
+            calendar_core::OccurrenceKey::Date(d) => *d,
+        };
+        let mut url = self.event_url(master_id)?;
+        url.path_segments_mut()
+            .map_err(|_| invalid("bad API URL"))?
+            .push("instances");
+        url.query_pairs_mut()
+            .append_pair(
+                "startDateTime",
+                &format!("{}T00:00:00Z", day - chrono::Duration::days(2)),
+            )
+            .append_pair(
+                "endDateTime",
+                &format!("{}T00:00:00Z", day + chrono::Duration::days(2)),
+            );
+        let mut found = None;
+        self.pages(
+            url.to_string(),
+            |page| {
+                for i in page["value"].as_array().into_iter().flatten() {
+                    if found.is_none() && instance_key(i, &master).as_ref() == Some(key) {
+                        found = i["id"].as_str().map(str::to_owned);
+                    }
+                }
+            },
+            &[],
+        )
+        .await?
+        .map_err(|s| invalid(&format!("HTTP {s}")))?;
+        Ok(found)
     }
 
     /// The signed-in user's e-mail address.
@@ -398,22 +513,34 @@ impl CalendarProvider for GraphProvider {
 
         let mut changes = ChangeSet::default();
         let mut listed = HashSet::new();
-        let known_map: std::collections::HashMap<&str, Option<&str>> = known
+        let mut deleted = BTreeSet::new();
+        let known_map: HashMap<&str, Option<&str>> = known
             .iter()
             .map(|(h, e)| (h.as_str(), e.as_deref()))
             .collect();
+        // Series to read again, by master id.
+        let mut series = BTreeSet::new();
+        let mut unknown_removal = false;
         for e in &items {
             let Some(id) = e["id"].as_str() else { continue };
+            // Occurrences and exceptions stand for their series.
+            if let Some(master) = e["seriesMasterId"].as_str() {
+                series.insert(master.to_owned());
+                continue;
+            }
             let href = format!("{}events/{id}", calendar.href);
             if e.get("@removed").is_some() || e["isCancelled"].as_bool() == Some(true) {
                 if known_map.contains_key(href.as_str()) {
-                    changes.deleted.push(href);
+                    deleted.insert(href);
+                } else {
+                    // Removed entries carry only an id: this may have been
+                    // an occurrence of a known series.
+                    unknown_removal = true;
                 }
                 continue;
             }
-            // Series masters carry no times of their own here; their
-            // occurrences are listed individually.
-            if e["type"].as_str() == Some("seriesMaster") {
+            if is_series(e) {
+                series.insert(id.to_owned());
                 continue;
             }
             listed.insert(href.clone());
@@ -423,14 +550,41 @@ impl CalendarProvider for GraphProvider {
                 changes.upserted.push(object);
             }
         }
+        if unknown_removal && incremental {
+            series.extend(
+                known
+                    .iter()
+                    .filter(|(_, v)| v.as_deref().is_some_and(|v| v.starts_with(SERIES_VERSION)))
+                    .filter_map(|(h, _)| split_href(h).ok()?.1),
+            );
+        }
+        for master in series {
+            let href = format!("{}events/{master}", calendar.href);
+            match self.fetch_series(&master).await? {
+                Some(e) => {
+                    listed.insert(href.clone());
+                    if let Some(object) = self.object(&calendar.href, &e)
+                        && known_map.get(href.as_str()).copied().flatten() != object.etag.as_deref()
+                    {
+                        changes.upserted.push(object);
+                    }
+                }
+                None => {
+                    if known_map.contains_key(href.as_str()) {
+                        deleted.insert(href);
+                    }
+                }
+            }
+        }
         if !incremental {
-            changes.deleted.extend(
+            deleted.extend(
                 known_map
                     .keys()
                     .filter(|h| !listed.contains(**h))
                     .map(|h| (*h).to_owned()),
             );
         }
+        changes.deleted.extend(deleted);
         changes.cursor = delta_link
             .map(|link| {
                 serde_json::to_string(&Cursor {
@@ -450,41 +604,88 @@ impl CalendarProvider for GraphProvider {
         payload: &str,
         precondition: &Precondition,
     ) -> ProviderResult<WriteResult> {
-        let (calendar, id) = split_href(href)?;
+        let (calendar, mut master_id) = split_href(href)?;
         let plan: Value = serde_json::from_str(payload).map_err(|_| invalid("bad write plan"))?;
-        let body = &plan["body"];
-        let (_, event) = match (plan["method"].as_str(), &id) {
-            (Some("POST"), None) => {
-                let url = self.url(&format!("me/calendars/{}/events", segment(&calendar)))?;
-                self.send(Method::POST, url.as_str(), None, Some(body), &[])
-                    .await?
-            }
-            (Some("PATCH" | "POST"), Some(id)) => {
-                let etag = match precondition {
-                    Precondition::Overwrite => None,
-                    _ => plan["etag"].as_str(),
-                };
-                let url = self.event_url(id)?;
-                if body.as_object().is_some_and(|b| b.is_empty()) {
-                    self.send(Method::GET, url.as_str(), None, None, &[])
-                        .await?
-                } else {
-                    let mut patch = body.clone();
-                    if let Some(map) = patch.as_object_mut() {
-                        map.remove("transactionId");
+        let conditional = !matches!(precondition, Precondition::Overwrite);
+        for step in plan["ops"].as_array().into_iter().flatten() {
+            let body = &step["body"];
+            let empty = body.as_object().is_some_and(|b| b.is_empty());
+            match step["op"].as_str() {
+                Some("create") => {
+                    if master_id.is_some() {
+                        // Created already (a retry): the rest are changes.
+                        continue;
                     }
-                    self.send(Method::PATCH, url.as_str(), etag, Some(&patch), &[])
-                        .await?
+                    let url = self.url(&format!("me/calendars/{}/events", segment(&calendar)))?;
+                    let (_, created) = self
+                        .send(Method::POST, url.as_str(), None, Some(body), &[])
+                        .await?;
+                    master_id = Some(
+                        created["id"]
+                            .as_str()
+                            .ok_or_else(|| invalid("created event without an id"))?
+                            .to_owned(),
+                    );
                 }
+                Some("patch") => {
+                    let id = match step["id"].as_str() {
+                        Some(MASTER) | None => master_id.clone(),
+                        Some(id) => Some(id.to_owned()),
+                    }
+                    .ok_or_else(|| invalid("change to an event not created yet"))?;
+                    if !empty {
+                        let etag = step["etag"].as_str().filter(|_| conditional);
+                        let url = self.event_url(&id)?;
+                        self.send(Method::PATCH, url.as_str(), etag, Some(body), &[])
+                            .await?;
+                    }
+                }
+                Some(op @ ("patchInstance" | "cancelInstance")) => {
+                    let master = master_id
+                        .as_deref()
+                        .ok_or_else(|| invalid("change to a series not created yet"))?;
+                    let key = plan_key(&step["key"]).ok_or_else(|| invalid("bad occurrence"))?;
+                    // An occurrence that does not exist (any more) needs no
+                    // change; reading the series back shows what is there.
+                    let Some(instance) = self.find_instance(master, &key).await? else {
+                        continue;
+                    };
+                    let url = self.event_url(&instance)?;
+                    if op == "cancelInstance" {
+                        self.send(
+                            Method::DELETE,
+                            url.as_str(),
+                            None,
+                            None,
+                            &[StatusCode::NOT_FOUND],
+                        )
+                        .await?;
+                    } else if !empty {
+                        self.send(Method::PATCH, url.as_str(), None, Some(body), &[])
+                            .await?;
+                    }
+                }
+                _ => return Err(invalid("unsupported write")),
             }
-            _ => return Err(invalid("unsupported write")),
-        };
+        }
+        let id = master_id.ok_or_else(|| invalid("nothing was written"))?;
+        let event = self
+            .read_event(&id)
+            .await?
+            .ok_or_else(|| ProviderError::NotFound(href.to_owned()))?;
         let object = self
             .object(&calendar, &event)
             .ok_or_else(|| invalid("event without an id"))?;
         Ok(WriteResult {
             href: object.href,
-            etag: object.etag,
+            // Graph may adjust a series beyond what was sent (e.g. drop
+            // exceptions when the pattern changes): an unconfirmed version
+            // makes the next sync read and apply the server's result.
+            etag: if is_series(&event) {
+                Some(format!("{SERIES_VERSION}unconfirmed"))
+            } else {
+                object.etag
+            },
             data: Some(object.data),
         })
     }
@@ -493,28 +694,33 @@ impl CalendarProvider for GraphProvider {
         let (calendar, Some(id)) = split_href(href)? else {
             return Ok(None);
         };
-        let (status, event) = self
-            .send(
-                Method::GET,
-                self.event_url(&id)?.as_str(),
-                None,
-                None,
-                &[StatusCode::NOT_FOUND],
-            )
-            .await?;
-        Ok(
-            if status.is_success() && event["isCancelled"].as_bool() != Some(true) {
-                self.object(&calendar, &event)
-            } else {
-                None
-            },
-        )
+        Ok(self
+            .read_event(&id)
+            .await?
+            .and_then(|e| self.object(&calendar, &e)))
     }
 
     async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()> {
         let (_, Some(id)) = split_href(href)? else {
             return Ok(());
         };
+        // A series version is not an ETag: compare it, then delete
+        // conditionally on the master's own ETag.
+        let etag = match version {
+            Some(v) if v.starts_with(SERIES_VERSION) => {
+                let Some(current) = self.read_event(&id).await? else {
+                    return Ok(());
+                };
+                // Just written here, not read back yet: nothing to compare.
+                let unconfirmed = v == format!("{SERIES_VERSION}unconfirmed");
+                if !unconfirmed && version_of(&current).as_deref() != Some(v) {
+                    return Err(ProviderError::PreconditionFailed);
+                }
+                etag_of(&current)
+            }
+            v => v.map(str::to_owned),
+        };
+        let version = etag.as_deref();
         self.send(
             Method::DELETE,
             self.event_url(&id)?.as_str(),

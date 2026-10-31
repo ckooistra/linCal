@@ -9,9 +9,8 @@ pub type AccountId = String;
 pub type CalendarId = String;
 pub type EventId = String;
 
-/// Kinds of account the architecture plans for. Only `Local` and
-/// `Simulated` exist before Milestone 3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Kinds of account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     Local,

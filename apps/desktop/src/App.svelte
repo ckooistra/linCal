@@ -598,9 +598,9 @@
     startupError ??
       store.loadError ??
       (benchStatus ||
-        `${datasetSize.toLocaleString()} simulated events · ${calendars.calendars.length} calendars · ${
-          backend.kind === "desktop" ? "saved locally" : "browser preview (not saved)"
-        }`),
+        (backend.kind === "desktop"
+          ? `${calendars.calendars.length} calendars · saved locally`
+          : `${datasetSize.toLocaleString()} simulated events · ${calendars.calendars.length} calendars · browser preview (not saved)`)),
   );
 </script>
 

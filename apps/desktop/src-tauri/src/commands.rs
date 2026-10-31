@@ -94,7 +94,7 @@ impl From<StorageError> for CommandError {
             StorageError::ReadOnly(_) => "read-only",
             StorageError::UnknownCalendar(_) => "unknown-calendar",
             StorageError::AlreadyExists(_) => "already-exists",
-            StorageError::Unsupported(_) => "unsupported",
+            StorageError::Unsupported(_) | StorageError::UnsupportedRecurrence(_) => "unsupported",
             StorageError::Database(_)
             | StorageError::Migration(_)
             | StorageError::Corrupt(_)

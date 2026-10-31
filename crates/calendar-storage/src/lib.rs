@@ -54,6 +54,9 @@ pub enum StorageError {
     AlreadyExists(String),
     #[error("not supported: {0}")]
     Unsupported(&'static str),
+    /// A repeat rule the calendar's provider cannot hold.
+    #[error("{0}")]
+    UnsupportedRecurrence(String),
     #[error("stored data is corrupt: {0}")]
     Corrupt(String),
     #[error("a background task failed")]
@@ -64,10 +67,16 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Says whether a provider can hold a series (`Err` explains why not).
+pub type RecurrenceCheck =
+    fn(&calendar_core::EventTiming, &Recurrence) -> std::result::Result<(), String>;
+
 /// Handle to the calendar database. Cheap to clone.
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    /// Per provider kind: limits on the series its calendars can hold.
+    recurrence_checks: std::sync::Arc<std::sync::RwLock<HashMap<ProviderKind, RecurrenceCheck>>>,
     /// Bounds concurrent decode/expansion jobs: rapid navigation must not
     /// pile up CPU work for ranges nobody looks at any more.
     expansions: std::sync::Arc<tokio::sync::Semaphore>,
@@ -124,9 +133,19 @@ impl Store {
         let store = Self {
             pool,
             expansions: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_EXPANSIONS)),
+            recurrence_checks: std::sync::Arc::default(),
         };
         store.run_fixups().await?;
         Ok(store)
+    }
+
+    /// Registers the limits on series in `provider`'s calendars, checked
+    /// whenever a series is created or its timing or rule changes there.
+    pub fn set_recurrence_check(&self, provider: ProviderKind, check: RecurrenceCheck) {
+        self.recurrence_checks
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(provider, check);
     }
 
     pub async fn close(&self) {
@@ -464,11 +483,14 @@ impl Store {
         Ok(())
     }
 
-    /// Microsoft calendars are mirrored occurrence by occurrence (ADR 0005):
-    /// repeating events cannot be created there, nor series edited.
+    /// Refuses a series that the calendar's provider cannot hold (see
+    /// [`Store::set_recurrence_check`]).
     async fn check_series_supported(
+        &self,
         tx: &mut Transaction<'_, Sqlite>,
         calendar_id: &str,
+        timing: &calendar_core::EventTiming,
+        recurrence: &Recurrence,
     ) -> Result<()> {
         let provider: Option<String> = sqlx::query_scalar(
             "SELECT a.provider FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?",
@@ -476,12 +498,19 @@ impl Store {
         .bind(calendar_id)
         .fetch_optional(&mut **tx)
         .await?;
-        if provider.as_deref() == Some("microsoft") {
-            return Err(StorageError::Unsupported(
-                "repeating events in Microsoft calendars cannot be created or edited here yet; edit single occurrences instead",
-            ));
+        let Some(kind) = provider.as_deref().and_then(ProviderKind::parse) else {
+            return Ok(());
+        };
+        let check = self
+            .recurrence_checks
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&kind)
+            .copied();
+        match check {
+            Some(check) => check(timing, recurrence).map_err(StorageError::UnsupportedRecurrence),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Events of synchronized calendars cannot change calendar yet (that
@@ -555,8 +584,9 @@ impl Store {
         let mut event = event;
         let mut tx = self.pool.begin().await?;
         Self::writable_calendar(&mut tx, &event.calendar_id).await?;
-        if event.recurrence.is_some() {
-            Self::check_series_supported(&mut tx, &event.calendar_id).await?;
+        if let Some(rec) = &event.recurrence {
+            self.check_series_supported(&mut tx, &event.calendar_id, &event.timing, rec)
+                .await?;
         }
         Self::insert(&mut tx, &event).await?;
         if let Some(url) = Self::calendar_remote(&mut tx, &event.calendar_id).await? {
@@ -607,8 +637,11 @@ impl Store {
         {
             Self::prune_overrides(&mut tx, id, &draft.timing, rec).await?;
         }
-        if recurrence.is_some() && current.recurrence != recurrence {
-            Self::check_series_supported(&mut tx, &draft.calendar_id).await?;
+        if let Some(rec) = &recurrence
+            && (current.recurrence.as_ref() != Some(rec) || current.timing != draft.timing)
+        {
+            self.check_series_supported(&mut tx, &draft.calendar_id, &draft.timing, rec)
+                .await?;
         }
         let updated = CalendarEvent {
             calendar_id: draft.calendar_id,
@@ -651,7 +684,6 @@ impl Store {
         Self::writable_calendar(&mut tx, &master.calendar_id).await?;
         Self::writable_calendar(&mut tx, &draft.calendar_id).await?;
         Self::check_move(&mut tx, &master.calendar_id, &draft.calendar_id).await?;
-        Self::check_series_supported(&mut tx, &master.calendar_id).await?;
         draft.validate()?;
         // If the edited occurrence was moved on its own, measure the change
         // from where it is displayed, not from its original slot.
@@ -684,6 +716,10 @@ impl Store {
                 )
             }
         };
+        if let Some(rec) = &recurrence {
+            self.check_series_supported(&mut tx, &draft.calendar_id, &timing, rec)
+                .await?;
+        }
         let keep_overrides = recurrence.is_some() && shift.is_some();
         if !keep_overrides {
             sqlx::query("DELETE FROM events WHERE series_id = ?")
@@ -942,6 +978,15 @@ impl Store {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Deletes all *simulated* accounts with their calendars and events.
+    /// Returns whether there were any.
+    pub async fn remove_simulated(&self) -> Result<bool> {
+        let done = sqlx::query("DELETE FROM accounts WHERE provider = 'simulated'")
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() > 0)
     }
 
     // --- settings ---------------------------------------------------------

@@ -271,6 +271,8 @@ impl SyncEngine {
         providers: ProviderFactory,
         listener: Listener,
     ) -> Self {
+        // Outlook can hold fewer repeat rules than iCalendar.
+        store.set_recurrence_check(ProviderKind::Microsoft, calendar_microsoft::pattern::check);
         Self {
             store,
             credentials,

@@ -3,6 +3,12 @@
 //! with paging, delta links, `@removed` entries and 410 for expired delta
 //! state, event get/create (with `transactionId`)/patch/delete with ETags,
 //! and 401 for expired access tokens.
+//!
+//! Series: masters (with daily or weekly patterns) are reported in the
+//! delta by one occurrence each, as Graph reports instances; a master read
+//! with `$expand` carries its exceptions and cancelled occurrences;
+//! `instances` lists occurrences with ids `<master>.<date>`, which can be
+//! patched (becoming exceptions) or deleted (cancelled).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -23,6 +29,8 @@ pub struct State {
     pub page_size: usize,
     pub next_id: u64,
     pub requests: Vec<String>,
+    /// Series master id → cancelled dates (`yyyy-mm-dd`).
+    pub cancelled: BTreeMap<String, Vec<String>>,
 }
 
 impl State {
@@ -48,11 +56,73 @@ impl State {
             .push((seq, id.into()));
     }
 
+    /// A copy of a stored event, with the change counter bumped.
+    pub fn touch(&mut self, id: &str) {
+        if let Some((cal, e)) = self.find(id) {
+            self.put(&cal, e);
+        }
+    }
+
     fn find(&self, id: &str) -> Option<(String, Value)> {
         self.events
             .iter()
             .find_map(|(cal, events)| events.get(id).map(|(_, e)| (cal.clone(), e.clone())))
     }
+}
+
+fn utc(t: &Value) -> Option<chrono::NaiveDateTime> {
+    let raw = t["dateTime"].as_str()?;
+    let naive =
+        chrono::NaiveDateTime::parse_from_str(raw.split('.').next()?, "%Y-%m-%dT%H:%M:%S").ok()?;
+    let zone = t["timeZone"].as_str().unwrap_or("UTC");
+    let tz = calendar_ical::values::resolve_tzid(zone, &calendar_ical::Component::new("X"))?;
+    Some(calendar_core::timing::resolve_local(&tz, naive).naive_utc())
+}
+
+fn utc_value(t: chrono::NaiveDateTime) -> Value {
+    json!({"dateTime": format!("{}.0000000", t.format("%Y-%m-%dT%H:%M:%S")), "timeZone": "UTC"})
+}
+
+/// Stores times in UTC, as Graph returns them with the Prefer header, and
+/// remembers the zone they were given in.
+fn normalise_times(e: &mut Value) {
+    for key in ["start", "end"] {
+        let zone = e[key]["timeZone"].as_str().unwrap_or("UTC").to_owned();
+        if zone != "UTC"
+            && let Some(t) = utc(&e[key])
+        {
+            if key == "start" {
+                e["originalStartTimeZone"] = json!(zone);
+            }
+            e[key] = utc_value(t);
+        }
+    }
+}
+
+/// Occurrences of a daily/weekly series master (exceptions not applied).
+fn occurrences(master: &Value) -> Vec<(chrono::NaiveDateTime, chrono::Duration)> {
+    let (Some(start), Some(end)) = (utc(&master["start"]), utc(&master["end"])) else {
+        return Vec::new();
+    };
+    let pattern = &master["recurrence"]["pattern"];
+    let range = &master["recurrence"]["range"];
+    let interval = pattern["interval"].as_i64().unwrap_or(1);
+    let step = match pattern["type"].as_str() {
+        Some("weekly") => 7 * interval,
+        _ => interval,
+    };
+    let count = match range["type"].as_str() {
+        Some("numbered") => range["numberOfOccurrences"].as_i64().unwrap_or(1),
+        _ => 400,
+    };
+    let until = range["endDate"]
+        .as_str()
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+    (0..count)
+        .map(|n| start + chrono::Duration::days(n * step))
+        .take_while(|t| until.is_none_or(|u| t.date() <= u))
+        .map(|t| (t, end - start))
+        .collect()
 }
 
 pub struct FakeGraph {
@@ -130,7 +200,15 @@ impl Respond for Handler {
                     .into_iter()
                     .flatten()
                     .filter(|(_, (seq, _))| since.is_none_or(|t| *seq > t))
-                    .map(|(_, (_, e))| e.clone())
+                    .map(|(_, (_, e))| {
+                        if e["type"] == "seriesMaster" {
+                            let id = e["id"].as_str().unwrap_or_default();
+                            json!({"id": format!("{id}.first"), "type": "occurrence",
+                                   "seriesMasterId": id, "start": e["start"], "end": e["end"]})
+                        } else {
+                            e.clone()
+                        }
+                    })
                     .collect();
                 if let Some(t) = since {
                     for (seq, id) in s.removed.get(*cal).into_iter().flatten() {
@@ -171,16 +249,103 @@ impl Respond for Handler {
                 s.next_id += 1;
                 let id = format!("AAMk{}", s.next_id);
                 body["id"] = json!(id);
-                body["type"] = json!("singleInstance");
+                body["type"] = json!(if body["recurrence"].is_object() {
+                    "seriesMaster"
+                } else {
+                    "singleInstance"
+                });
+                normalise_times(&mut body);
                 s.put(&cal, body);
                 json_response(201, s.events[&cal][&id].1.clone())
             }
             ("GET", ["me", "events", id]) => match s.find(id) {
-                Some((_, e)) => json_response(200, e),
+                Some((_, mut e)) => {
+                    if e["type"] == "seriesMaster"
+                        && q.get("$expand")
+                            .is_some_and(|x| x == "exceptionOccurrences")
+                    {
+                        let exceptions: Vec<Value> = s
+                            .events
+                            .values()
+                            .flat_map(|events| events.values())
+                            .filter(|(_, x)| x["seriesMasterId"].as_str() == Some(*id))
+                            .map(|(seq, x)| {
+                                let mut x = x.clone();
+                                // Expanded events carry a change key, no ETag.
+                                x.as_object_mut().unwrap().remove("@odata.etag");
+                                x["changeKey"] = json!(seq.to_string());
+                                x
+                            })
+                            .collect();
+                        e["exceptionOccurrences"] = json!(exceptions);
+                        let cancelled: Vec<String> = s
+                            .cancelled
+                            .get(*id)
+                            .into_iter()
+                            .flatten()
+                            .map(|d| format!("OID.{id}.{d}"))
+                            .collect();
+                        e["cancelledOccurrences"] = json!(cancelled);
+                    }
+                    json_response(200, e)
+                }
                 None => error(404, "ErrorItemNotFound"),
             },
+            ("GET", ["me", "events", id, "instances"]) => {
+                let Some((_, master)) = s.find(id) else {
+                    return error(404, "ErrorItemNotFound");
+                };
+                let bound = |k: &str| {
+                    q.get(k).and_then(|v| {
+                        chrono::NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M:%SZ").ok()
+                    })
+                };
+                let (from, to) = (bound("startDateTime"), bound("endDateTime"));
+                let cancelled = s.cancelled.get(*id).cloned().unwrap_or_default();
+                let mut items = Vec::new();
+                for (start, length) in occurrences(&master) {
+                    let date = start.date().format("%Y-%m-%d").to_string();
+                    let instance_id = format!("{id}.{date}");
+                    if cancelled.contains(&date)
+                        || from.is_some_and(|f| start + length <= f)
+                        || to.is_some_and(|t| start >= t)
+                    {
+                        continue;
+                    }
+                    let original = format!("{}Z", start.format("%Y-%m-%dT%H:%M:%S"));
+                    items.push(match s.find(&instance_id) {
+                        Some((_, x)) => x,
+                        None => json!({
+                            "id": instance_id, "type": "occurrence", "seriesMasterId": id,
+                            "originalStart": original, "subject": master["subject"],
+                            "start": utc_value(start), "end": utc_value(start + length),
+                        }),
+                    });
+                }
+                json_response(200, json!({"value": items}))
+            }
             ("PATCH", ["me", "events", id]) => {
-                let Some((cal, mut e)) = s.find(id) else {
+                let found = s.find(id).or_else(|| {
+                    // An occurrence: patching it creates the exception.
+                    let (master_id, date) = id.rsplit_once('.')?;
+                    let (cal, master) = s.find(master_id)?;
+                    let (start, length) = occurrences(&master)
+                        .into_iter()
+                        .find(|(t, _)| t.date().format("%Y-%m-%d").to_string() == date)?;
+                    let mut x = master.clone();
+                    let x = x.as_object_mut()?;
+                    x.remove("recurrence");
+                    x.remove("@odata.etag");
+                    let mut x = Value::Object(x.clone());
+                    x["id"] = json!(id);
+                    x["type"] = json!("occurrence");
+                    x["seriesMasterId"] = json!(master_id);
+                    x["originalStart"] = json!(format!("{}Z", start.format("%Y-%m-%dT%H:%M:%S")));
+                    x["start"] = utc_value(start);
+                    x["end"] = utc_value(start + length);
+                    Some((cal, x))
+                });
+                let Some((cal, mut e)) = found else {
                     return error(404, "ErrorItemNotFound");
                 };
                 if let Some(m) = req.headers.get("if-match").and_then(|v| v.to_str().ok())
@@ -192,6 +357,10 @@ impl Respond for Handler {
                 for (k, v) in patch.as_object().unwrap() {
                     e[k] = v.clone();
                 }
+                normalise_times(&mut e);
+                if e["recurrence"].is_null() && e["type"] == "seriesMaster" {
+                    e["type"] = json!("singleInstance");
+                }
                 if e["type"] == "occurrence" {
                     e["type"] = json!("exception");
                 }
@@ -200,6 +369,22 @@ impl Respond for Handler {
                 json_response(200, s.find(&id).unwrap().1)
             }
             ("DELETE", ["me", "events", id]) => {
+                if let Some((master_id, date)) = id.rsplit_once('.')
+                    && let Some((cal, _)) = s.find(master_id)
+                {
+                    // Cancelling an occurrence (or an exception).
+                    let (master_id, date, id) =
+                        (master_id.to_owned(), date.to_owned(), id.to_string());
+                    if let Some(events) = s.events.get_mut(&cal) {
+                        events.remove(&id);
+                    }
+                    s.cancelled.entry(master_id.clone()).or_default().push(date);
+                    s.seq += 1;
+                    let seq = s.seq;
+                    s.removed.entry(cal).or_default().push((seq, id));
+                    s.touch(&master_id);
+                    return ResponseTemplate::new(204);
+                }
                 let Some((cal, e)) = s.find(id) else {
                     return error(404, "ErrorItemNotFound");
                 };
@@ -209,6 +394,14 @@ impl Respond for Handler {
                     return error(412, "ErrorIrresolvableConflict");
                 }
                 let id = id.to_string();
+                let exceptions: Vec<String> = s.events[&cal]
+                    .iter()
+                    .filter(|(_, (_, x))| x["seriesMasterId"].as_str() == Some(id.as_str()))
+                    .map(|(x, _)| x.clone())
+                    .collect();
+                for x in exceptions {
+                    s.remove(&cal, &x);
+                }
                 s.remove(&cal, &id);
                 ResponseTemplate::new(204)
             }

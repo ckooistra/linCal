@@ -1,17 +1,18 @@
 //! A Microsoft account through the whole engine against the fake Graph API:
 //! sign-in, windowed delta download, edits, server-assigned ids on create,
-//! deletes, and refusal of series edits.
+//! deletes, and whole series with exceptions and cancelled occurrences.
 
 use std::sync::Arc;
 
 use calendar_core::timing::resolve_local;
-use calendar_core::{EventDraft, EventTiming, ProviderKind, TimeRange};
+use calendar_core::{EventDraft, EventTiming, Occurrence, ProviderKind, TimeRange};
 use calendar_microsoft::testing::{FakeGraph, event};
 use calendar_microsoft::{GraphProvider, oauth_client};
 use calendar_provider_api::CalendarProvider;
 use calendar_storage::{StorageError, Store};
 use calendar_sync::{BrowserOpener, MemoryCredentials, SyncEngine};
 use chrono::NaiveDate;
+use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
 
@@ -57,22 +58,31 @@ fn june() -> TimeRange {
     TimeRange::new(day(1), day(30))
 }
 
-async fn titles(store: &Store) -> Vec<String> {
-    let mut v: Vec<_> = store
-        .query_range(june(), TZ)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|o| o.title)
-        .collect();
-    v.sort();
+async fn occurrences(store: &Store) -> Vec<Occurrence> {
+    let mut v = store.query_range(june(), TZ).await.unwrap();
+    v.sort_by_key(|o| o.timing.start_key());
     v
 }
 
-fn draft(calendar: &str, title: &str, rrule: Option<&str>) -> EventDraft {
+/// (day of June, title) of everything shown in June.
+async fn shown(store: &Store) -> Vec<(u32, String)> {
+    use chrono::Datelike;
+    occurrences(store)
+        .await
+        .into_iter()
+        .map(|o| {
+            let EventTiming::Zoned { start, .. } = o.timing else {
+                panic!("timed events only")
+            };
+            (start.with_timezone(&TZ).day(), o.title)
+        })
+        .collect()
+}
+
+fn draft(calendar: &str, title: &str, day: u32, rrule: Option<&str>) -> EventDraft {
     let start = resolve_local(
         &TZ,
-        NaiveDate::from_ymd_opt(2026, 6, 12)
+        NaiveDate::from_ymd_opt(2026, 6, day)
             .unwrap()
             .and_hms_opt(14, 0, 0)
             .unwrap(),
@@ -91,12 +101,27 @@ fn draft(calendar: &str, title: &str, rrule: Option<&str>) -> EventDraft {
     }
 }
 
+fn as_draft(o: &Occurrence) -> EventDraft {
+    EventDraft {
+        calendar_id: o.calendar_id.clone(),
+        title: o.title.clone(),
+        description: o.description.clone(),
+        location: o.location.clone(),
+        timing: o.timing.clone(),
+        rrule: o.rrule.clone(),
+    }
+}
+
+fn s(day: u32, title: &str) -> (u32, String) {
+    (day, title.to_owned())
+}
+
 #[tokio::test]
 async fn microsoft_account_round_trip() {
     let fake = FakeGraph::start().await;
     {
-        let mut s = fake.state.lock().unwrap();
-        s.put(
+        let mut st = fake.state.lock().unwrap();
+        st.put(
             "cal-1",
             event(
                 "A",
@@ -105,19 +130,19 @@ async fn microsoft_account_round_trip() {
                 "2026-06-01T08:00:00",
             ),
         );
-        let mut occurrence = event(
-            "S1",
-            "Weekly sync",
-            "2026-06-03T08:00:00",
-            "2026-06-03T08:30:00",
+        // Daily at 10:00 Berlin, 1–5 June.
+        let mut master = event(
+            "S",
+            "Stand-up",
+            "2026-06-01T08:00:00",
+            "2026-06-01T08:15:00",
         );
-        occurrence["type"] = serde_json::json!("occurrence");
-        occurrence["seriesMasterId"] = serde_json::json!("S");
-        s.put("cal-1", occurrence);
-        s.put(
-            "cal-1",
-            serde_json::json!({"id": "S", "type": "seriesMaster", "subject": "Weekly sync"}),
-        );
+        master["type"] = json!("seriesMaster");
+        master["recurrence"] = json!({
+            "pattern": {"type": "daily", "interval": 1},
+            "range": {"type": "numbered", "startDate": "2026-06-01", "numberOfOccurrences": 5}
+        });
+        st.put("cal-1", master);
     }
     let store = Store::open_in_memory().await.unwrap();
     let api = fake.api();
@@ -156,10 +181,19 @@ async fn microsoft_account_round_trip() {
     );
     let cal = store.calendars_of(&id).await.unwrap()[0].id.clone();
 
-    // Download: single events and occurrences; the series master is skipped.
+    // Download: the single event, and the series as one object.
     assert_eq!(engine.sync_account(&id).await.unwrap().downloaded, 2);
-    assert_eq!(titles(&store).await, vec!["Planning", "Weekly sync"]);
-    // The occurrence is flagged as approximated (no whole-series editing).
+    assert_eq!(
+        shown(&store).await,
+        vec![
+            s(1, "Planning"),
+            s(1, "Stand-up"),
+            s(2, "Stand-up"),
+            s(3, "Stand-up"),
+            s(4, "Stand-up"),
+            s(5, "Stand-up"),
+        ]
+    );
     let status = store.account_statuses().await.unwrap();
     assert_eq!(
         status
@@ -167,62 +201,141 @@ async fn microsoft_account_round_trip() {
             .find(|s| s.account_id == id)
             .unwrap()
             .approximated,
-        1
+        0
     );
 
-    // Edit one occurrence: it becomes an exception on the server.
-    let occurrence = store
-        .query_range(june(), TZ)
+    // Edit one occurrence (it becomes an exception) and cancel another.
+    let series: Vec<Occurrence> = occurrences(&store)
         .await
-        .unwrap()
         .into_iter()
-        .find(|o| o.title == "Weekly sync")
-        .unwrap();
-    let mut d = store
-        .get_event(&occurrence.event_id)
-        .await
-        .unwrap()
-        .unwrap()
-        .draft();
-    d.title = "Weekly sync (moved)".into();
-    store.update_event(&occurrence.event_id, d).await.unwrap();
+        .filter(|o| o.series_id.is_some())
+        .collect();
+    let mut d = as_draft(&series[2]);
+    d.title = "Stand-up (moved)".into();
+    store.update_occurrence(&series[2].id, d, TZ).await.unwrap();
+    store.delete_occurrence(&series[3].id).await.unwrap();
     assert_eq!(engine.sync_account(&id).await.unwrap().uploaded, 1);
     {
-        let s = fake.state.lock().unwrap();
-        let e = &s.events["cal-1"]["S1"].1;
-        assert_eq!(e["type"], "exception");
-        assert_eq!(
-            e["attendees"][0]["emailAddress"]["address"],
-            "dave@example.com"
-        );
+        let st = fake.state.lock().unwrap();
+        let x = &st.events["cal-1"]["S.2026-06-03"].1;
+        assert_eq!(x["type"], "exception");
+        assert_eq!(x["subject"], "Stand-up (moved)");
+        assert_eq!(st.cancelled["S"], vec!["2026-06-04".to_owned()]);
     }
 
-    // Create: the server assigns the id; nothing is duplicated.
-    store
-        .create_event("local-1", draft(&cal, "Dentist", None))
+    // Rename the whole series; the exception keeps its own title.
+    let first = occurrences(&store)
         .await
+        .into_iter()
+        .find(|o| o.title == "Stand-up")
         .unwrap();
-    assert_eq!(engine.sync_account(&id).await.unwrap().uploaded, 1);
+    let mut d = as_draft(&first);
+    d.title = "Daily".into();
+    store.update_series(&first.id, d).await.unwrap();
+    engine.sync_account(&id).await.unwrap();
+    assert_eq!(
+        fake.state.lock().unwrap().events["cal-1"]["S"].1["subject"],
+        "Daily"
+    );
+    // The next sync reads back what the server made of it; nothing changes.
+    engine.sync_account(&id).await.unwrap();
     let again = engine.sync_account(&id).await.unwrap();
     assert_eq!((again.uploaded, again.downloaded), (0, 0));
     assert_eq!(
-        titles(&store).await,
-        vec!["Dentist", "Planning", "Weekly sync (moved)"]
+        shown(&store).await,
+        vec![
+            s(1, "Planning"),
+            s(1, "Daily"),
+            s(2, "Daily"),
+            s(3, "Stand-up (moved)"),
+            s(5, "Daily"),
+        ]
     );
 
-    // Repeating events cannot be created in Microsoft calendars yet.
+    // Another client cancels an occurrence: the series is read again.
+    {
+        let mut st = fake.state.lock().unwrap();
+        st.cancelled.get_mut("S").unwrap().push("2026-06-02".into());
+        st.seq += 1;
+        let seq = st.seq;
+        st.removed
+            .entry("cal-1".into())
+            .or_default()
+            .push((seq, "S.2026-06-02".into()));
+    }
+    engine.sync_account(&id).await.unwrap();
+    assert!(!shown(&store).await.contains(&s(2, "Daily")));
+
+    // A new weekly series: created with its pattern; nothing is duplicated.
+    store
+        .create_event("local-1", draft(&cal, "Gym", 12, Some("FREQ=WEEKLY")))
+        .await
+        .unwrap();
+    assert_eq!(engine.sync_account(&id).await.unwrap().uploaded, 1);
+    {
+        let st = fake.state.lock().unwrap();
+        let gym = st.events["cal-1"]
+            .values()
+            .find(|(_, e)| e["subject"] == "Gym")
+            .unwrap();
+        assert_eq!(gym.1["type"], "seriesMaster");
+        assert_eq!(
+            gym.1["recurrence"]["pattern"]["daysOfWeek"],
+            json!(["friday"])
+        );
+        assert_eq!(gym.1["originalStartTimeZone"], "W. Europe Standard Time");
+        assert_eq!(gym.1["start"]["dateTime"], "2026-06-12T12:00:00.0000000");
+    }
+    engine.sync_account(&id).await.unwrap();
+    let again = engine.sync_account(&id).await.unwrap();
+    assert_eq!((again.uploaded, again.downloaded), (0, 0));
+    let gyms: Vec<_> = shown(&store)
+        .await
+        .into_iter()
+        .filter(|(_, t)| t == "Gym")
+        .collect();
+    assert_eq!(gyms, vec![s(12, "Gym"), s(19, "Gym"), s(26, "Gym")]);
+    // The rule reads back as the editor's "Weekly" preset.
+    let gym = occurrences(&store)
+        .await
+        .into_iter()
+        .find(|o| o.title == "Gym")
+        .unwrap();
+    assert_eq!(gym.rrule.as_deref(), Some("FREQ=WEEKLY"));
+
+    // Rules Outlook cannot hold are refused before anything is stored.
     assert!(matches!(
         store
-            .create_event("local-2", draft(&cal, "Gym", Some("FREQ=WEEKLY")))
+            .create_event(
+                "local-2",
+                draft(&cal, "Rent", 1, Some("FREQ=MONTHLY;BYMONTHDAY=1,15"))
+            )
             .await,
-        Err(StorageError::Unsupported(_))
+        Err(StorageError::UnsupportedRecurrence(_))
     ));
 
-    // Delete locally, and a deletion on the server arrives by delta.
-    store.delete_event("local-1").await.unwrap();
+    // Delete the series and the single event; a server-side deletion of
+    // the gym series arrives by delta.
+    store.delete_series(&first.id).await.unwrap();
+    let planning = occurrences(&store)
+        .await
+        .into_iter()
+        .find(|o| o.title == "Planning")
+        .unwrap();
+    store.delete_event(&planning.event_id).await.unwrap();
     engine.sync_account(&id).await.unwrap();
-    fake.state.lock().unwrap().remove("cal-1", "A");
+    {
+        let st = fake.state.lock().unwrap();
+        assert!(!st.events["cal-1"].contains_key("S"));
+        assert!(!st.events["cal-1"].contains_key("S.2026-06-03"));
+        assert!(!st.events["cal-1"].contains_key("A"));
+    }
+    let gym_id = fake.state.lock().unwrap().events["cal-1"]
+        .iter()
+        .find(|(_, (_, e))| e["subject"] == "Gym")
+        .map(|(id, _)| id.clone())
+        .unwrap();
+    fake.state.lock().unwrap().remove("cal-1", &gym_id);
     engine.sync_account(&id).await.unwrap();
-    assert_eq!(titles(&store).await, vec!["Weekly sync (moved)"]);
-    assert_eq!(fake.state.lock().unwrap().events["cal-1"].len(), 2); // S1 and the master S
+    assert_eq!(shown(&store).await, vec![]);
 }

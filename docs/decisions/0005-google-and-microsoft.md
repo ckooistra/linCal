@@ -33,7 +33,7 @@ The engine never parses or builds provider formats itself. Storage keeps the raw
 
 The engine's unit is a series: a master plus its overrides. CalDAV stores a series as one resource. Google and Graph store the master and each exception as separate events.
 
-The Google adapter therefore aggregates. (Graph is handled differently; see the addendum.)
+Both adapters therefore aggregate (for Graph, see the addendum).
 
 - **Object id and version.** A series' `href` is the master's id. Its version is a hash of the member versions.
 - **Grouping.** Changed members found by incremental sync are grouped by series, and the whole series is then read again:
@@ -85,14 +85,13 @@ Per-calendar access (owner / writer / reader / free-busy) maps to `read_only`, w
 - Every engine path (queue, conflicts, presence tracking, review dialog) applies to all providers.
 - Live testing against Google and Microsoft needs OAuth client registrations, which the user or distributor provides. Automated tests use recorded, API-shaped responses from a mock server.
 
-## Addendum: Microsoft Graph objects are instances (implemented)
+## Addendum: Microsoft Graph series (implemented)
 
-Graph's `calendarView/delta`, which the specification asks for, reports **instances** within a date window: single events, occurrences and exceptions, each with its own id. It does not report series masters with their rules. Reading masters plus `instances` per series would need a request per series on every change, and Graph v1.0 offers no delta for masters.
+Graph's `calendarView/delta`, which the specification asks for, reports **instances** within a date window: single events, occurrences and exceptions, each with its own id. It does not report series masters with their patterns. A first version therefore mirrored instances one by one and refused series edits. That is replaced by whole series, as for Google:
 
-The Microsoft adapter therefore mirrors instances:
-
-- **One object per instance.** Each instance is read as a single event. Editing it `PATCH`es that instance, which Graph turns into an exception. Deleting it cancels that occurrence.
-- **Series are not edited as a whole.** Storage refuses to create repeating events or edit series in Microsoft calendars (`check_series_supported`). Occurrences are flagged *shown approximately*, so the limitation is visible.
-- **Window.** The window is month-aligned: 12 months back and 24 months ahead. It moves forward with a full listing once less than 12 months of future is left.
-
-Whole-series editing for Microsoft (master + recurrence pattern ⇄ RRULE) is future work.
+- **Objects.** An object is a single event, or a series: the master read with `$expand=exceptionOccurrences` and `cancelledOccurrences` selected, so pattern, exceptions and cancellations arrive in one request. The series version is a hash over the master's ETag, the exceptions' change keys and the cancellations.
+- **Sync.** Delta entries for occurrences and exceptions name their `seriesMasterId`; each series touched is read again once. Removed entries carry only an id; when one is not a known object, the known series are read again to find the cancelled occurrence or deleted series.
+- **Recurrence.** Outlook patterns are translated to RRULE and back (`calendar-microsoft::pattern`), normalised so the editor's presets round-trip. Rules Outlook cannot express, extra dates (RDATE) and restored occurrences are refused by storage before they are queued, through a per-provider check the sync engine registers (`Store::set_recurrence_check`). Writes send local times in the event's zone (Windows names where known) so series follow its daylight-saving rules.
+- **Writes.** The master and existing exceptions are `PATCH`ed with `If-Match`. Graph cannot address an occurrence by its original start, so new exceptions and cancellations name the occurrence key and the provider finds the instance via `instances`. Graph may adjust a series beyond what was sent (e.g. drop exceptions when the pattern changes), so a written series is reported with an unconfirmed version and the next sync reads and applies the server's result.
+- **Migration.** Microsoft calendars lose their sync state once (migration `20261031000005`), so occurrence objects stored by the first version are replaced by series on the next sync.
+- **Window.** The window is month-aligned: 12 months back and 24 months ahead. It moves forward with a full listing once less than 12 months of future is left. Series objects hold all their occurrences, including those outside the window.

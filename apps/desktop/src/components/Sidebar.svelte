@@ -178,6 +178,7 @@
     {/if}
   </section>
 
+  {#if simulationControls}
   <section class="settings">
     <h3>Simulation</h3>
     <label>
@@ -188,7 +189,6 @@
         {/each}
       </select>
     </label>
-    {#if simulationControls}
     <label>
       <span>Storage latency</span>
       <select value={latencyMs} onchange={(e) => onlatency(Number(e.currentTarget.value))}>
@@ -199,8 +199,8 @@
       </select>
     </label>
     <button type="button" onclick={onfailnext}>Fail next save</button>
-    {/if}
   </section>
+  {/if}
 </nav>
 
 <style>

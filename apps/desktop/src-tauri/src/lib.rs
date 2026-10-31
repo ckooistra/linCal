@@ -77,6 +77,10 @@ pub fn run() {
                     let (scheduler, run) =
                         calendar_sync::scheduler(Arc::clone(&engine), SYNC_INTERVAL);
                     if !bench::enabled() {
+                        // Demo data from earlier versions; only benchmarks use it now.
+                        if let Err(e) = tauri::async_runtime::block_on(store.remove_simulated()) {
+                            eprintln!("[storage] could not remove simulated data: {e}");
+                        }
                         tauri::async_runtime::spawn(run);
                     }
                     Some(Sync {

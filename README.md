@@ -4,7 +4,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 
 > **Status: Milestone 4 (Google and Microsoft) in progress.**
 > - **CalDAV** (Nextcloud, Fastmail, Radicale, Baïkal, …): syncs both ways with an offline queue, validated against Nextcloud.
-> - **Google Calendar and Microsoft 365 / Outlook.com:** accounts sign in with OAuth and sync through the same engine. They are tested against faithful API fakes; live use needs an OAuth client registration ([how](docs/provider-integration.md#registering-oauth-clients)).
+> - **Google Calendar and Microsoft 365 / Outlook.com:** accounts sign in with OAuth and sync through the same engine. Both are tested against faithful API fakes, and Google also with a live account; Microsoft still needs a live check. Live use needs an OAuth client registration ([how](docs/provider-integration.md#registering-oauth-clients)).
 > - Everything is stored locally in SQLite. Simulated demo calendars remain available. See [Roadmap](#roadmap).
 
 ![Month view](docs/screenshots/light-month.png)
@@ -38,7 +38,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - **Both use the same engine as CalDAV:** offline queue, version-checked uploads, conflicts, and the **Review…** list. Several accounts per provider are supported, and each account syncs and fails independently.
 - **Only what you change is sent.** Attendees, reminders, conferencing links and other details this app doesn't edit stay untouched.
 - **Google:** full recurring-series support, with incremental sync via sync tokens.
-- **Microsoft:** sync via calendar-view delta over a moving window (12 months back, 24 ahead). Recurring events are shown and edited one occurrence at a time. Editing a whole series, or creating a repeating event in a Microsoft calendar, isn't supported yet and is refused with a message.
+- **Microsoft:** sync via calendar-view delta over a moving window (12 months back, 24 ahead). Recurring events sync as whole series: you can create them, edit the series or single occurrences, and cancel occurrences. Outlook can hold fewer repeat rules than iCalendar; a rule it cannot express (for example "on the 1st and 15th") is refused with a message.
 - **Client IDs:** each user or distributor registers their own OAuth client; no secret is built into the app. See [Registering OAuth clients](docs/provider-integration.md#registering-oauth-clients).
 
 ### Calendar
@@ -72,7 +72,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 
   Shortcuts don't fire while you're typing in a field.
 - Deterministic data generator (100 / 1,000 / 5,000 events, written in Rust), a scripted UI benchmark that runs in the real WebKitGTK window, and a storage benchmark. See [docs/performance.md](docs/performance.md).
-- On first run the app seeds 1,000 simulated events in three demo accounts. Their calendars are **hidden by default**; tick one in the sidebar to show it. Visibility choices are remembered per calendar. **Choosing a dataset in the sidebar replaces the simulated events only**; CalDAV accounts are not touched.
+- The desktop app starts empty: add a CalDAV, Google or Microsoft account from the sidebar. Simulated demo events exist only in the browser preview and in benchmark runs (which use a throw-away database); demo data left by earlier versions is removed on startup. Visibility choices are remembered per calendar.
 
 ## Supported platforms
 
@@ -184,7 +184,7 @@ See [docs/architecture.md](docs/architecture.md).
 1. Desktop foundation and performance prototype ✔
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
 3. CalDAV (Nextcloud reference) with offline queue ✔
-4. **Google Calendar and Microsoft Graph** ← current (implemented; awaiting live checks with real accounts)
+4. **Google Calendar and Microsoft Graph** ← current (implemented; Google checked live, Microsoft awaiting a live check)
 5. Production quality: recurrence editing, notifications, agenda view, ICS subscriptions, packaging
 
 ## License

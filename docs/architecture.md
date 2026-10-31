@@ -175,7 +175,7 @@ Commands:
 |---|---|
 | Data | `list_accounts`, `list_calendars`, `query_range`, `create_event`, `update_event`, `delete_event` |
 | Preferences | `set_calendar_color`, `get_settings`, `set_setting` |
-| Simulation | `load_simulated_dataset` (replaces simulated accounts only) |
+| Simulation | `load_simulated_dataset` (benchmark runs only; replaces simulated accounts only) |
 | Accounts & sync | `add_caldav_account`, `remove_account`, `sync_now`, `account_statuses`, `resolve_conflict` |
 | Benchmark | `bench_*` |
 

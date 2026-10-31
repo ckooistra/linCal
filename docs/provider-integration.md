@@ -43,12 +43,12 @@ Providers exchange **objects**: one event or one recurring series per remote ite
 
 | | CalDAV | Google Calendar | Microsoft Graph |
 |---|---|---|---|
-| Object | one iCalendar resource | a series: master + exceptions (`events.list?iCalUID=`) | one instance (single event, occurrence or exception) |
-| Version | ETag | hash of the members' ETags | `@odata.etag` |
+| Object | one iCalendar resource | a series: master + exceptions (`events.list?iCalUID=`) | a single event, or a series: master read with `$expand=exceptionOccurrences` and `cancelledOccurrences` |
+| Version | ETag | hash of the members' ETags | `@odata.etag`; for a series, a hash over master, exceptions and cancellations |
 | Cursor | sync-token, or ETag comparison | `syncToken` (410 → full sync) | window + `calendarView/delta` link (410 or window moved → full listing) |
-| Writes | edit the stored iCalendar in place, `PUT` with `If-Match` | `PATCH` only changed fields per member, with `If-Match` | `PATCH` only changed fields, with `If-Match` |
+| Writes | edit the stored iCalendar in place, `PUT` with `If-Match` | `PATCH` only changed fields per member, with `If-Match` | `PATCH` only changed fields, with `If-Match`; new exceptions and cancellations look the occurrence up via `instances` |
 | Create identity | client href | client-chosen id (retry → 409) | server id; `transactionId` makes retries safe; href renamed |
-| Recurrence | full (RRULE/RDATE/EXDATE, overrides) | full (RFC 5545 lines + exceptions) | per occurrence only: whole-series edits and new repeating events are refused (shown "approximately") |
+| Recurrence | full (RRULE/RDATE/EXDATE, overrides) | full (RFC 5545 lines + exceptions) | Outlook patterns ⇄ RRULE (daily, weekly on days, monthly/yearly by day or by first–fourth/last weekday; count or end date). Other rules, extra dates (RDATE) and restoring a cancelled occurrence are refused before they are stored |
 | Unmodelled data (attendees, alarms, conferencing…) | preserved in the stored resource | untouched on the server | untouched on the server |
 
 `ProviderError` classifies failures so the engine can choose between retry with backoff, conflict, re-authentication and reporting:

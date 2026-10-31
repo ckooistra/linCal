@@ -1,8 +1,8 @@
 # Synchronization
 
 > **Status:**
-> - **CalDAV:** implemented (Milestone 3). Tested against Radicale 3.9 and a mock server replaying Nextcloud responses; not yet against a live Nextcloud.
-> - **Google and Microsoft:** follow in Milestone 4 on the same engine.
+> - **CalDAV:** implemented (Milestone 3). Tested against Radicale 3.9, a mock server replaying Nextcloud responses, and a live Nextcloud.
+> - **Google and Microsoft:** use the same engine (Milestone 4); see [ADR 0005](decisions/0005-google-and-microsoft.md). Google has been checked with a live account; Microsoft so far only against an API fake.
 
 ## Principles
 

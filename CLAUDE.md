@@ -9,6 +9,7 @@ Build a fast, local-first, free and open-source desktop calendar for Linux (prim
 Status:
 - Milestones 1–3 are complete. Milestone 3 (CalDAV) has been validated against the user's Nextcloud.
 - Milestone 3 audit findings have been addressed, except performance on target KDE hardware (F19), which still needs measuring there.
+- Milestone 4: Google verified with a live account; Microsoft (including whole-series editing) passes the API-fake tests and still needs a live check.
 - Do not start Milestone 5 until Milestone 4 is accepted.
 
 ## Required stack
