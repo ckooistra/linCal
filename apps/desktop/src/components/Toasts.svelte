@@ -4,11 +4,16 @@
   let { notifications }: { notifications: Notifications } = $props();
 </script>
 
-<div class="toasts" role="status" aria-live="polite">
-  {#each notifications.items as n (n.id)}
-    <div class="toast" class:error={n.kind === "error"}>
-      <span>{n.message}</span>
-      <button type="button" onclick={() => notifications.dismiss(n.id)} aria-label="Dismiss">✕</button>
+<!-- Errors are announced at once (alert); other messages when convenient (status). -->
+<div class="toasts">
+  {#each [{ kind: "info", role: "status", live: "polite" }, { kind: "error", role: "alert", live: "assertive" }] as region (region.kind)}
+    <div class="region" role={region.role} aria-live={region.live as "polite" | "assertive"}>
+      {#each notifications.items.filter((n) => (n.kind === "error") === (region.kind === "error")) as n (n.id)}
+        <div class="toast" class:error={n.kind === "error"}>
+          <span>{n.message}</span>
+          <button type="button" onclick={() => notifications.dismiss(n.id)} aria-label="Dismiss">✕</button>
+        </div>
+      {/each}
     </div>
   {/each}
 </div>
@@ -22,6 +27,10 @@
     display: grid;
     gap: 0.5rem;
     z-index: 60;
+  }
+  .region {
+    display: grid;
+    gap: 0.5rem;
   }
   .toast {
     display: flex;

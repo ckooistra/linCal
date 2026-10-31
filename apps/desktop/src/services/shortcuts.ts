@@ -9,7 +9,8 @@ export type ShortcutAction =
   | "previous"
   | "next"
   | "toggle-perf"
-  | "toggle-hours";
+  | "toggle-hours"
+  | "help";
 
 /** True when keyboard input is going into a text field and shortcuts must not fire. */
 export function isEditableTarget(target: EventTarget | null): boolean {
@@ -55,7 +56,29 @@ export function resolveShortcut(e: KeyInput): ShortcutAction | null {
       return "previous";
     case "h":
       return "toggle-hours";
+    case "?":
+      return "help";
     default:
       return null;
   }
 }
+
+/** The keyboard shortcuts, as shown in the help dialog (`?`). */
+export const SHORTCUT_HELP: readonly { keys: string[]; action: string; either?: boolean }[] = [
+  { keys: ["T"], action: "Go to today" },
+  { keys: ["J"], action: "Next day, week or month" },
+  { keys: ["K"], action: "Previous day, week or month" },
+  { keys: ["M"], action: "Month view" },
+  { keys: ["W"], action: "Week view" },
+  { keys: ["D"], action: "Day view" },
+  { keys: ["A"], action: "Agenda view" },
+  { keys: ["H"], action: "Week and day: working hours or the full day" },
+  { keys: ["N"], action: "New event" },
+  { keys: ["Ctrl", "F"], action: "Search; Enter or ↓ goes to the results" },
+  { keys: ["Tab"], action: "Move between controls and events" },
+  { keys: ["Enter"], action: "Open the focused event" },
+  { keys: ["↑", "↓"], either: true, action: "Agenda and search results: previous or next event" },
+  { keys: ["Esc"], action: "Close a dialog or the search" },
+  { keys: ["?"], action: "Show these shortcuts" },
+  { keys: ["Ctrl", "Shift", "P"], action: "Performance panel" },
+];

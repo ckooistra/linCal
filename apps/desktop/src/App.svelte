@@ -16,6 +16,7 @@
   import EventEditor from "./components/EventEditor.svelte";
   import PerfPanel from "./components/PerfPanel.svelte";
   import SearchResults from "./components/SearchResults.svelte";
+  import ShortcutsDialog from "./components/ShortcutsDialog.svelte";
   import SubscriptionDialog from "./components/SubscriptionDialog.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import SyncProblemsDialog from "./components/SyncProblemsDialog.svelte";
@@ -511,9 +512,10 @@
 
   // --- keyboard -------------------------------------------------------------
   let perfOpen = $state(false);
+  let helpOpen = $state(false);
 
   function onKeydown(e: KeyboardEvent) {
-    if (editor || addingAccount || removing) return; // Dialogs handle their own keys.
+    if (editor || addingAccount || removing || helpOpen) return; // Dialogs handle their own keys.
     if (e.key === "Escape" && searchQuery) {
       clearSearch();
       searchInput?.focus();
@@ -545,6 +547,9 @@
         return;
       case "toggle-perf":
         perfOpen = !perfOpen;
+        return;
+      case "help":
+        helpOpen = true;
         return;
       case "toggle-hours":
         if (viewState.view === "week" || viewState.view === "day") setDayHours(dayHours === "work" ? "full" : "work");
@@ -753,6 +758,7 @@
       onnew={() => void measureInteraction("open-editor", () => openEditor({ mode: "create", timing: defaultTiming() }))}
       onsearch={onSearchInput}
       onsearchsubmit={submitSearch}
+      onhelp={() => (helpOpen = true)}
     />
     <div class="calendar" class:searching={searchQuery.trim() !== ""}>
       {#if agenda}
@@ -866,6 +872,10 @@
     onconfirm={() => void confirmRemoveAccount()}
     oncancel={() => (removing = null)}
   />
+{/if}
+
+{#if helpOpen}
+  <ShortcutsDialog onclose={() => (helpOpen = false)} />
 {/if}
 
 {#if perfOpen}

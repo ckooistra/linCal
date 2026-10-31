@@ -94,7 +94,70 @@ export function eventClass(event: { calendarId: string; status: SyncStatus; read
   return css;
 }
 
-/** Readable text colour (#fff or near-black) for a `#rrggbb` background. */
+/** Context key for what event content needs from the adapter. */
+export const EVENT_CONTEXT = Symbol("uc-event-context");
+
+export interface EventContext {
+  /** Name of a calendar, for labels. */
+  calendarName(id: string): string;
+  /** Open an event (keyboard activation). */
+  open(id: string): void;
+}
+
+const STATUS_WORDS: Partial<Record<SyncStatus, string>> = {
+  "pending-local": "saving",
+  "pending-sync": "not synced yet",
+  "sync-failed": "sync failed",
+  conflict: "conflict",
+};
+
+// Formatters are created once: `toLocale…String` builds a new one per call,
+// which is slow when every event in view is labelled.
+let dayFormat: Intl.DateTimeFormat | null = null;
+let timeFormat: Intl.DateTimeFormat | null = null;
+
+/** `10:30` / `10:30 AM` in the user's locale. */
+export function formatEventTime(d: Date): string {
+  timeFormat ??= new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+  return timeFormat.format(d);
+}
+
+const labels = new WeakMap<SvarEvent, { name: string; label: string }>();
+
+/**
+ * What a screen reader announces for an event in the grid, e.g.
+ * "Dentist, Tuesday 16 June, 10:30 to 11:15, Personal". Cached per
+ * (immutable) event object.
+ */
+export function eventLabel(e: SvarEvent, calendarName: string): string {
+  const cached = labels.get(e);
+  if (cached?.name === calendarName) return cached.label;
+  const label = buildLabel(e, calendarName);
+  labels.set(e, { name: calendarName, label });
+  return label;
+}
+
+function buildLabel(e: SvarEvent, calendarName: string): string {
+  dayFormat ??= new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long" });
+  const day = (d: Date) => dayFormat!.format(d);
+  const time = formatEventTime;
+  let when: string;
+  if (e.allDay) {
+    const last = new Date(e.end.getTime() - 1);
+    when = toIsoDate(last) === toIsoDate(e.start) ? `${day(e.start)}, all day` : `${day(e.start)} to ${day(last)}, all day`;
+  } else if (toIsoDate(e.start) === toIsoDate(e.end) || e.end.getTime() - e.start.getTime() <= 0) {
+    when = `${day(e.start)}, ${time(e.start)} to ${time(e.end)}`;
+  } else {
+    when = `${day(e.start)} ${time(e.start)} to ${day(e.end)} ${time(e.end)}`;
+  }
+  const parts = [e.text, when, calendarName];
+  if (e.readOnly) parts.push("read-only");
+  const status = STATUS_WORDS[e.status];
+  if (status) parts.push(status);
+  return parts.join(", ");
+}
+
+/** Readable text colour (#fff or #000) for a `#rrggbb` background: at least 4.5:1 for any colour. */
 export function textColorFor(hex: string): string {
   const n = Number.parseInt(hex.slice(1), 16);
   const channel = (v: number) => {
@@ -102,8 +165,8 @@ export function textColorFor(hex: string): string {
     return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
   };
   const l = 0.2126 * channel((n >> 16) & 255) + 0.7152 * channel((n >> 8) & 255) + 0.0722 * channel(n & 255);
-  // Pick whichever of white / #111 (luminance ≈ 0.0056) contrasts more.
-  return 1.05 / (l + 0.05) >= (l + 0.05) / 0.0556 ? "#fff" : "#111";
+  // Whichever of white and black contrasts more.
+  return 1.05 / (l + 0.05) >= (l + 0.05) / 0.05 ? "#fff" : "#000";
 }
 
 /**

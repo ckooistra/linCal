@@ -13,6 +13,8 @@
     onview: (view: AppView) => void;
     onnew: () => void;
     onsearch: (query: string) => void;
+    /** Shows the keyboard shortcuts. */
+    onhelp: () => void;
     /** Enter or Down in the search box: go to the results. */
     onsearchsubmit: () => void;
     searchInput?: HTMLInputElement | undefined;
@@ -29,6 +31,7 @@
     onview,
     onnew,
     onsearch,
+    onhelp,
     onsearchsubmit,
     searchInput = $bindable(),
   }: Props = $props();
@@ -89,6 +92,14 @@
       {/each}
     </div>
     <button type="button" class="primary" onclick={onnew} title="New event (N)">New event</button>
+    <button
+      type="button"
+      class="icon"
+      aria-label="Keyboard shortcuts"
+      title="Keyboard shortcuts (?)"
+      aria-keyshortcuts="Shift+?"
+      onclick={onhelp}>?</button
+    >
   </div>
 </header>
 

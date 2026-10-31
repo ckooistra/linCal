@@ -60,20 +60,43 @@ describe("svarMapping", () => {
       { id: "x", accountId: "a", name: "X", color: "#ffff00", readOnly: false },
       { id: "bad", accountId: "a", name: "B", color: "red;}body{", readOnly: false },
     ]);
-    expect(css).toContain(".uc-cal-x{--wx-color-primary:#ffff00;--wx-color-primary-font:#111");
+    expect(css).toContain(".uc-cal-x{--wx-color-primary:#ffff00;--wx-color-primary-font:#000");
     expect(css).not.toContain("bad");
   });
 
   it("picks readable text colours", () => {
     expect(textColorFor("#000000")).toBe("#fff");
-    expect(textColorFor("#ffffff")).toBe("#111");
+    expect(textColorFor("#ffffff")).toBe("#000");
     expect(textColorFor("#1e3a8a")).toBe("#fff");
-    expect(textColorFor("#f59e0b")).toBe("#111");
+    expect(textColorFor("#f59e0b")).toBe("#000");
   });
 
   it("prefetches one month either side, month-aligned", () => {
     const w = prefetchWindow({ start: parseIsoDate("2026-06-01").getTime(), end: parseIsoDate("2026-07-06").getTime() });
     expect(new Date(w.start)).toEqual(parseIsoDate("2026-05-01"));
     expect(new Date(w.end)).toEqual(parseIsoDate("2026-09-01"));
+  });
+});
+
+describe("eventLabel", () => {
+  it("names the event, its time, calendar and state", async () => {
+    const { eventLabel } = await import("../components/calendar/svarMapping");
+    const start = new Date(2026, 5, 16, 10, 30);
+    const base = {
+      id: "e",
+      start,
+      end: new Date(2026, 5, 16, 11, 15),
+      allDay: false,
+      text: "Dentist",
+      calendarId: "c",
+      status: "synced" as const,
+      readOnly: false,
+    };
+    const day = start.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+    const t = (d: Date) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    expect(eventLabel(base, "Personal")).toBe(`Dentist, ${day}, ${t(start)} to ${t(base.end)}, Personal`);
+    expect(eventLabel({ ...base, readOnly: true, status: "conflict" }, "Team")).toMatch(/, Team, read-only, conflict$/);
+    const allDay = { ...base, allDay: true, start: new Date(2026, 5, 16), end: new Date(2026, 5, 17) };
+    expect(eventLabel(allDay, "Holidays")).toBe(`Dentist, ${day}, all day, Holidays`);
   });
 });

@@ -48,6 +48,22 @@ Whatever remains after JS + layout is paint and compositing, plus any async foll
 
 The scenarios run at 100, 1,000 and 5,000 events.
 
+## Results: Milestone 5, accessible grid events, 2026-10-31
+
+Raw data: [`benchmarks/20261031-vm-xvfb-m5-a11y.json`](benchmarks/20261031-vm-xvfb-m5-a11y.json). Same VM and Xvfb setup.
+
+Events in the grid are now drawn by our own `EventContent` component, a labelled, focusable button, instead of SVAR's default content. The first version used `toLocaleDateString`/`toLocaleTimeString` per event and render, and these build a new formatter on every call. That made the grid slower. Creating the formatters once and caching each event's label more than undid it:
+
+| 1,000 events (p50 ms) | Before | `toLocale…` per render | Cached formatters |
+|---|---:|---:|---:|
+| visibility toggle | 26 | 64 | 30 |
+| week next | 43 | 57 | 36 |
+| month next | 52 | 61 | 45 |
+| drag proxy | 45.6 fps | 25.4 fps | 115 fps |
+| drag proxy, 5,000 events | 12.8 fps | 5.1 fps | 72 fps |
+
+The drag improvement over "before" suggests SVAR's default event content was itself formatting times expensively on every frame.
+
 ## Results: Milestone 5, agenda and search, 2026-10-31
 
 Same VM and Xvfb setup (software rendering), so these remain a pessimistic baseline.

@@ -85,9 +85,15 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
   | `H` | Week/day: toggle working hours (08–18) / full day |
   | `Ctrl+F` | Search |
   | `Esc` | Close dialog |
+  | `?` | Show all keyboard shortcuts |
   | `Ctrl+Shift+P` | Toggle performance panel |
 
   Shortcuts don't fire while you're typing in a field.
+- **Accessibility:**
+  - Events in the month, week and day grids can be reached with Tab and opened with Enter. Screen readers hear "Dentist, Tuesday 16 June, 10:30 to 11:15, Personal".
+  - Colour contrast meets WCAG AA in both themes, and is checked by tests.
+  - Errors are announced immediately, and the "reduce animations" setting is honoured.
+  - See [docs/accessibility.md](docs/accessibility.md).
 - Deterministic data generator (100 / 1,000 / 5,000 events, written in Rust), a scripted UI benchmark that runs in the real WebKitGTK window, and a storage benchmark. See [docs/performance.md](docs/performance.md).
 - The desktop app starts with just the Personal calendar. Add CalDAV, Google or Microsoft accounts from the sidebar. Simulated demo events exist only in the browser preview and in benchmark runs (which use a throw-away database); demo data left by earlier versions is removed on startup. Visibility choices are remembered per calendar.
 
@@ -202,7 +208,7 @@ See [docs/architecture.md](docs/architecture.md).
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
 3. CalDAV (Nextcloud reference) with offline queue ✔
 4. Google Calendar and Microsoft Graph ✔ (Google checked live; Microsoft tested against an API fake, live check pending)
-5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, reminders and notifications, automatic merging and conflict comparison. Next: accessibility, packaging, user guide, profiling.
+5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, reminders and notifications, automatic merging and conflict comparison, accessibility pass. Next: packaging, user guide, profiling.
 
 ## License
 

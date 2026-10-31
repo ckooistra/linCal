@@ -441,3 +441,32 @@ describe("AgendaView", () => {
     expect(onopen).toHaveBeenCalledWith(expect.objectContaining({ id: "july" }));
   });
 });
+
+describe("EventContent (grid events)", () => {
+  it("is a labelled button that opens with Enter or Space", async () => {
+    const { default: Harness } = await import("./EventContentHarness.svelte");
+    const open = vi.fn();
+    const start = new Date(2026, 5, 16, 10, 30);
+    render(Harness, {
+      open,
+      event: {
+        id: "e1",
+        start,
+        end: new Date(2026, 5, 16, 11, 0),
+        allDay: false,
+        text: "Dentist",
+        calendarId: "cal-work",
+        status: "synced",
+        readOnly: false,
+      },
+      mode: "boxes",
+    });
+    const button = screen.getByRole("button", { name: /^Dentist, .*, Work$/ });
+    expect(button.getAttribute("tabindex")).toBe("0");
+    await fireEvent.keyDown(button, { key: "Enter" });
+    await fireEvent.keyDown(button, { key: " " });
+    await fireEvent.keyDown(button, { key: "a" });
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(open).toHaveBeenCalledWith("e1");
+  });
+});

@@ -7,6 +7,8 @@
   --uc-text: #1d2026;
   --uc-text-muted: #5f6672;
   --uc-border: #dfe2e7;
+  /* Edges of text fields and selects: 3:1 against every background (WCAG 1.4.11). */
+  --uc-control-border: #858b95;
   --uc-accent: #3b5bdb;
   --uc-accent-strong: #2b44a8;
   --uc-accent-text: #ffffff;
@@ -24,6 +26,7 @@
   --uc-text: #e6e8ec;
   --uc-text-muted: #9aa1ad;
   --uc-border: #33373f;
+  --uc-control-border: #6b717c;
   --uc-accent: #7a8cff;
   --uc-accent-strong: #5468e8;
   --uc-accent-text: #0f1115;
@@ -57,6 +60,18 @@ body {
   --wx-font-family: system-ui, "Noto Sans", "Segoe UI", Cantarell, sans-serif;
 }
 
+/* SVAR's secondary text colours (other-month days, headers, today) fall
+   below 4.5:1; the calendar uses ones that reach it on SVAR's backgrounds. */
+.wx-theme.wx-willow-theme {
+  --wx-color-font-alt: #5f6672;
+  --wx-color-secondary-font: #3b5bdb;
+}
+
+.wx-theme.wx-willow-dark-theme {
+  --wx-color-font-alt: #b4b9c3;
+  --wx-color-secondary-font: #a9b4ff;
+}
+
 button,
 input,
 select,
@@ -74,6 +89,12 @@ textarea {
   background: var(--uc-surface);
   padding: 0.3rem 0.6rem;
   min-height: 2rem;
+}
+
+input:not([type="checkbox"]):not([type="color"]),
+select,
+textarea {
+  border-color: var(--uc-control-border);
 }
 
 button {
@@ -98,6 +119,18 @@ button.danger {
 :focus-visible {
   outline: 2px solid var(--uc-focus);
   outline-offset: 1px;
+}
+
+/* Honour the desktop's "reduce animations" setting. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 .sr-only {

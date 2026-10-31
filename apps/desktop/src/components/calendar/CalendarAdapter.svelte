@@ -9,7 +9,8 @@
   changed, because changing it rebuilds SVAR's whole store.
 -->
 <script lang="ts">
-  import { onDestroy, untrack } from "svelte";
+  import { onDestroy, setContext, untrack } from "svelte";
+  import EventContent from "./EventContent.svelte";
   import { Calendar, Willow, WillowDark, type CalendarInstanceApi } from "@svar-ui/svelte-calendar";
   import type { EventStore, StoreChange } from "../../stores/events.svelte";
   import type { CalendarsStore } from "../../stores/calendars.svelte";
@@ -17,6 +18,7 @@
   import type { Theme } from "../../services/theme";
   import { overlaps, eventBounds } from "../../services/time";
   import {
+    EVENT_CONTEXT,
     calendarColorCss,
     eventClass,
     isViewKind,
@@ -24,6 +26,7 @@
     shiftTiming,
     timingFromWidget,
     toSvarEvent,
+    type EventContext,
     type SvarEvent,
   } from "./svarMapping";
   import {
@@ -65,6 +68,13 @@
   }: Props = $props();
 
   const noEvents: SvarEvent[] = [];
+
+  // Event content (see EventContent.svelte) labels events and opens them
+  // from the keyboard.
+  setContext<EventContext>(EVENT_CONTEXT, {
+    calendarName: (id) => calendars.get(id)?.name ?? "Unknown calendar",
+    open: (id) => oneditor({ mode: "edit", id }),
+  });
 
   /** Hour shown at the top when week/day view opens in full-day mode. */
   const MORNING_HOUR = 7;
@@ -328,6 +338,7 @@
       toolbar={null}
       {views}
       {eventCss}
+      eventContent={EventContent}
       init={mount}
     />
   {/key}
