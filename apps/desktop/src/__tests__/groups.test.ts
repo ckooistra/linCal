@@ -81,3 +81,27 @@ describe("CalendarsStore display choices", () => {
     expect(s.choices()["cal-work"]).toBe(true);
   });
 });
+
+describe("same-named calendars", () => {
+  it("are told apart by account only when names clash", () => {
+    const s = new CalendarsStore();
+    s.load(
+      [
+        { id: "local", name: "On this computer", provider: "local" },
+        { id: "nc", name: "chris @ cloud.example.org", provider: "caldav" },
+        { id: "g", name: "chris@gmail.com (Google)", provider: "google" },
+      ],
+      [
+        { id: "local-personal", accountId: "local", name: "Personal", color: "#2f9e44", readOnly: false },
+        { id: "nc/personal", accountId: "nc", name: "Personal", color: "#0082c9", readOnly: false },
+        { id: "g/primary", accountId: "g", name: "personal", color: "#9fc6e7", readOnly: false },
+        { id: "nc/work", accountId: "nc", name: "Work", color: "#ff0000", readOnly: false },
+      ],
+    );
+    expect(s.label("nc/personal")).toBe("Personal (chris @ cloud.example.org)");
+    expect(s.label("g/primary")).toBe("personal (chris@gmail.com (Google))");
+    expect(s.accountHint("local-personal")).toBe("On this computer");
+    expect(s.label("nc/work")).toBe("Work");
+    expect(s.accountHint("nc/work")).toBeNull();
+  });
+});

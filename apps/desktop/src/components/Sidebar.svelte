@@ -50,14 +50,17 @@
     <ul aria-label="Calendars in the sidebar">
       {#each calendars.sidebarCalendars as cal (cal.id)}
         <li>
-          <label class="cal" title={cal.readOnly ? `${cal.name} (read-only)` : cal.name}>
+          <label class="cal" title={`${calendars.label(cal.id)}${cal.readOnly ? " (read-only)" : ""}`}>
             <span class="dot" style:background={cal.color} aria-hidden="true"></span>
-            <span class="name">{cal.name}</span>
+            <span class="name">
+              {cal.name}
+              {#if calendars.accountHint(cal.id)}<span class="hint">{calendars.accountHint(cal.id)}</span>{/if}
+            </span>
             <input
               type="checkbox"
               checked={!calendars.hidden.has(cal.id)}
               onchange={() => ontogglecalendar(cal.id)}
-              aria-label={`Show events of ${cal.name}`}
+              aria-label={`Show events of ${calendars.label(cal.id)}`}
               style:accent-color={cal.color}
             />
           </label>
@@ -130,6 +133,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .hint {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--uc-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .empty {
     margin: 0.25rem 0.3rem;

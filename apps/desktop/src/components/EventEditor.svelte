@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
-  import type { Calendar, CalendarEvent, ConflictVersions, EventDraft, EventTiming, Resolution } from "../types/calendar";
+  import type {
+    Account,
+    Calendar,
+    CalendarEvent,
+    ConflictVersions,
+    EventDraft,
+    EventTiming,
+    Resolution,
+  } from "../types/calendar";
   import { compareVersions, type ComparedField } from "../services/conflict";
   import type { SeriesScope } from "../stores/events.svelte";
   import { buildRule, defaultForm, isPreset, parseRule, REPEAT_PRESETS, type RuleForm } from "../services/recurrence";
@@ -23,6 +31,8 @@
     /** Initial timing for a new event. */
     timing: EventTiming;
     calendars: readonly Calendar[];
+    /** Accounts, to group calendars (same-named calendars are told apart by account). */
+    accounts?: readonly Account[];
     defaultCalendarId: string | null;
     readOnly: boolean;
     /** Saves; for an occurrence of a series, `scope` says which events change. */
@@ -45,6 +55,7 @@
     event,
     timing,
     calendars,
+    accounts = [],
     defaultCalendarId,
     readOnly,
     onsave,
@@ -180,6 +191,12 @@
   }
 
   const choices = $derived(readOnly ? calendars : calendars.filter((c) => !c.readOnly || c.id === calendarId));
+  /** Choices under their accounts, when there are several accounts. */
+  const choiceGroups = $derived(
+    accounts
+      .map((a) => ({ account: a, items: choices.filter((c) => c.accountId === a.id) }))
+      .filter((g) => g.items.length > 0),
+  );
   const heading = $derived(event ? (readOnly ? "Event details" : "Edit event") : "New event");
 
   function buildTiming(): EventTiming | string {
@@ -395,9 +412,19 @@
         <label class="full">
           <span>Calendar</span>
           <select bind:value={calendarId}>
-            {#each choices as c (c.id)}
-              <option value={c.id}>{c.name}</option>
-            {/each}
+            {#if choiceGroups.length > 1}
+              {#each choiceGroups as g (g.account.id)}
+                <optgroup label={g.account.name}>
+                  {#each g.items as c (c.id)}
+                    <option value={c.id}>{c.name}</option>
+                  {/each}
+                </optgroup>
+              {/each}
+            {:else}
+              {#each choices as c (c.id)}
+                <option value={c.id}>{c.name}</option>
+              {/each}
+            {/if}
           </select>
         </label>
         <label class="check">

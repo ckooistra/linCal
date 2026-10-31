@@ -633,3 +633,57 @@ describe("CommandPalette", () => {
     expect(onclose).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Choosing a calendar for new events", () => {
+  const accounts = [
+    { id: "local", name: "On this computer", provider: "local" as const },
+    { id: "nc", name: "chris @ cloud", provider: "caldav" as const },
+  ];
+  const cals = [
+    { id: "local-personal", accountId: "local", name: "Personal", color: "#2f9e44", readOnly: false },
+    { id: "nc/personal", accountId: "nc", name: "Personal", color: "#0082c9", readOnly: false },
+  ];
+
+  it("groups the editor's calendars by account and starts at the default", () => {
+    const start = parseIsoDate("2026-06-16").getTime() + 9 * 3_600_000;
+    render(EventEditor, {
+      event: null,
+      timing: { kind: "timed", start, end: start + 3_600_000, timeZone: "Europe/Berlin" },
+      calendars: cals,
+      accounts,
+      defaultCalendarId: "nc/personal",
+      readOnly: false,
+      onsave: () => null,
+      ondelete: noop,
+      onclose: noop,
+    });
+    const select = screen.getByLabelText("Calendar") as HTMLSelectElement;
+    expect(select.value).toBe("nc/personal");
+    expect([...select.querySelectorAll("optgroup")].map((g) => g.label)).toEqual(["On this computer", "chris @ cloud"]);
+  });
+
+  it("is set in Settings", async () => {
+    const { default: SettingsDialog } = await import("../components/SettingsDialog.svelte");
+    const calendars = new CalendarsStore();
+    calendars.load(accounts, cals);
+    const ondefaultcalendar = vi.fn();
+    render(SettingsDialog, {
+      calendars,
+      groups: new GroupsStore(),
+      themePreference: "system",
+      ontheme: noop,
+      ontogglecalendar: noop,
+      onsidebar: noop,
+      oncolor: noop,
+      ongroupschange: noop,
+      onshortcuts: noop,
+      onclose: noop,
+      defaultCalendarId: "local-personal",
+      ondefaultcalendar,
+    });
+    const select = screen.getByLabelText("New events go to") as HTMLSelectElement;
+    expect(select.value).toBe("local-personal");
+    await fireEvent.change(select, { target: { value: "nc/personal" } });
+    expect(ondefaultcalendar).toHaveBeenCalledWith("nc/personal");
+  });
+});

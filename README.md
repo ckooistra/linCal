@@ -58,7 +58,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - **Agenda view** (**A**): one month as a list grouped by day, opening at today. Events spanning several days appear on each of them. **↑/↓** move between events; **Enter** opens one.
 - A **Personal** calendar *on this computer* is always there, so events can be added without any account. It is never synchronized.
 - **A minimal sidebar:** a calendar-group selector and the calendars you chose for it, each with a toggle for its events. Everything else is in **Settings** (⚙ at the bottom of the sidebar, or **Ctrl+,**):
-  - **Calendars:** colour, *in sidebar*, *show events*. A calendar left out of the sidebar stays connected and can still show events.
+  - **Calendars:** colour, *in sidebar*, *show events*, and **New events go to**, the default calendar for new events (for example your Nextcloud calendar rather than the local one). A calendar left out of the sidebar stays connected and can still show events. Calendars with the same name, such as *Personal* in several accounts, are shown with their account, and the editor's calendar list is grouped by account.
   - **Calendar groups:** named sets of calendars, such as Work or Family, each with its own colour; a calendar can be in several. Choosing a group at the top of the sidebar shows exactly its calendars, at once and without reloading. Calendar colours are not changed. After a manual toggle the selector says *Custom selection*.
   - **Accounts:** add, remove, sign in again, review sync problems, and sync now. When an account needs attention, one line at the bottom of the sidebar says so and opens this tab.
   - **Appearance and General:** theme, title bar, reminder notifications, keyboard shortcuts.

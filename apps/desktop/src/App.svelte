@@ -570,9 +570,23 @@
     if (!result.ok) notifications.push(result.message);
   }
 
-  const defaultCalendarId = $derived(
-    calendars.writable.find((c) => !calendars.hidden.has(c.id))?.id ?? calendars.writable[0]?.id ?? null,
+  /** The calendar chosen in Settings for new events (if it still exists and is writable). */
+  let preferredCalendar = $state<string | null>(
+    typeof initialSettings.defaultCalendar === "string" ? initialSettings.defaultCalendar : null,
   );
+  const defaultCalendarId = $derived(
+    (preferredCalendar && calendars.get(preferredCalendar) && !calendars.isReadOnly(preferredCalendar)
+      ? preferredCalendar
+      : null) ??
+      calendars.writable.find((c) => !calendars.hidden.has(c.id))?.id ??
+      calendars.writable[0]?.id ??
+      null,
+  );
+
+  function setDefaultCalendar(id: string): void {
+    preferredCalendar = id;
+    persist("defaultCalendar", () => id, "default calendar");
+  }
 
   // --- settings and command palette -----------------------------------------
   /** Open Settings tab, or null when closed. */
@@ -651,7 +665,7 @@
       const shown = !calendars.hidden.has(c.id);
       list.push({
         id: `toggle-${c.id}`,
-        title: `${shown ? "Hide" : "Show"} ${c.name}`,
+        title: `${shown ? "Hide" : "Show"} ${calendars.label(c.id)}`,
         keywords: "toggle calendar visibility events",
         section: "Calendars",
         run: () => void measureInteraction("visibility-toggle", () => toggleCalendar(c.id)),
@@ -968,6 +982,7 @@
       event={editor.event}
       timing={editor.timing}
       calendars={calendars.calendars}
+      accounts={calendars.accounts}
       {defaultCalendarId}
       readOnly={editor.event ? calendars.isReadOnly(editor.event.calendarId) : false}
       onsave={saveEditor}
@@ -1040,6 +1055,8 @@
     onnotifications={setNotifications}
     ontogglecalendar={(id) => void measureInteraction("visibility-toggle", () => toggleCalendar(id))}
     onsidebar={setInSidebar}
+    {defaultCalendarId}
+    ondefaultcalendar={setDefaultCalendar}
     oncolor={setCalendarColor}
     ongroupschange={saveGroups}
     onaddaccount={desktop ? (kind) => void openAddAccount(kind) : undefined}

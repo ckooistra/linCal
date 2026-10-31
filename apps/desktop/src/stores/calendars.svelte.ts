@@ -102,6 +102,33 @@ export class CalendarsStore {
     this.#recompute();
   }
 
+  /** Names used by more than one calendar (e.g. "Personal" in several accounts). */
+  #sharedNames = $derived.by(() => {
+    const seen = new Set<string>();
+    const shared = new Set<string>();
+    for (const c of this.calendars) {
+      const key = c.name.trim().toLowerCase();
+      if (seen.has(key)) shared.add(key);
+      seen.add(key);
+    }
+    return shared;
+  });
+
+  /** The account a calendar belongs to, when its name alone is ambiguous. */
+  accountHint(id: CalendarId): string | null {
+    const c = this.#byId.get(id);
+    if (!c || !this.#sharedNames.has(c.name.trim().toLowerCase())) return null;
+    return this.accounts.find((a) => a.id === c.accountId)?.name ?? null;
+  }
+
+  /** The calendar's name, with its account when another calendar has the same name. */
+  label(id: CalendarId): string {
+    const c = this.#byId.get(id);
+    if (!c) return id;
+    const hint = this.accountHint(id);
+    return hint ? `${c.name} (${hint})` : c.name;
+  }
+
   get(id: CalendarId): Calendar | undefined {
     return this.#byId.get(id);
   }

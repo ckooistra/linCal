@@ -36,6 +36,9 @@
     /** Show or hide a calendar in the sidebar. */
     onsidebar: (id: CalendarId, on: boolean) => void;
     oncolor: (id: CalendarId, color: string) => void;
+    /** The calendar new events go into, and how to change it. */
+    defaultCalendarId?: CalendarId | null;
+    ondefaultcalendar?: (id: CalendarId) => void;
     /** The groups changed (to be saved). */
     ongroupschange: () => void;
     /** Account actions (desktop only). */
@@ -69,6 +72,8 @@
     ontogglecalendar,
     onsidebar,
     oncolor,
+    defaultCalendarId = null,
+    ondefaultcalendar,
     ongroupschange,
     onaddaccount,
     onremoveaccount,
@@ -262,6 +267,23 @@
           {#if byAccount.length === 0}
             <p class="empty">No calendars yet. Add an account under Accounts.</p>
           {/if}
+          {#if ondefaultcalendar && calendars.writable.length > 0}
+            <label class="field">
+              <span>New events go to</span>
+              <select value={defaultCalendarId ?? ""} onchange={(e) => ondefaultcalendar(e.currentTarget.value)}>
+                {#each byAccount as { account, items } (account.id)}
+                  {@const writable = items.filter((c) => !c.readOnly)}
+                  {#if writable.length > 0}
+                    <optgroup label={account.name}>
+                      {#each writable as cal (cal.id)}
+                        <option value={cal.id}>{cal.name}</option>
+                      {/each}
+                    </optgroup>
+                  {/if}
+                {/each}
+              </select>
+            </label>
+          {/if}
           {#each byAccount as { account, items } (account.id)}
             <section class="group-of-calendars" aria-labelledby={`settings-account-${account.id}`}>
               <h3 id={`settings-account-${account.id}`}>{account.name}</h3>
@@ -336,7 +358,7 @@
                   <label class="check">
                     <input type="checkbox" checked={draft.members.includes(cal.id)} onchange={() => toggleMember(cal.id)} />
                     <span class="dot" style:background={cal.color} aria-hidden="true"></span>
-                    <span>{cal.name}</span>
+                    <span>{calendars.label(cal.id)}</span>
                   </label>
                 {/each}
               </fieldset>
