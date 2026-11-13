@@ -743,3 +743,36 @@ async fn conflicting_deletions_are_listed_and_resolvable() {
         vec![("Shared, edited".into(), SyncStatus::Synced)]
     );
 }
+
+#[tokio::test]
+async fn imported_files_are_uploaded_once() {
+    let e = env().await;
+    let file = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n\
+BEGIN:VEVENT\r\nUID:weekly@elsewhere\r\nDTSTART;TZID=Europe/Berlin:20260601T090000\r\n\
+DTEND;TZID=Europe/Berlin:20260601T093000\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\nSUMMARY:Weekly\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:weekly@elsewhere\r\nRECURRENCE-ID;TZID=Europe/Berlin:20260608T090000\r\n\
+DTSTART;TZID=Europe/Berlin:20260608T110000\r\nDTEND;TZID=Europe/Berlin:20260608T113000\r\n\
+SUMMARY:Weekly (moved)\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let report = calendar_sync::import_ics(&e.store, &e.calendar_id, file.into())
+        .await
+        .unwrap();
+    assert_eq!(report.imported, 1);
+    assert_eq!(e.engine.sync_account("acct").await.unwrap().uploaded, 1);
+    let objects = e.server.objects.lock().unwrap().clone();
+    assert_eq!(objects.len(), 1);
+    let (_, uploaded) = objects.values().next().unwrap();
+    assert!(uploaded.contains("RRULE:FREQ=WEEKLY;COUNT=3"), "{uploaded}");
+    assert!(uploaded.contains("RECURRENCE-ID") && uploaded.contains("SUMMARY:Weekly (moved)"));
+    assert!(
+        titles(&e.store)
+            .await
+            .iter()
+            .all(|(_, s)| *s == SyncStatus::Synced)
+    );
+    // Importing again finds the events in the calendar.
+    let again = calendar_sync::import_ics(&e.store, &e.calendar_id, file.into())
+        .await
+        .unwrap();
+    assert_eq!((again.imported, again.already_present), (0, 1));
+    assert_eq!(e.engine.sync_account("acct").await.unwrap().uploaded, 0);
+}

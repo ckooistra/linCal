@@ -131,6 +131,21 @@ The same pattern as the scheduler: a loop that sleeps **until the next reminder*
 - **`sort_by_key(|r| (r.fire_at, r.start))`:** tuples sort field by field.
 - **`impl Fn() -> Tz + Send + 'static`** as a parameter type: "any closure that returns a time zone and can move to another thread" ([§10](concepts.md#10-closures)).
 
+### `import.rs`: importing an .ics file
+
+`import_ics(store, calendar_id, text)` is the whole "Import events from a file" feature, minus the UI:
+
+1. It refuses files over 20 MB.
+2. It splits the file into one object per UID with `calendar_ics::split_feed` (the same code subscriptions use), and reads each with `ICalendarCodec`. Both steps run on the blocking pool, because the text is untrusted and may be large.
+3. It hands the objects to `Store::import_objects`, then adds any events that couldn't be read to the report.
+
+It takes a `&Store` rather than the engine, because importing into a local calendar needs no network. Uploading happens later, through the normal sync pass.
+
+**Rust concepts:**
+- **A dedicated error enum** (`ImportError`) with `#[error(transparent)]`, which shows the wrapped storage error's message unchanged ([§9](concepts.md#9-error-handling-with-thiserror)).
+- **`move` into `spawn_blocking`:** the `String` is moved into the closure, so the thread owns it and no copy is made ([§1](concepts.md#1-variables-ownership-and-borrowing)).
+- **Unit structs as values:** `ICalendarCodec.read(…)` calls a method on a struct with no fields.
+
 ### `credentials.rs`: where passwords live
 
 ```rust
@@ -161,6 +176,7 @@ Keyring calls can block, so the engine always calls them inside `spawn_blocking`
 | `engine.rs` | the CalDAV engine against wiremock: upload, download, conflicts, merges, retries, backoff |
 | `google.rs`, `microsoft.rs` | the full engine with `FakeGoogle` and `FakeGraph` |
 | `ics.rs` | subscriptions end to end |
+| `engine.rs` (`imported_files_are_uploaded_once`) | an imported series with an exception uploaded once, then skipped on re-import |
 | `real_server.rs` | optional, against a real CalDAV server (Radicale or Nextcloud), when `UC_CALDAV_URL` is set |
 
 Each test builds its own engine with an in-memory `Store` and `MemoryCredentials`. Trait objects make this swap easy: the engine can't tell a fake from the real thing.

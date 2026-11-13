@@ -14,11 +14,13 @@
 
 pub mod credentials;
 pub mod engine;
+pub mod import;
 pub mod reminders;
 pub mod scheduler;
 
 pub use calendar_oauth::OAuthError;
 pub use calendar_storage::Resolution;
+pub use calendar_storage::{ImportProblem, ImportReport};
 #[cfg(feature = "keyring")]
 pub use credentials::KeyringCredentials;
 pub use credentials::{CredentialStore, MemoryCredentials};
@@ -26,6 +28,7 @@ pub use engine::{
     BrowserOpener, CalDavConfig, ConflictView, IcsConfig, OAuthConfig, SyncEngine, SyncError,
     SyncEvent, SyncProblem, SyncReport, backoff, codec_for, default_factory, user_message,
 };
+pub use import::{ImportError, import_ics};
 pub use reminders::{DueReminder, RemindersHandle, reminder_loop};
 pub use scheduler::{SchedulerHandle, scheduler};
 /// Signal used to cancel a long operation (account setup).

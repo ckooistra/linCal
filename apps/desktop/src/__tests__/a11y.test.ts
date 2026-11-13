@@ -19,6 +19,7 @@ import SettingsDialog from "../components/SettingsDialog.svelte";
 import Sidebar from "../components/Sidebar.svelte";
 import { GroupsStore } from "../stores/groups.svelte";
 import SubscriptionDialog from "../components/SubscriptionDialog.svelte";
+import ImportDialog from "../components/ImportDialog.svelte";
 import SyncProblemsDialog from "../components/SyncProblemsDialog.svelte";
 import Toasts from "../components/Toasts.svelte";
 import Toolbar from "../components/Toolbar.svelte";
@@ -166,6 +167,10 @@ describe("accessibility (axe)", () => {
     ["ShortcutsDialog", () => check(ShortcutsDialog, { onclose: noop })],
     ["AddAccountDialog", () => check(AddAccountDialog, { onsubmit: async () => null, onclose: noop } as never)],
     ["SubscriptionDialog", () => check(SubscriptionDialog, { onsubmit: async () => null, onclose: noop } as never)],
+    [
+      "ImportDialog",
+      () => check(ImportDialog, { calendars: calendars(), defaultCalendarId: null, onimport: async () => ({}), onclose: noop } as never),
+    ],
     [
       "OAuthAccountDialog",
       () => check(OAuthAccountDialog, { provider: "google", builtInClientId: null, onsubmit: async () => null, onclose: noop } as never),

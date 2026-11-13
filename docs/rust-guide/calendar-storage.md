@@ -97,6 +97,26 @@ The `Sent` state exists because a network failure can happen *after* the server 
 - **`&mut Transaction<'_, Sqlite>` parameters:** helpers borrow the caller's transaction, so many steps join one commit. `'_` means "some lifetime, let the compiler work it out".
 - **Enums as state machines** (`Presence`, `OpKind`, `Resolution`).
 
+### `import.rs`: importing events from a file
+
+`Store::import_objects(calendar_id, objects)` stores events read from an `.ics` file, in **one transaction**. Each event becomes a new local event (queued for upload in a synced calendar), and the result is an `ImportReport`: imported, already there, skipped, adjusted.
+
+- **No duplicates.** A row id is derived from the calendar and the event's UID (`import_id`), so the same file imported twice finds its own rows. Events the server already has are found by UID in `remote_objects`.
+- **Checks before storing.** Invalid timings or rules, and rules the calendar's provider can't hold (Outlook), are reported and skipped. Extra reminders are dropped and reported.
+
+```rust
+let checked = std::iter::once(master)
+    .chain(&object.overrides)
+    .try_for_each(check_component);      // stops at the first Err
+```
+
+**Rust concepts:**
+- **`try_for_each`:** runs a fallible check on every item and stops at the first error ([concepts §11](concepts.md#11-iterators)).
+- **`flat_map` with a function name:** `objects.into_iter().flat_map(standalone)` turns objects with a lone occurrence into separate events.
+- **A closure that changes a captured variable:** the `row` closure sets `dropped` when it removes reminders, so it's declared `let mut row = |…| { … }` ([§10](concepts.md#10-closures)).
+- **Child modules see their parent's private items:** `import.rs` calls private `Store` helpers like `writable_calendar` and `insert` that are defined in `lib.rs`.
+- **`#[derive(Serialize)]` on the report** so the desktop app can hand it straight to the UI.
+
 ### `codec.rs`: rows ⇄ models
 
 Converts between a database row (`EventRow`, plain strings and numbers) and `calendar-core`'s rich types (`CalendarEvent` with its `EventTiming` enum).

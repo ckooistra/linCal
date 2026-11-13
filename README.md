@@ -50,6 +50,12 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - Private feed addresses work like passwords, so the address is kept in the system keyring and never in the database or logs.
 - Checked against Google's and Apple's public holiday feeds. Feeds that need a user name and password aren't supported yet.
 
+### Importing .ics files
+
+- **Import events from a file…** (Settings → Calendars, or Ctrl+K) copies the events of an `.ics` file into any writable calendar, preselecting the default one. Repeating events keep their exceptions, time zones and reminders.
+- In a synchronized calendar the imported events upload like events created in the app. Importing the same file again skips events already there, including ones the server already has (same UID).
+- A summary lists what was imported, what was already there, and events that were skipped or changed to fit the calendar: for example a repeat rule Outlook can't hold, or reminders beyond what the calendar keeps. Attendees and other details the app doesn't model aren't copied.
+
 ### Calendar
 
 - Tauri 2 desktop shell with a Svelte 5 + TypeScript (strict) + Vite frontend.
@@ -218,7 +224,7 @@ See [docs/architecture.md](docs/architecture.md). New to Rust? [docs/rust-guide/
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
 3. CalDAV (Nextcloud reference) with offline queue ✔
 4. Google Calendar and Microsoft Graph ✔ (Google checked live; Microsoft tested against an API fake, live check pending)
-5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, reminders and notifications, automatic merging and conflict comparison, accessibility pass, settings dialog with calendar groups and command palette, packaging (deb, rpm, AppImage). Next: user guide, profiling.
+5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, importing .ics files, reminders and notifications, automatic merging and conflict comparison, accessibility pass, settings dialog with calendar groups and command palette, packaging (deb, rpm, AppImage). Next: user guide, profiling.
 
 ## License
 

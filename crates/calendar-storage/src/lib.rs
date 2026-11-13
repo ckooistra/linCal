@@ -6,8 +6,10 @@
 //! above them) are never stalled. Related writes share one transaction.
 
 mod codec;
+mod import;
 mod remote;
 
+pub use import::{ImportProblem, ImportReport};
 pub use remote::{
     AccountStatus, ApplyReport, IncomingObject, OpFailure, OpKind, PendingOp, Presence,
     ProblemOperation, PushObject, RemoteAccount, RemoteCalendarSpec, RemoteCalendarState,

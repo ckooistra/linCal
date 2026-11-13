@@ -5,7 +5,14 @@
  */
 
 import { SourceError } from "./eventSource";
-import type { AccountStatus, ConflictVersions, Resolution, SyncEvent, SyncProblem } from "../types/calendar";
+import type {
+  AccountStatus,
+  ConflictVersions,
+  ImportReport,
+  Resolution,
+  SyncEvent,
+  SyncProblem,
+} from "../types/calendar";
 
 export interface BenchConfig {
   enabled: boolean;
@@ -129,6 +136,10 @@ export async function addIcsSubscription(address: string): Promise<string> {
 }
 
 /** OAuth client ID built into this app for a provider, if any (never a secret). */
+export async function importIcs(calendarId: string, text: string): Promise<ImportReport> {
+  return invoke<ImportReport>("import_ics", { calendarId, text });
+}
+
 export async function oauthClientId(provider: "google" | "microsoft"): Promise<string | null> {
   return invoke<string | null>("oauth_client_id", { provider });
 }

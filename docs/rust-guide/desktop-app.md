@@ -80,7 +80,9 @@ Other helpers: `system_zone()` reads the computer's time zone; `notify()` format
 
 ### `commands.rs`: what the UI may call
 
-About 25 small `#[tauri::command]` functions: `query_range`, `search_events`, `create_event`, `update_event`, `delete_event`, `set_setting`, `add_caldav_account`, `add_google_account`, `sync_now`, `resolve_conflict`, and more.
+About 25 small `#[tauri::command]` functions: `query_range`, `search_events`, `create_event`, `update_event`, `delete_event`, `set_setting`, `add_caldav_account`, `add_google_account`, `import_ics`, `sync_now`, `resolve_conflict`, and more.
+
+`import_ics` receives the file's text, not a path: the UI reads the file the user picked. That way the Rust side never opens files by a path the web page chose.
 
 ```rust
 #[tauri::command]

@@ -21,7 +21,7 @@ crates/
 ├── calendar-google/          Google Calendar API v3 provider + JSON codec (series = master + exceptions)
 ├── calendar-microsoft/       Microsoft Graph provider + JSON codec (calendarView delta over a moving window)
 ├── calendar-ics/             Read-only iCalendar feed subscriptions (one object per UID, conditional GET)
-├── calendar-sync/            SyncEngine (push → calendars → pull), scheduler, reminder notifications loop, account sign-in, CredentialStore (keyring / memory)
+├── calendar-sync/            SyncEngine (push → calendars → pull), scheduler, reminder notifications loop, .ics file import, account sign-in, CredentialStore (keyring / memory)
 ├── calendar-core/            No I/O, no Tauri
 │   ├── model.rs              Account, Calendar, CalendarEvent, EventTiming, Recurrence, SeriesLink, Occurrence, SyncStatus
 │   ├── timing.rs             Instants for zoned/floating/all-day timings, DST-gap/overlap resolution, validation

@@ -102,13 +102,22 @@ pub fn split_feed(text: &str) -> Result<Feed, String> {
         .children("VTIMEZONE")
         .filter_map(|z| Some((z.property("TZID")?.value.as_str(), z)))
         .collect();
-    let mut groups: BTreeMap<String, Vec<&Component>> = BTreeMap::new();
+    let mut groups: BTreeMap<String, Vec<Component>> = BTreeMap::new();
     for event in cal.children("VEVENT") {
-        let uid = event
+        let mut event = event.clone();
+        let uid = match event
             .property("UID")
             .map(|p| p.value.trim().to_owned())
             .filter(|u| !u.is_empty())
-            .unwrap_or_else(|| format!("no-uid-{:016x}", fnv(event.to_ics().as_bytes())));
+        {
+            Some(uid) => uid,
+            None => {
+                // Readers need a UID: give the event a stable one.
+                let uid = format!("no-uid-{:016x}", fnv(event.to_ics().as_bytes()));
+                event.set(Property::new("UID", uid.clone()));
+                uid
+            }
+        };
         groups.entry(uid).or_default().push(event);
     }
     let mut objects = Vec::with_capacity(groups.len());
@@ -134,7 +143,7 @@ pub fn split_feed(text: &str) -> Result<Feed, String> {
                 object.components.push((*zone).clone());
             }
         }
-        object.components.extend(events.into_iter().cloned());
+        object.components.extend(events);
         let data = object.to_ics();
         objects.push(RemoteObject {
             href: object_href(&uid),

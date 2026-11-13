@@ -8,6 +8,7 @@ import type {
   AccountStatus,
   Calendar,
   ConflictVersions,
+  ImportReport,
   Resolution,
   SyncEvent,
   SyncProblem,
@@ -19,6 +20,7 @@ import {
   addIcsSubscription,
   addMicrosoftAccount,
   cancelAddAccount,
+  importIcs,
   oauthClientId,
   isTauri,
   loadSettings,
@@ -62,6 +64,8 @@ export interface Backend {
   /** Read-only iCalendar feed subscription (desktop only). */
   addIcsSubscription(address: string): Promise<string>;
   cancelAddAccount(): Promise<void>;
+  /** Imports the events of an .ics file's text into a calendar (desktop only). */
+  importIcs(calendarId: string, text: string): Promise<ImportReport>;
   oauthClientId(provider: "google" | "microsoft"): Promise<string | null>;
   addGoogleAccount(clientId: string, clientSecret: string | null): Promise<string>;
   addMicrosoftAccount(clientId: string): Promise<string>;
@@ -118,6 +122,7 @@ async function desktopBackend(): Promise<Backend> {
     addCaldavAccount,
     addIcsSubscription,
     cancelAddAccount,
+    importIcs,
     oauthClientId,
     addGoogleAccount,
     addMicrosoftAccount,
@@ -158,6 +163,8 @@ function previewBackend(settings: Settings): Backend {
     addCaldavAccount: desktopOnly,
     addIcsSubscription: desktopOnly,
     cancelAddAccount: async () => {},
+    importIcs: () =>
+      Promise.reject(new SourceError("Importing files is only available in the desktop app, not the browser preview.")),
     oauthClientId: async () => null,
     addGoogleAccount: desktopOnly,
     addMicrosoftAccount: desktopOnly,

@@ -3,12 +3,13 @@
 
 use calendar_core::sim::{self, DatasetOptions};
 use calendar_core::wire::{WireDraft, WireEvent, WireRange};
-use calendar_core::{Account, Calendar, CoreError, parse_time_zone};
+use calendar_core::{Account, Calendar, CoreError, ProviderKind, parse_time_zone};
 use std::sync::Arc;
 
 use calendar_storage::{AccountStatus, StorageError, Store};
 use calendar_sync::{
-    Resolution, SchedulerHandle, SyncEngine, SyncError, SyncProblem, user_message,
+    ImportError, ImportReport, Resolution, SchedulerHandle, SyncEngine, SyncError, SyncProblem,
+    user_message,
 };
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -119,6 +120,19 @@ impl From<StorageError> for CommandError {
             _ => capitalize(&error.to_string()),
         };
         Self { code, message }
+    }
+}
+
+impl From<ImportError> for CommandError {
+    fn from(error: ImportError) -> Self {
+        match error {
+            ImportError::Storage(e) => e.into(),
+            ImportError::File(message) => Self {
+                code: "invalid",
+                message,
+            },
+            ImportError::Task => StorageError::Task.into(),
+        }
     }
 }
 
@@ -377,6 +391,30 @@ pub async fn add_caldav_account(
     let id = result?;
     sync.scheduler.trigger();
     Ok(id)
+}
+
+/// Imports the events of an .ics file (its text, read by the UI) into a
+/// calendar. In a synchronized calendar they are queued for upload.
+#[tauri::command]
+pub async fn import_ics(
+    state: State<'_, AppState>,
+    calendar_id: String,
+    text: String,
+) -> CommandResult<ImportReport> {
+    let store = state.store()?;
+    let report = calendar_sync::import_ics(store, &calendar_id, text).await?;
+    if report.imported > 0 {
+        let synced = !matches!(
+            store.calendar_provider(&calendar_id).await?,
+            None | Some(ProviderKind::Local | ProviderKind::Simulated)
+        );
+        state.changed(if synced {
+            calendar_core::SyncStatus::PendingSync
+        } else {
+            calendar_core::SyncStatus::Saved
+        });
+    }
+    Ok(report)
 }
 
 /// Subscribes to an iCalendar feed (read-only calendar).

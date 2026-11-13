@@ -43,6 +43,8 @@
     ongroupschange: () => void;
     /** Account actions (desktop only). */
     onaddaccount?: (kind: AccountKind) => void;
+    /** Opens the "Import events" dialog (desktop only). */
+    onimport?: () => void;
     onremoveaccount?: (accountId: string) => void;
     onsignin?: (accountId: string) => void;
     onsyncnow?: () => void;
@@ -76,6 +78,7 @@
     ondefaultcalendar,
     ongroupschange,
     onaddaccount,
+    onimport,
     onremoveaccount,
     onsignin,
     onsyncnow,
@@ -283,6 +286,12 @@
                 {/each}
               </select>
             </label>
+          {/if}
+          {#if onimport && calendars.writable.length > 0}
+            <p class="import">
+              <button type="button" onclick={onimport}>Import events from a file…</button>
+              <span class="hint">Copies the events of an .ics file into one of your calendars.</span>
+            </p>
           {/if}
           {#each byAccount as { account, items } (account.id)}
             <section class="group-of-calendars" aria-labelledby={`settings-account-${account.id}`}>
@@ -683,6 +692,13 @@
     align-items: end;
   }
   .row label,
+  .import {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.75rem 0 0;
+  }
   .field {
     display: grid;
     gap: 0.25rem;

@@ -118,6 +118,26 @@ export interface AccountStatus {
   needsSignIn: boolean;
 }
 
+/** One event an import skipped or changed, and why. */
+export interface ImportProblem {
+  title: string;
+  reason: string;
+}
+
+/** What importing an .ics file did. */
+export interface ImportReport {
+  /** Events imported (a repeating event counts once). */
+  imported: number;
+  /** Events already in the calendar, left as they were. */
+  alreadyPresent: number;
+  /** Events that could not be imported. */
+  failed: ImportProblem[];
+  /** Imported events that had to be changed to fit the calendar. */
+  adjusted: ImportProblem[];
+  /** Problems beyond those listed. */
+  unlisted: number;
+}
+
 /** One version of an event, for comparing conflicting versions. */
 export interface EventVersion {
   title: string;

@@ -20,6 +20,7 @@
   import SearchResults from "./components/SearchResults.svelte";
   import ShortcutsDialog from "./components/ShortcutsDialog.svelte";
   import SubscriptionDialog from "./components/SubscriptionDialog.svelte";
+  import ImportDialog from "./components/ImportDialog.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import SyncProblemsDialog from "./components/SyncProblemsDialog.svelte";
   import Toasts from "./components/Toasts.svelte";
@@ -43,6 +44,7 @@
     CalendarViewKind,
     EventDraft,
     EventTiming,
+    ImportReport,
     Resolution,
     SyncEvent,
     SyncProblem,
@@ -152,6 +154,24 @@
       if (!addingAccount) return null; // cancelled: the dialog is gone
       return error instanceof Error ? error.message : "The calendar could not be subscribed to.";
     }
+  }
+
+  /** The "Import events" dialog is open. */
+  let importing = $state(false);
+
+  /** Opens above Settings when started from there. */
+  function openImport(): void {
+    paletteOpen = false;
+    importing = true;
+  }
+
+  async function importFile(calendarId: string, text: string): Promise<ImportReport> {
+    const report = await backend.importIcs(calendarId, text);
+    if (report.imported > 0) {
+      store.invalidate();
+      refreshStatuses();
+    }
+    return report;
   }
 
   async function addOAuth(clientId: string, clientSecret: string | null): Promise<string | null> {
@@ -680,6 +700,7 @@
         { id: "add-google", title: "Add Google account…", section: "Accounts", run: () => void openAddAccount("google") },
         { id: "add-microsoft", title: "Add Microsoft account…", keywords: "outlook", section: "Accounts", run: () => void openAddAccount("microsoft") },
         { id: "add-ics", title: "Subscribe to a calendar…", keywords: "ics webcal feed", section: "Accounts", run: () => void openAddAccount("ics") },
+        { id: "import-ics", title: "Import events from a file…", keywords: "ics icalendar open add", section: "Events", run: openImport },
       );
     }
     return list;
@@ -691,7 +712,7 @@
 
   function onKeydown(e: KeyboardEvent) {
     // Dialogs handle their own keys.
-    if (editor || addingAccount || removing || helpOpen || settingsTab || paletteOpen || reviewing) return;
+    if (editor || addingAccount || importing || removing || helpOpen || settingsTab || paletteOpen || reviewing) return;
     if (e.key === "Escape" && searchQuery) {
       clearSearch();
       searchInput?.focus();
@@ -1021,6 +1042,10 @@
   />
 {/if}
 
+{#if importing}
+  <ImportDialog {calendars} {defaultCalendarId} onimport={importFile} onclose={() => (importing = false)} />
+{/if}
+
 {#if reviewing}
   <SyncProblemsDialog
     {problems}
@@ -1060,6 +1085,7 @@
     oncolor={setCalendarColor}
     ongroupschange={saveGroups}
     onaddaccount={desktop ? (kind) => void openAddAccount(kind) : undefined}
+    onimport={desktop ? openImport : undefined}
     onsignin={(id) => void signInAgain(id)}
     onremoveaccount={(id) => (removing = { id, name: calendars.accounts.find((a) => a.id === id)?.name ?? id })}
     onsyncnow={() => void backend.syncNow()}

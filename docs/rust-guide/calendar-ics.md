@@ -23,7 +23,7 @@ Because a private feed URL is effectively a password, the URL is stored in the *
 ### `lib.rs`
 
 - `feed_url` turns what you typed into a URL: `webcal://` becomes `https://`, `example.org/cal.ics` gets `https://` added, and plain `http` is refused except for localhost.
-- `split_feed` parses the feed once and builds one small VCALENDAR per UID, each with the time zones it needs. It also reads the feed's own name and colour.
+- `split_feed` parses the feed once and builds one small VCALENDAR per UID, each with the time zones it needs. Events without a UID get a stable one made from a hash of their content. It also reads the feed's own name and colour. Importing `.ics` files uses it too (see `calendar-sync/src/import.rs`).
 - `fnv` is a tiny, stable hash (FNV-1a) used as each object's version.
 - `IcsProvider` implements `CalendarProvider`:
   - `list_calendars` returns one read-only calendar.

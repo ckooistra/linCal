@@ -2066,4 +2066,165 @@ mod sync {
         assert_eq!(plain.content.master.unwrap().title, "Plain");
         assert!(plain.content.overrides.is_empty());
     }
+
+    #[tokio::test]
+    async fn imports_are_queued_once_and_skip_what_is_there() {
+        let (store, cal) = remote_store().await;
+        let mut series = content("s@example", "Stand-up", Some("FREQ=DAILY;COUNT=3"));
+        series.overrides.push(EventContent {
+            reminders: Vec::new(),
+            title: "Stand-up (moved)".into(),
+            description: String::new(),
+            location: String::new(),
+            timing: zoned(local(2026, 6, 2, 15, 0), 30),
+            recurrence: None,
+            recurrence_id: Some(OccurrenceKey::Instant(resolve_local(
+                &BERLIN,
+                local(2026, 6, 2, 9, 0),
+            ))),
+        });
+        let objects = vec![series, content("one@example", "Dentist", None)];
+        let r = store.import_objects(&cal, objects.clone()).await.unwrap();
+        assert_eq!((r.imported, r.already_present), (2, 0));
+        assert!(r.failed.is_empty() && r.adjusted.is_empty());
+        let shown = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+        // Three stand-ups (one moved) and the dentist, all waiting to upload.
+        assert_eq!(shown.len(), 4);
+        assert_eq!(
+            shown.iter().filter(|o| o.title.contains("moved")).count(),
+            1
+        );
+        assert!(
+            shown
+                .iter()
+                .all(|o| o.sync_status == SyncStatus::PendingSync)
+        );
+        let ops = store.due_operations("acct-dav", i64::MAX).await.unwrap();
+        assert_eq!(ops.len(), 2);
+        let push = store
+            .object_for_push(&cal, &ops[0].href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(push.content.master.is_some());
+
+        // The same file again: nothing new.
+        let again = store.import_objects(&cal, objects).await.unwrap();
+        assert_eq!((again.imported, again.already_present), (0, 2));
+        assert_eq!(
+            store
+                .query_range(month(2026, 6), BERLIN)
+                .await
+                .unwrap()
+                .len(),
+            4
+        );
+
+        // An event already downloaded from the server (same UID) is skipped.
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming(
+                    "x.ics",
+                    "\"1\"",
+                    content("x@example", "Pulled", None),
+                )],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        let pulled = store
+            .import_objects(&cal, vec![content("x@example", "Pulled", None)])
+            .await
+            .unwrap();
+        assert_eq!((pulled.imported, pulled.already_present), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn imports_report_what_does_not_fit() {
+        let (store, cal) = remote_store().await;
+        store.set_reminder_limit(ProviderKind::Caldav, 1);
+        store.set_recurrence_check(ProviderKind::Caldav, |_, rec| {
+            if rec.rrule.contains("YEARLY") {
+                Err("cannot repeat yearly".into())
+            } else {
+                Ok(())
+            }
+        });
+        let mut reminded = content("r", "Reminded", None);
+        reminded.master.as_mut().unwrap().reminders = vec![10, 60];
+        let mut backwards = content("b", "Backwards", None);
+        let m = backwards.master.as_mut().unwrap();
+        m.timing = zoned(local(2026, 6, 1, 9, 0), -30);
+        let r = store
+            .import_objects(
+                &cal,
+                vec![
+                    reminded,
+                    backwards,
+                    content("y", "Anniversary", Some("FREQ=YEARLY")),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.imported, 1);
+        assert_eq!(r.adjusted.len(), 1);
+        assert_eq!(r.adjusted[0].title, "Reminded");
+        let failed: Vec<_> = r
+            .failed
+            .iter()
+            .map(|p| (p.title.as_str(), p.reason.as_str()))
+            .collect();
+        assert_eq!(
+            failed,
+            [
+                ("Backwards", "the event must end after it starts"),
+                ("Anniversary", "cannot repeat yearly"),
+            ]
+        );
+        let shown = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].reminders, vec![10]);
+    }
+}
+
+#[tokio::test]
+async fn imports_into_local_calendars_and_refuses_read_only_ones() {
+    let store = store_with_calendars().await;
+    let object = calendar_core::ObjectContent {
+        uid: "u1".into(),
+        master: Some(calendar_core::EventContent {
+            reminders: vec![15],
+            title: "Concert".into(),
+            description: "Row 4".into(),
+            location: "Hall".into(),
+            timing: zoned(local(2026, 6, 5, 20, 0), 120),
+            recurrence: None,
+            recurrence_id: None,
+        }),
+        overrides: vec![],
+    };
+    let r = store
+        .import_objects("cal-work", vec![object.clone()])
+        .await
+        .unwrap();
+    assert_eq!(r.imported, 1);
+    let shown = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+    let concert = shown.iter().find(|o| o.title == "Concert").unwrap();
+    assert_eq!(concert.sync_status, SyncStatus::Saved);
+    assert_eq!(
+        (concert.location.as_str(), concert.reminders.as_slice()),
+        ("Hall", &[15][..])
+    );
+    // Another calendar is another place: the same UID imports there too.
+    let other = store
+        .import_objects("cal-team", vec![object.clone()])
+        .await
+        .unwrap();
+    assert_eq!(other.imported, 1);
+    assert!(matches!(
+        store.import_objects("cal-holidays", vec![object]).await,
+        Err(StorageError::ReadOnly(_))
+    ));
 }
