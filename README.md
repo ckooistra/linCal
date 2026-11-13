@@ -210,7 +210,7 @@ docs/                        Architecture, performance, provider/sync design, de
 scripts/                     Benchmark and screenshot tooling
 ```
 
-See [docs/architecture.md](docs/architecture.md).
+See [docs/architecture.md](docs/architecture.md). New to Rust? [docs/rust-guide/](docs/rust-guide/README.md) walks through every Rust file and the language concepts it uses.
 
 ## Roadmap
 
