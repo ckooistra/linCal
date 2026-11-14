@@ -35,7 +35,7 @@ One enum, `CoreError`, listing every way validation can fail ("end before start"
 
 ### `input.rs`: what a person types
 
-Reads the dates, times and lengths typed into `ucal`: `parse_date` ("tomorrow", "fri", "2026-12-24"), `parse_time` ("14:00", "2:30pm"), `parse_time_span` ("22:00-1am" crosses midnight) and `parse_length` ("1h30m"). "Today" is a parameter, so the functions give the same answer whenever they run, and the tests can pin it to a known Saturday. Errors say what was expected: *“25:00” is not a time; use 14:30, 9:00 or 2:30pm*. They use the `CoreError::Input` variant.
+Reads the dates, times and lengths typed into `ucal`: `parse_date` ("tomorrow", "fri", "2026-12-24"), `parse_time` ("14:00", "2:30pm"), `parse_time_span` ("22:00-1am" crosses midnight) and `parse_length` ("1h30m"), and `format_length`, its reverse, which fills in the edit form. "Today" is a parameter, so the functions give the same answer whenever they run, and the tests can pin it to a known Saturday. Errors say what was expected: *“25:00” is not a time; use 14:30, 9:00 or 2:30pm*. They use the `CoreError::Input` variant.
 
 ```rust
 let ahead = (7 + day.num_days_from_monday() - today.weekday().num_days_from_monday()) % 7;

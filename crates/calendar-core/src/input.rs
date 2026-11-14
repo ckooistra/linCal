@@ -132,6 +132,23 @@ pub fn parse_length(text: &str) -> Result<Duration, CoreError> {
     Ok(total)
 }
 
+/// A length as [`parse_length`] reads it: `45m`, `1h30m`, `2d`. Seconds
+/// are dropped; zero or less is `0m`.
+pub fn format_length(length: Duration) -> String {
+    let minutes = length.num_minutes();
+    if minutes <= 0 {
+        return "0m".to_owned();
+    }
+    let (days, hours, minutes) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
+    let mut text = String::new();
+    for (n, unit) in [(days, 'd'), (hours, 'h'), (minutes, 'm')] {
+        if n > 0 {
+            text += &format!("{n}{unit}");
+        }
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +223,14 @@ mod tests {
         for text in ["", "0m", "h", "30", "1m1h", "1h1h", "400d", "1.5h", "-1h"] {
             assert!(parse_length(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn lengths_read_back_as_written() {
+        for text in ["45m", "1h", "1h30m", "2d", "1d2h5m"] {
+            assert_eq!(format_length(parse_length(text).unwrap()), text);
+        }
+        assert_eq!(format_length(Duration::minutes(90)), "1h30m");
+        assert_eq!(format_length(Duration::zero()), "0m");
     }
 }

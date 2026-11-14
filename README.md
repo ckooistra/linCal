@@ -72,6 +72,8 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 | **PgUp PgDn** ([ ]) | previous or next month, week, day or agenda page |
 | **Enter** | open the day (month view) or the event's details |
 | **n** | new event: title, date, time, length, calendar, location |
+| **e** | change the selected event (also from its details) |
+| **x** or **Delete** | delete the selected event, after asking |
 | **/** or **Ctrl+F** | search |
 | **s** | sync now (it also syncs in the background, as the desktop app does) |
 | **r** | read again from the database, for example after changes in the desktop app |
@@ -99,7 +101,8 @@ ucal sync
 - Sync problems are never hidden: the agenda ends with a warning when an account needs attention, and `ucal sync` exits with status 1 if an account fails.
 - Events added in a synchronized calendar upload on the next sync: run `ucal sync`, or the desktop app does it within 5 minutes. The two programs never sync the same account at the same time (see [docs/synchronization.md](docs/synchronization.md#two-programs-one-database)).
 - When the output isn't a terminal (a pipe or a script), `ucal` alone prints the agenda instead of opening the full-screen view.
-- Adding accounts, resolving conflicts and editing or deleting events are done in the desktop app for now.
+- For a repeating event, **e** and **x** ask which occurrences: **o** only this one, **f** this and the following ones (the series is split there, as in the desktop app), or **a** all of them. Changing an event keeps what the form doesn't show (description, reminders, repeat rule), and an untouched date and time keep the event's own time zone.
+- Adding accounts, resolving conflicts and editing descriptions, reminders or repeat rules are done in the desktop app for now. The `ucal` commands (`ucal add` …) only add events; changes go through the full-screen view.
 - Install it with `cargo install --path apps/ucal` (into `~/.cargo/bin`), or run it from the checkout with `cargo run -p ucal -- agenda`. Colours are used only in a terminal, and never with `NO_COLOR` set.
 
 ### Calendar

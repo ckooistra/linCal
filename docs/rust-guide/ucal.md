@@ -97,6 +97,8 @@ Three files, each with one job. This is the "Elm architecture", common in Rust t
 - **`state.rs`:** `State` is everything on screen: view, selected day, loaded events, the form, the search. `update(msg) -> Vec<Effect>` changes it and says what work to start: `Load` a date range, `Create` an event, `Search`, `SyncNow`… It does no I/O, so every key is tested without a terminal or database.
   - **Stale answers are dropped:** each load gets a `generation` number, and a result whose number isn't the newest is ignored. Paging quickly through months never shows an old month's events.
   - **Bounded prefetch:** a view loads its own days plus as many on each side, so the next step is usually instant.
+  - **Editing and deleting:** `e` opens the form filled in with the event; `x` asks before deleting. For a repeating event, an `Overlay::Choose` asks which occurrences, and the answer becomes a `Scope` (`Occurrence`, `Following`, `Series`, or `Event` when it doesn't repeat). `mod.rs` turns each scope into the matching `Store` call (`update_occurrence`, `update_following`, `delete_series`, …), as the desktop app's commands do.
+  - **Changing only what was changed:** the form remembers the date, time and length it started with. If they're untouched, the event keeps its original timing, so a floating time or an event in another time zone isn't converted by renaming it. The description, reminders and repeat rule, which the form doesn't show, are passed on unchanged.
 - **`draw.rs`:** turns `State` into ratatui widgets: a grid of bordered cells for the month, seven columns for the week, `List`s for the day and agenda, centred popups for details, help and the form. It reads the state and changes nothing.
 - **`mod.rs`:** the loop. A thread waits for keys (`crossterm::event::read`, which uses no CPU while waiting) and sends them into the same channel as query results and sync reports. The loop draws, waits for a message, calls `update`, and starts each effect as a `tokio::spawn`ed task. The sync **scheduler** runs in the background as in the desktop app. `ratatui::init()` switches the terminal to full screen and installs a panic hook that puts it back; `ratatui::restore()` puts it back on exit.
 
@@ -105,12 +107,15 @@ Three files, each with one job. This is the "Elm architecture", common in Rust t
 - **Separating decisions from actions:** `update` returns `Vec<Effect>` instead of doing the work, which is what makes it testable.
 - **Destructuring a struct:** `let App { store, engine, tz, .. } = app;` takes the parts out of `App` so each can move where it's needed.
 - **`let … else` in tests:** `let [Effect::Create(draft)] = effects.as_slice() else { panic!() };` checks that exactly one effect came back, and names it.
+- **`std::mem::replace`:** `let Overlay::Form(form) = std::mem::replace(&mut self.overlay, Overlay::None)` takes the form *out* of the state (leaving `None` behind) so it can be moved into the choice popup, and moved back if the choice is cancelled. Rust won't let you move a value out of a `&mut` reference without leaving something in its place ([§1](concepts.md#1-variables-ownership-and-borrowing)).
+- **Matching on a tuple of enums:** `match (action, scope)` with `(Action::Save(saved), None)`, `(Action::Delete, Some(scope))`… handles every combination in one place ([§4](concepts.md#4-match-and-pattern-matching)).
 - **`Box` to keep an enum small:** `Msg::Created(Result<Box<CalendarEvent>, String>)`. Without the box every `Msg` would be as big as the largest variant (clippy points this out).
 - **Threads and channels:** a `std::thread` sends into a Tokio channel; `UnboundedSender::send` works from any thread ([§14](concepts.md#14-asyncawait-and-tokio)).
 
 ## Tests
 
-- Unit tests in `show.rs`, `calendars.rs`, `tui/state.rs` (keys, loading, the form, search, sync reports) and `tui/draw.rs` (each view drawn on ratatui's `TestBackend`, an in-memory screen whose text the test reads): `cargo test -p ucal`.
+- `edits_and_deletions_reach_the_database` in `tui/mod.rs` runs each scope of change and deletion through the event loop's own code on a real (in-memory) database, including splitting a series.
+- Unit tests in `show.rs`, `calendars.rs`, `tui/state.rs` (keys, loading, the form, editing and deleting, search, sync reports) and `tui/draw.rs` (each view drawn on ratatui's `TestBackend`, an in-memory screen whose text the test reads): `cargo test -p ucal`.
 - A drawing benchmark with the 100/1,000/5,000-event datasets: `cargo test --release -p ucal -- --ignored --nocapture drawing_time` (results in `docs/performance.md`).
 - The date and time parsing is tested in `calendar-core` (`cargo test -p calendar-core input`).
 - `two_programs_never_sync_the_same_account_at_once` in `calendar-sync/tests/engine.rs` opens one database file twice, with two engines, and checks that the second pass waits and uploads nothing twice.

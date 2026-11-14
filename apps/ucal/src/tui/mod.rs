@@ -21,7 +21,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{App, Fallible};
-use state::{Effect, Msg, State};
+use state::{Effect, Msg, Scope, State};
 
 /// How often accounts are checked when nothing else triggers a sync, as in
 /// the desktop app.
@@ -167,6 +167,48 @@ fn perform(
                 send(Msg::Created(result));
             });
         }
+        Effect::Update { id, draft, scope } => {
+            tokio::spawn(async move {
+                let result = match scope {
+                    Scope::Event => store
+                        .update_event(&id, draft)
+                        .await
+                        .map(|e| e.as_occurrence()),
+                    Scope::Occurrence => store.update_occurrence(&id, draft, tz).await,
+                    Scope::Series => store
+                        .update_series(&id, draft)
+                        .await
+                        .map(|e| e.as_occurrence()),
+                    Scope::Following => store
+                        .update_following(&id, &crate::new_event_id(), draft)
+                        .await
+                        .map(|e| e.as_occurrence()),
+                };
+                send(Msg::Updated(
+                    result.map(Box::new).map_err(|e| e.to_string()),
+                ));
+            });
+        }
+        Effect::Delete { id, scope, title } => {
+            tokio::spawn(async move {
+                let result = async {
+                    // Asked first: afterwards the link to the server is gone.
+                    let remote = store.object_of(&id).await?.is_some();
+                    match scope {
+                        Scope::Event => store.delete_event(&id).await?,
+                        Scope::Occurrence => store.delete_occurrence(&id).await?,
+                        Scope::Following => store.delete_following(&id).await?,
+                        Scope::Series => store.delete_series(&id).await?,
+                    }
+                    Ok::<_, calendar_storage::StorageError>(remote)
+                }
+                .await;
+                send(Msg::Deleted {
+                    title,
+                    result: result.map_err(|e| e.to_string()),
+                });
+            });
+        }
         Effect::Calendars => {
             tokio::spawn(async move {
                 let calendars = store.list_calendars().await;
@@ -196,5 +238,172 @@ fn perform(
         }
         Effect::Changed => scheduler.trigger(),
         Effect::Quit => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use calendar_core::{EventDraft, EventTiming, Occurrence};
+    use calendar_sync::{MemoryCredentials, SyncEngine, default_factory};
+    use chrono::NaiveDateTime;
+
+    fn tz() -> Tz {
+        "America/Toronto".parse().unwrap()
+    }
+
+    fn draft_of(o: &Occurrence, title: &str) -> EventDraft {
+        EventDraft {
+            calendar_id: o.calendar_id.clone(),
+            title: title.into(),
+            description: o.description.clone(),
+            location: o.location.clone(),
+            timing: o.timing.clone(),
+            rrule: o.rrule.clone(),
+            reminders: None,
+        }
+    }
+
+    /// Edits and deletions, carried out as the view does, on a real database.
+    #[test]
+    fn edits_and_deletions_reach_the_database() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let store = Store::open_in_memory().await.unwrap();
+            store.ensure_local_calendar().await.unwrap();
+            let engine = Arc::new(SyncEngine::new(
+                store.clone(),
+                Arc::new(MemoryCredentials::default()),
+                default_factory(),
+                Arc::new(|_| {}),
+            ));
+            let (scheduler, _never_run) = calendar_sync::scheduler(engine, SYNC_INTERVAL);
+            let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
+            let monday = NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
+            let start = calendar_core::timing::resolve_local(
+                &tz(),
+                NaiveDateTime::parse_from_str("2026-11-16 09:30", "%Y-%m-%d %H:%M").unwrap(),
+            );
+            store
+                .create_event(
+                    "standup",
+                    EventDraft {
+                        calendar_id: "local-personal".into(),
+                        title: "Standup".into(),
+                        description: String::new(),
+                        location: String::new(),
+                        timing: EventTiming::Zoned {
+                            start,
+                            end: start + Duration::minutes(15),
+                            time_zone: tz(),
+                        },
+                        rrule: Some("FREQ=DAILY;COUNT=5".into()),
+                        reminders: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let week = || async {
+                store
+                    .query_range(range(&tz(), monday, monday + Duration::days(7)), tz())
+                    .await
+                    .unwrap()
+            };
+            let titles = |found: Vec<Occurrence>| -> Vec<String> {
+                found.into_iter().map(|o| o.title).collect()
+            };
+            let mut run = async |effect| {
+                perform(effect, &store, &sender, &scheduler, tz());
+                messages.recv().await.unwrap()
+            };
+
+            // Wednesday and the following ones.
+            let wednesday = week().await[2].clone();
+            let msg = run(Effect::Update {
+                id: wednesday.id.clone(),
+                draft: draft_of(&wednesday, "Standup (new team)"),
+                scope: Scope::Following,
+            })
+            .await;
+            assert!(
+                matches!(msg, Msg::Updated(Ok(ref o)) if o.title == "Standup (new team)"),
+                "{msg:?}"
+            );
+            assert_eq!(
+                titles(week().await),
+                [
+                    "Standup",
+                    "Standup",
+                    "Standup (new team)",
+                    "Standup (new team)",
+                    "Standup (new team)"
+                ]
+            );
+
+            // Only Thursday's.
+            let thursday = week().await[3].clone();
+            let msg = run(Effect::Delete {
+                id: thursday.id,
+                scope: Scope::Occurrence,
+                title: thursday.title,
+            })
+            .await;
+            assert!(
+                matches!(
+                    msg,
+                    Msg::Deleted {
+                        result: Ok(false),
+                        ..
+                    }
+                ),
+                "{msg:?}"
+            );
+            assert_eq!(week().await.len(), 4);
+
+            // Only Monday's, then the whole first series.
+            let first = week().await[0].clone();
+            let msg = run(Effect::Update {
+                id: first.id.clone(),
+                draft: draft_of(&first, "Kick-off"),
+                scope: Scope::Occurrence,
+            })
+            .await;
+            assert!(matches!(msg, Msg::Updated(Ok(_))), "{msg:?}");
+            assert_eq!(week().await[0].title, "Kick-off");
+            let msg = run(Effect::Delete {
+                id: week().await[1].id.clone(),
+                scope: Scope::Series,
+                title: "Standup".into(),
+            })
+            .await;
+            assert!(
+                matches!(
+                    msg,
+                    Msg::Deleted {
+                        result: Ok(false),
+                        ..
+                    }
+                ),
+                "{msg:?}"
+            );
+            assert_eq!(
+                titles(week().await),
+                ["Standup (new team)", "Standup (new team)"]
+            );
+
+            // The new series as a whole.
+            let rest = week().await[0].clone();
+            let msg = run(Effect::Update {
+                id: rest.id.clone(),
+                draft: draft_of(&rest, "Team standup"),
+                scope: Scope::Series,
+            })
+            .await;
+            assert!(matches!(msg, Msg::Updated(Ok(_))), "{msg:?}");
+            assert_eq!(titles(week().await), ["Team standup", "Team standup"]);
+        });
     }
 }

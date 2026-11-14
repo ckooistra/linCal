@@ -43,6 +43,13 @@ pub enum Msg {
     },
     Statuses(Vec<AccountStatus>),
     Created(Result<Box<CalendarEvent>, String>),
+    /// An edit was saved: the occurrence as it now appears.
+    Updated(Result<Box<Occurrence>, String>),
+    Deleted {
+        title: String,
+        /// Whether the event was on a server (so the deletion uploads).
+        result: Result<bool, String>,
+    },
     Found {
         generation: u64,
         result: Result<Vec<Occurrence>, String>,
@@ -62,6 +69,17 @@ pub enum Effect {
         end: NaiveDate,
     },
     Create(EventDraft),
+    Update {
+        /// The occurrence's id.
+        id: String,
+        draft: EventDraft,
+        scope: Scope,
+    },
+    Delete {
+        id: String,
+        scope: Scope,
+        title: String,
+    },
     Search {
         generation: u64,
         text: String,
@@ -75,15 +93,45 @@ pub enum Effect {
     Quit,
 }
 
+/// Which events an edit or deletion applies to, as in the desktop app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// An event that doesn't repeat.
+    Event,
+    /// One occurrence of a repeating event.
+    Occurrence,
+    /// This occurrence and the later ones (the series is split here).
+    Following,
+    /// The whole series.
+    Series,
+}
+
 #[derive(Debug)]
 pub enum Overlay {
     None,
     Details(Box<Occurrence>),
     Help,
-    Form(Form),
+    Form(Box<Form>),
+    /// Which occurrences of a repeating event to change or delete, or
+    /// whether to delete an event that doesn't repeat.
+    Choose(Choice),
 }
 
-/// The new-event form.
+#[derive(Debug)]
+pub struct Choice {
+    pub event: Box<Occurrence>,
+    /// What to do once chosen.
+    pub action: Action,
+}
+
+#[derive(Debug)]
+pub enum Action {
+    /// Save this draft; the form comes back if the choice is cancelled.
+    Save(Box<(EventDraft, Box<Form>)>),
+    Delete,
+}
+
+/// The form for a new event, or for changing one.
 #[derive(Debug, Default)]
 pub struct Form {
     /// Text of each field; the calendar field uses `calendar` instead.
@@ -93,6 +141,9 @@ pub struct Form {
     pub calendar: usize,
     pub error: Option<String>,
     pub saving: bool,
+    /// The event being changed, with the date, time and length the form
+    /// started with; `None` for a new event.
+    pub editing: Option<(Box<Occurrence>, [String; 3])>,
 }
 
 pub const FIELDS: [&str; 6] = ["Title", "Date", "Time", "Length", "Calendar", "Location"];
@@ -324,6 +375,24 @@ impl State {
                 Vec::new()
             }
             Msg::Created(result) => self.created(result),
+            Msg::Updated(result) => self.updated(result),
+            Msg::Deleted { title, result } => match result {
+                Ok(remote) => {
+                    let mut effects = Vec::new();
+                    let mut message = format!("Deleted “{title}”.");
+                    if remote {
+                        message += " The server is updated shortly.";
+                        effects.push(Effect::Changed);
+                    }
+                    self.message = Some(message);
+                    effects.extend(self.after_change());
+                    effects
+                }
+                Err(e) => {
+                    self.message = Some(format!("Could not delete “{title}”: {e}"));
+                    Vec::new()
+                }
+            },
             Msg::Found { generation, result } => {
                 if let Some(search) = self.search.as_mut().filter(|s| s.generation == generation) {
                     match result {
@@ -397,6 +466,159 @@ impl State {
         }
     }
 
+    fn updated(&mut self, result: Result<Box<Occurrence>, String>) -> Vec<Effect> {
+        let Overlay::Form(form) = &mut self.overlay else {
+            return Vec::new();
+        };
+        match result {
+            Err(e) => {
+                form.saving = false;
+                form.error = Some(e);
+                Vec::new()
+            }
+            Ok(occurrence) => {
+                self.overlay = Overlay::None;
+                if self.search.is_none() {
+                    self.go_to(crate::start_day(&occurrence.timing, &self.tz));
+                }
+                let mut message = format!("Saved “{}”.", occurrence.title);
+                let mut effects = Vec::new();
+                if occurrence.sync_status == SyncStatus::PendingSync {
+                    message += " It uploads shortly.";
+                    effects.push(Effect::Changed);
+                }
+                self.message = Some(message);
+                effects.extend(self.after_change());
+                effects
+            }
+        }
+    }
+
+    /// After an edit or deletion: the view, and any search results, are
+    /// read again.
+    fn after_change(&mut self) -> Vec<Effect> {
+        let mut effects: Vec<Effect> = self.reload().into_iter().collect();
+        if let Some(search) = self.search.as_mut().filter(|s| s.results.is_some()) {
+            self.generation += 1;
+            search.generation = self.generation;
+            effects.push(Effect::Search {
+                generation: search.generation,
+                text: search.query.trim().to_owned(),
+            });
+        }
+        effects
+    }
+
+    /// The event can be changed: its calendar isn't read-only.
+    fn changeable(&mut self, event: &Occurrence) -> bool {
+        match self.calendar(&event.calendar_id) {
+            Some(c) if c.read_only => {
+                self.message = Some(format!("“{}” is read-only.", c.name));
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// Opens the form filled in with `event`.
+    fn edit(&mut self, event: &Occurrence) {
+        if !self.changeable(event) {
+            return;
+        }
+        let (date, time, length) = match event.timing {
+            calendar_core::EventTiming::AllDay {
+                start_date,
+                end_date,
+            } => (
+                start_date,
+                String::new(),
+                calendar_core::input::format_length(end_date - start_date),
+            ),
+            _ => {
+                let bounds = event.timing.bounds(&self.tz);
+                let start = bounds.start.with_timezone(&self.tz).naive_local();
+                (
+                    start.date(),
+                    start.format("%H:%M").to_string(),
+                    calendar_core::input::format_length(bounds.end - bounds.start),
+                )
+            }
+        };
+        let when = [date.format("%Y-%m-%d").to_string(), time, length];
+        let calendar = self
+            .writable()
+            .iter()
+            .position(|c| c.id == event.calendar_id)
+            .unwrap_or(0);
+        let mut form = Form {
+            calendar,
+            ..Form::default()
+        };
+        form.values[TITLE].clone_from(&event.title);
+        form.values[LOCATION].clone_from(&event.location);
+        form.values[DATE..=LENGTH].clone_from_slice(&when);
+        form.editing = Some((Box::new(event.clone()), when));
+        self.overlay = Overlay::Form(Box::new(form));
+    }
+
+    /// Asks before deleting `event`, and for a repeating one, which
+    /// occurrences.
+    fn delete(&mut self, event: &Occurrence) {
+        if self.changeable(event) {
+            self.overlay = Overlay::Choose(Choice {
+                event: Box::new(event.clone()),
+                action: Action::Delete,
+            });
+        }
+    }
+
+    fn choose_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let Overlay::Choose(choice) = &self.overlay else {
+            return Vec::new();
+        };
+        let repeating = choice.event.series_id.is_some();
+        let scope = match (letter(&key), repeating) {
+            (Some('o'), true) => Some(Scope::Occurrence),
+            (Some('f'), true) => Some(Scope::Following),
+            (Some('a'), true) => Some(Scope::Series),
+            (Some('y'), false) => Some(Scope::Event),
+            _ if key.code == KeyCode::Enter && !repeating => Some(Scope::Event),
+            _ => None,
+        };
+        let cancel = key.code == KeyCode::Esc || letter(&key) == Some('n');
+        if scope.is_none() && !cancel {
+            return Vec::new();
+        }
+        let Overlay::Choose(Choice { event, action }) =
+            std::mem::replace(&mut self.overlay, Overlay::None)
+        else {
+            return Vec::new();
+        };
+        match (action, scope) {
+            (Action::Save(saved), None) => self.overlay = Overlay::Form(saved.1),
+            (Action::Delete, None) => {}
+            (Action::Save(saved), Some(scope)) => {
+                let (draft, mut form) = *saved;
+                form.saving = true;
+                self.overlay = Overlay::Form(form);
+                return vec![Effect::Update {
+                    id: event.id.clone(),
+                    draft,
+                    scope,
+                }];
+            }
+            (Action::Delete, Some(scope)) => {
+                self.message = Some("Deleting…".to_owned());
+                return vec![Effect::Delete {
+                    id: event.id.clone(),
+                    scope,
+                    title: event.title.clone(),
+                }];
+            }
+        }
+        Vec::new()
+    }
+
     fn key(&mut self, key: KeyEvent) -> Vec<Effect> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
@@ -404,7 +626,20 @@ impl State {
         }
         match &mut self.overlay {
             Overlay::Form(_) => return self.form_key(key),
-            Overlay::Details(_) | Overlay::Help => {
+            Overlay::Choose(_) => return self.choose_key(key),
+            Overlay::Details(event) => {
+                let event = event.clone();
+                match (key.code, letter(&key)) {
+                    (_, Some('e')) => self.edit(&event),
+                    (KeyCode::Delete, _) | (_, Some('x')) => self.delete(&event),
+                    (KeyCode::Esc | KeyCode::Enter, _) | (_, Some('q')) => {
+                        self.overlay = Overlay::None;
+                    }
+                    _ => {}
+                }
+                return Vec::new();
+            }
+            Overlay::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter) || letter(&key) == Some('q') {
                     self.overlay = Overlay::None;
                 }
@@ -473,6 +708,18 @@ impl State {
             }
             (_, Some('n')) => {
                 self.open_form();
+                Vec::new()
+            }
+            (_, Some('e')) => {
+                if let Some(event) = self.selected_event().cloned() {
+                    self.edit(&event);
+                }
+                Vec::new()
+            }
+            (KeyCode::Delete, _) | (_, Some('x')) => {
+                if let Some(event) = self.selected_event().cloned() {
+                    self.delete(&event);
+                }
                 Vec::new()
             }
             (_, Some('s')) => {
@@ -577,7 +824,7 @@ impl State {
             ..Form::default()
         };
         form.values[DATE] = self.day.format("%Y-%m-%d").to_string();
-        self.overlay = Overlay::Form(form);
+        self.overlay = Overlay::Form(Box::new(form));
     }
 
     fn form_key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -606,9 +853,29 @@ impl State {
             }
             KeyCode::Enter => match draft {
                 Ok(draft) => {
-                    form.saving = true;
                     form.error = None;
-                    return vec![Effect::Create(draft)];
+                    let Some((event, _)) = &form.editing else {
+                        form.saving = true;
+                        return vec![Effect::Create(draft)];
+                    };
+                    if event.series_id.is_none() {
+                        form.saving = true;
+                        return vec![Effect::Update {
+                            id: event.id.clone(),
+                            draft,
+                            scope: Scope::Event,
+                        }];
+                    }
+                    // A repeating event: ask which occurrences.
+                    let event = event.clone();
+                    let Overlay::Form(form) = std::mem::replace(&mut self.overlay, Overlay::None)
+                    else {
+                        return Vec::new();
+                    };
+                    self.overlay = Overlay::Choose(Choice {
+                        event,
+                        action: Action::Save(Box::new((draft, form))),
+                    });
                 }
                 Err(e) => form.error = Some(e),
             },
@@ -631,34 +898,50 @@ impl State {
             return Err("Give the event a title.".to_owned());
         }
         let optional = |i: usize| Some(text(i)).filter(|t| !t.is_empty());
-        let timing = crate::timing(
-            self.tz,
-            self.today,
-            text(DATE),
-            optional(TIME),
-            optional(LENGTH),
-        )
-        .map_err(|e| {
-            let e = e.to_string();
-            // Messages start in lower case for the "ucal: …" prefix.
-            let mut chars = e.chars();
-            chars
-                .next()
-                .map_or(e.clone(), |c| c.to_uppercase().chain(chars).collect())
-                + "."
-        })?;
+        let editing = form.editing.as_ref();
+        let unchanged = editing.is_some_and(|(_, when)| {
+            when.iter()
+                .zip(&form.values[DATE..=LENGTH])
+                .all(|(before, now)| before.trim() == now.trim())
+        });
+        // An untouched date, time and length keep the event's own timing,
+        // including its time zone or floating time.
+        let timing = if let (true, Some((event, _))) = (unchanged, editing) {
+            event.timing.clone()
+        } else {
+            crate::timing(
+                self.tz,
+                self.today,
+                text(DATE),
+                optional(TIME),
+                optional(LENGTH),
+            )
+            .map_err(|e| {
+                let e = e.to_string();
+                // Messages start in lower case for the "ucal: …" prefix.
+                let mut chars = e.chars();
+                chars
+                    .next()
+                    .map_or(e.clone(), |c| c.to_uppercase().chain(chars).collect())
+                    + "."
+            })?
+        };
         let calendar = self
             .writable()
             .get(form.calendar)
             .map(|c| c.id.clone())
             .ok_or("No calendar can take new events.")?;
+        // The form doesn't show these: an edit keeps them as they are.
+        let (description, rrule) = editing.map_or((String::new(), None), |(event, _)| {
+            (event.description.clone(), event.rrule.clone())
+        });
         Ok(EventDraft {
             calendar_id: calendar,
             title: text(TITLE).to_owned(),
-            description: String::new(),
+            description,
             location: text(LOCATION).to_owned(),
             timing,
-            rrule: None,
+            rrule,
             reminders: None,
         })
     }
@@ -983,6 +1266,183 @@ mod tests {
         }));
         assert!(state.syncing.is_empty());
         assert!(effects.contains(&Effect::Statuses));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Load { .. })));
+    }
+
+    fn repeating(title: &str, start: &str) -> Occurrence {
+        let mut o = event(title, start, 15);
+        o.series_id = Some("series".into());
+        o.rrule = Some("FREQ=DAILY".into());
+        o.id = format!("series::{start}");
+        o
+    }
+
+    fn key(c: char) -> Msg {
+        press(KeyCode::Char(c))
+    }
+
+    #[test]
+    fn editing_keeps_what_the_form_does_not_change() {
+        let mut floating = event("Yoga", "2026-11-14 10:00", 30);
+        floating.timing = EventTiming::Floating {
+            start: NaiveDateTime::parse_from_str("2026-11-14 10:00", "%Y-%m-%d %H:%M").unwrap(),
+            end: NaiveDateTime::parse_from_str("2026-11-14 10:30", "%Y-%m-%d %H:%M").unwrap(),
+        };
+        floating.description = "Bring a mat.".into();
+        let mut state = ready(vec![floating.clone()]);
+        state.update(key('d'));
+        state.update(key('e'));
+        let Overlay::Form(form) = &state.overlay else {
+            panic!("the form opens")
+        };
+        assert_eq!(
+            form.values,
+            ["Yoga", "2026-11-14", "10:00", "30m", "", ""].map(String::from)
+        );
+        typed(&mut state, " class");
+        let effects = state.update(press(KeyCode::Enter));
+        let [Effect::Update { id, draft, scope }] = effects.as_slice() else {
+            panic!("{effects:?}")
+        };
+        assert_eq!((id.as_str(), *scope), ("Yoga", Scope::Event));
+        assert_eq!(draft.title, "Yoga class");
+        assert_eq!(
+            draft.timing, floating.timing,
+            "untouched times stay floating"
+        );
+        assert_eq!(draft.description, "Bring a mat.");
+        assert_eq!(draft.calendar_id, "personal");
+        assert_eq!(draft.reminders, None, "reminders are kept");
+    }
+
+    #[test]
+    fn a_changed_time_is_read_from_the_form() {
+        let mut state = ready(vec![event("Call", "2026-11-14 10:00", 30)]);
+        state.update(key('d'));
+        state.update(key('e'));
+        state.update(press(KeyCode::Tab));
+        state.update(press(KeyCode::Tab));
+        for _ in 0..5 {
+            state.update(press(KeyCode::Backspace));
+        }
+        typed(&mut state, "11:15");
+        let effects = state.update(press(KeyCode::Enter));
+        let [Effect::Update { draft, .. }] = effects.as_slice() else {
+            panic!("{effects:?}")
+        };
+        let EventTiming::Zoned { start, end, .. } = draft.timing else {
+            panic!()
+        };
+        assert_eq!(
+            start.with_timezone(&tz()).format("%H:%M").to_string(),
+            "11:15"
+        );
+        assert_eq!(end - start, Duration::minutes(30), "the length stays");
+    }
+
+    #[test]
+    fn repeating_events_ask_which_occurrences_to_change() {
+        let mut state = ready(vec![repeating("Standup", "2026-11-14 09:30")]);
+        state.update(key('d'));
+        state.update(key('e'));
+        typed(&mut state, "!");
+        assert!(state.update(press(KeyCode::Enter)).is_empty());
+        assert!(matches!(state.overlay, Overlay::Choose(_)));
+        // Esc goes back to the form, as it was.
+        state.update(press(KeyCode::Esc));
+        let Overlay::Form(form) = &state.overlay else {
+            panic!("back to the form")
+        };
+        assert_eq!(form.values[TITLE], "Standup!");
+        state.update(press(KeyCode::Enter));
+        let effects = state.update(key('f'));
+        let [Effect::Update { id, draft, scope }] = effects.as_slice() else {
+            panic!("{effects:?}")
+        };
+        assert_eq!(*scope, Scope::Following);
+        assert_eq!(id, "series::2026-11-14 09:30");
+        assert_eq!(
+            draft.rrule.as_deref(),
+            Some("FREQ=DAILY"),
+            "the rule is unchanged"
+        );
+        assert!(matches!(&state.overlay, Overlay::Form(f) if f.saving));
+    }
+
+    #[test]
+    fn deleting_asks_first() {
+        let mut state = ready(vec![
+            event("Lunch", "2026-11-14 12:00", 60),
+            repeating("Standup", "2026-11-14 09:30"),
+        ]);
+        state.update(key('d'));
+        state.update(press(KeyCode::Down)); // Lunch, after the 09:30 standup
+        state.update(key('x'));
+        assert!(state.update(key('n')).is_empty(), "n keeps it");
+        assert!(matches!(state.overlay, Overlay::None));
+        state.update(press(KeyCode::Delete));
+        assert_eq!(
+            state.update(key('y')),
+            vec![Effect::Delete {
+                id: "Lunch".into(),
+                scope: Scope::Event,
+                title: "Lunch".into(),
+            }]
+        );
+        // A repeating event, from its details.
+        state.update(press(KeyCode::Up));
+        state.update(press(KeyCode::Enter));
+        state.update(key('x'));
+        assert!(state.update(key('y')).is_empty(), "y means nothing here");
+        let effects = state.update(key('o'));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Delete {
+                scope: Scope::Occurrence,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn read_only_events_are_not_offered_for_changes() {
+        let mut holiday = event("Holiday", "2026-11-14 00:00", 60);
+        holiday.calendar_id = "holidays".into();
+        let mut state = ready(vec![holiday]);
+        state.update(key('d'));
+        state.update(key('e'));
+        assert!(matches!(state.overlay, Overlay::None));
+        assert_eq!(state.message.as_deref(), Some("“Holidays” is read-only."));
+        state.update(key('x'));
+        assert!(matches!(state.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn results_of_edits_and_deletions_reload_the_view() {
+        let mut state = ready(vec![event("Call", "2026-11-14 10:00", 30)]);
+        state.update(key('d'));
+        state.update(key('e'));
+        state.update(press(KeyCode::Enter));
+        state.update(Msg::Updated(Err("the calendar “Work” is read-only".into())));
+        assert!(matches!(&state.overlay, Overlay::Form(f) if !f.saving && f.error.is_some()));
+        state.update(press(KeyCode::Enter));
+        let mut saved = event("Call", "2026-11-16 10:00", 30);
+        saved.sync_status = SyncStatus::PendingSync;
+        let effects = state.update(Msg::Updated(Ok(Box::new(saved))));
+        assert!(matches!(state.overlay, Overlay::None));
+        assert_eq!(state.day, date("2026-11-16"), "the view follows the event");
+        assert_eq!(
+            state.message.as_deref(),
+            Some("Saved “Call”. It uploads shortly.")
+        );
+        assert!(effects.contains(&Effect::Changed));
+
+        let effects = state.update(Msg::Deleted {
+            title: "Call".into(),
+            result: Ok(false),
+        });
+        assert_eq!(state.message.as_deref(), Some("Deleted “Call”."));
+        assert!(!effects.contains(&Effect::Changed), "nothing to upload");
         assert!(effects.iter().any(|e| matches!(e, Effect::Load { .. })));
     }
 }

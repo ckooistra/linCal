@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::state::{AGENDA_DAYS, CALENDAR, FIELDS, Form, Overlay, State, View};
+use super::state::{AGENDA_DAYS, Action, CALENDAR, Choice, FIELDS, Form, Overlay, State, View};
 use crate::show;
 
 const SELECTED: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
@@ -39,6 +39,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
         Overlay::Details(event) => details(frame, state, event),
         Overlay::Help => help(frame),
         Overlay::Form(form) => form_popup(frame, state, form),
+        Overlay::Choose(choice) => choose(frame, choice),
     }
 }
 
@@ -202,7 +203,10 @@ fn status_bar(frame: &mut Frame, state: &State, area: Rect) {
     } else {
         Line::from("")
     };
-    let hints = Line::styled("n new  / search  s sync  ? help  q quit ", DIM);
+    let hints = Line::styled(
+        "n new  e edit  x delete  / search  s sync  ? help  q quit ",
+        DIM,
+    );
     sides(frame, area, left, hints);
 }
 
@@ -482,13 +486,13 @@ fn details(frame: &mut Frame, state: &State, o: &Occurrence) {
     }
     frame.render_widget(
         Paragraph::new(lines)
-            .block(block.title_bottom(Line::styled(" Esc close ", DIM)))
+            .block(block.title_bottom(Line::styled(" e edit · x delete · Esc close ", DIM)))
             .wrap(Wrap { trim: false }),
         rect,
     );
 }
 
-const KEYS: [(&str, &str); 14] = [
+const KEYS: [(&str, &str); 15] = [
     ("m  w  d  a", "month, week, day, agenda"),
     ("t", "today"),
     ("← →  h l", "previous or next day"),
@@ -499,16 +503,14 @@ const KEYS: [(&str, &str); 14] = [
     ),
     ("Enter", "open the day (month) or the event"),
     ("n", "new event"),
+    ("e", "change the selected event"),
+    ("x  Delete", "delete the selected event"),
     ("/  Ctrl+F", "search"),
     ("s", "sync now"),
     ("r", "read again from the database"),
     ("Esc", "close, or leave the search"),
     ("?", "these keys"),
     ("q", "quit"),
-    (
-        "",
-        "Editing and deleting events: in the desktop app for now.",
-    ),
 ];
 
 fn help(frame: &mut Frame) {
@@ -529,7 +531,12 @@ fn help(frame: &mut Frame) {
 }
 
 fn form_popup(frame: &mut Frame, state: &State, form: &Form) {
-    let (rect, block) = popup(frame, 64, 14, "New event");
+    let name = if form.editing.is_some() {
+        "Change event"
+    } else {
+        "New event"
+    };
+    let (rect, block) = popup(frame, 64, 14, name);
     let hints = [
         "",
         "today, fri, 2026-12-24",
@@ -594,6 +601,47 @@ fn form_popup(frame: &mut Frame, state: &State, form: &Form) {
     {
         frame.set_cursor_position(Position::new(x, y));
     }
+}
+
+/// Which occurrences of a repeating event to change or delete; or, for
+/// one that doesn't repeat, whether to delete it.
+fn choose(frame: &mut Frame, choice: &Choice) {
+    let event = title(&choice.event);
+    let deleting = matches!(choice.action, Action::Delete);
+    let mut lines = vec![Line::styled(event.to_owned(), BOLD), Line::from("")];
+    let options: &[(&str, &str)] = match (choice.event.series_id.is_some(), deleting) {
+        (true, true) => &[
+            ("o", "Delete only this occurrence"),
+            ("f", "Delete this and the following ones"),
+            ("a", "Delete all occurrences"),
+            ("Esc", "Keep it"),
+        ],
+        (true, false) => &[
+            ("o", "Change only this occurrence"),
+            ("f", "Change this and the following ones"),
+            ("a", "Change all occurrences"),
+            ("Esc", "Back to the form"),
+        ],
+        (false, _) => &[("y", "Delete it"), ("Esc", "Keep it")],
+    };
+    lines.extend(options.iter().map(|(key, what)| {
+        Line::from(vec![
+            Span::styled(format!(" {key:<5}"), BOLD),
+            Span::raw(*what),
+        ])
+    }));
+    let name = match (choice.event.series_id.is_some(), deleting) {
+        (true, true) => "Delete a repeating event",
+        (true, false) => "Change a repeating event",
+        (false, _) => "Delete event",
+    };
+    let (rect, block) = popup(frame, 52, lines.len() as u16 + 2, name);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
 }
 
 #[cfg(test)]
@@ -737,6 +785,35 @@ mod tests {
         let form = screen(&state, 100, 30);
         assert!(form.contains("New event"), "{form}");
         assert!(form.contains("‹ ● Work ›"), "{form}");
+    }
+
+    #[test]
+    fn editing_and_deleting_draw_their_questions() {
+        let mut state = state();
+        press(&mut state, 'a');
+        press(&mut state, 'e');
+        let form = screen(&state, 100, 30);
+        assert!(form.contains("Change event"), "{form}");
+        assert!(form.contains("Dentist") && form.contains("45m"), "{form}");
+        state.update(Msg::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        press(&mut state, 'x');
+        let ask = screen(&state, 100, 30);
+        assert!(
+            ask.contains("Delete event") && ask.contains("y    Delete it"),
+            "{ask}"
+        );
+        press(&mut state, 'n');
+        // A repeating event asks which occurrences.
+        if let Some(event) = state.events.first_mut() {
+            event.series_id = Some("s".into());
+        }
+        press(&mut state, 'x');
+        let ask = screen(&state, 100, 30);
+        assert!(ask.contains("Delete a repeating event"), "{ask}");
+        assert!(
+            ask.contains("f    Delete this and the following ones"),
+            "{ask}"
+        );
     }
 
     /// Drawing time with the simulated datasets, as the desktop app's
