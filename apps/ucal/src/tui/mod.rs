@@ -168,17 +168,21 @@ fn perform(
             });
         }
         Effect::Update { id, draft, scope } => {
+            let scheduler = scheduler.clone();
             tokio::spawn(async move {
                 let result = match scope {
-                    Scope::Event => store
-                        .update_event(&id, draft)
-                        .await
-                        .map(|e| e.as_occurrence()),
+                    // A new calendar moves the event (or series) there.
+                    Scope::Event | Scope::Series => {
+                        // Moving off a server queues a deletion there.
+                        if matches!(store.object_of(&id).await, Ok(Some(_))) {
+                            scheduler.trigger();
+                        }
+                        store
+                            .update_and_move(&id, &crate::new_event_id(), draft)
+                            .await
+                            .map(|e| e.as_occurrence())
+                    }
                     Scope::Occurrence => store.update_occurrence(&id, draft, tz).await,
-                    Scope::Series => store
-                        .update_series(&id, draft)
-                        .await
-                        .map(|e| e.as_occurrence()),
                     Scope::Following => store
                         .update_following(&id, &crate::new_event_id(), draft)
                         .await
@@ -404,6 +408,37 @@ mod tests {
             .await;
             assert!(matches!(msg, Msg::Updated(Ok(_))), "{msg:?}");
             assert_eq!(titles(week().await), ["Team standup", "Team standup"]);
+
+            // And to another calendar: the series moves, under a new id.
+            store
+                .replace_all(
+                    &calendar_core::sim::accounts(),
+                    &calendar_core::sim::calendars(),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let rest = week().await[0].clone();
+            let mut draft = draft_of(&rest, "Team standup");
+            draft.calendar_id = "cal-family".into();
+            let msg = run(Effect::Update {
+                id: rest.id.clone(),
+                draft,
+                scope: Scope::Series,
+            })
+            .await;
+            let Msg::Updated(Ok(moved)) = msg else {
+                panic!("{msg:?}")
+            };
+            assert_ne!(Some(&moved.id), rest.series_id.as_ref(), "a new id");
+            let shown = week().await;
+            assert_eq!(shown.len(), 2);
+            assert!(
+                shown
+                    .iter()
+                    .all(|o| o.calendar_id == "cal-family"
+                        && o.series_id.as_ref() == Some(&moved.id))
+            );
         });
     }
 }

@@ -254,11 +254,22 @@ pub async fn update_event(
     let tz = zone(&time_zone)?;
     let store = state.store()?;
     let draft = draft.to_draft(&tz)?;
-    let occurrence = match scope {
-        Scope::Event => store.update_event(&id, draft).await?.as_occurrence(),
-        Scope::Occurrence => store.update_occurrence(&id, draft, tz).await?,
-        Scope::Series => store.update_series(&id, draft).await?.as_occurrence(),
-        Scope::Following => {
+    let occurrence = match (scope, new_id) {
+        // With a new id, a change of calendar moves the event (or series).
+        (Scope::Event | Scope::Series, Some(new_id)) => {
+            // Moving off a server queues a deletion there.
+            if store.object_of(&id).await?.is_some() {
+                state.changed(calendar_core::SyncStatus::PendingSync);
+            }
+            store
+                .update_and_move(&id, &new_id, draft)
+                .await?
+                .as_occurrence()
+        }
+        (Scope::Event, None) => store.update_event(&id, draft).await?.as_occurrence(),
+        (Scope::Occurrence, _) => store.update_occurrence(&id, draft, tz).await?,
+        (Scope::Series, None) => store.update_series(&id, draft).await?.as_occurrence(),
+        (Scope::Following, new_id) => {
             let new_id = new_id.ok_or(StorageError::Unsupported(
                 "an id for the new series is required",
             ))?;

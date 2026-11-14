@@ -228,6 +228,18 @@ describe("EventEditor with recurring events", () => {
     expect((screen.getByRole("button", { name: "This event" }) as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.click(screen.getByRole("button", { name: "All events" }));
     expect(onsave).toHaveBeenLastCalledWith(expect.objectContaining({ rrule: "FREQ=MONTHLY" }), "series");
+
+    // A new calendar moves the whole series.
+    await fireEvent.change(repeat, { target: { value: occurrence.rrule } });
+    const calendar = screen.getByLabelText("Calendar") as HTMLSelectElement;
+    const other = [...calendar.options].find((o) => o.value !== occurrence.calendarId && !o.disabled);
+    await fireEvent.change(calendar, { target: { value: other?.value } });
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((screen.getByRole("button", { name: "This event" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "This and following events" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("A repeating event moves to another calendar with all its events.")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "All events" }));
+    expect(onsave).toHaveBeenLastCalledWith(expect.objectContaining({ calendarId: other?.value }), "series");
   });
 });
 

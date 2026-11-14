@@ -28,7 +28,8 @@
     if (results.length === 0) return;
     active = (Math.min(active, results.length - 1) + by + results.length) % results.length;
     await tick();
-    list?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView({ block: "nearest" });
+    // `?.()`: test DOMs (jsdom) have no scrollIntoView.
+    list?.querySelector<HTMLElement>(`[data-index="${active}"]`)?.scrollIntoView?.({ block: "nearest" });
   }
 
   function onkeydown(e: KeyboardEvent): void {

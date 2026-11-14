@@ -243,6 +243,22 @@ describe("EventStore with recurring occurrences", () => {
     expect(errors).toEqual(["The event could not be deleted."]);
   });
 
+  it("moves a series to another calendar with a new id and reloads", async () => {
+    const { store, source, changes, occ } = seriesSetup();
+    vi.spyOn(source, "queryRange").mockResolvedValue([occ(0), occ(1)]);
+    await store.load(june, "visible");
+    const update = vi.spyOn(source, "updateEvent").mockResolvedValue({ ...occ(1), calendarId: "cal-work" });
+    store.update("s::1", { ...occ(1), calendarId: "cal-work" }, "series");
+    await flush();
+    expect(update).toHaveBeenLastCalledWith(
+      "s::1",
+      expect.objectContaining({ calendarId: "cal-work" }),
+      "series",
+      "new-0",
+    );
+    expect(changes.at(-1)).toEqual({ type: "invalidated" });
+  });
+
   it("splits a series from an occurrence with a new id, and drops later cached occurrences on delete", async () => {
     const { store, source, changes, occ } = seriesSetup();
     vi.spyOn(source, "queryRange").mockResolvedValue([occ(0), occ(1), occ(2)]);

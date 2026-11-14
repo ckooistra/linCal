@@ -616,6 +616,9 @@ fn choose(frame: &mut Frame, choice: &Choice) {
             ("a", "Delete all occurrences"),
             ("Esc", "Keep it"),
         ],
+        (true, false) if choice.moves() => {
+            &[("a", "Move all occurrences"), ("Esc", "Back to the form")]
+        }
         (true, false) => &[
             ("o", "Change only this occurrence"),
             ("f", "Change this and the following ones"),
@@ -630,6 +633,10 @@ fn choose(frame: &mut Frame, choice: &Choice) {
             Span::raw(*what),
         ])
     }));
+    if choice.moves() && choice.event.series_id.is_some() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("It moves with all its occurrences.", DIM));
+    }
     let name = match (choice.event.series_id.is_some(), deleting) {
         (true, true) => "Delete a repeating event",
         (true, false) => "Change a repeating event",

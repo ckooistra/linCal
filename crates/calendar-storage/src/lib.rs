@@ -7,6 +7,7 @@
 
 mod codec;
 mod import;
+mod moving;
 mod remote;
 
 pub use import::{ImportProblem, ImportReport};

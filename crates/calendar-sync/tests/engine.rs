@@ -18,6 +18,8 @@ use chrono::{Duration, NaiveDate};
 
 const TZ: chrono_tz::Tz = chrono_tz::Europe::Berlin;
 const CAL: &str = "https://dav.example/cal/alice/work/";
+/// A second calendar of the same account, listed when `Server::home` is set.
+const HOME: &str = "https://dav.example/cal/alice/home/";
 
 #[derive(Default)]
 struct Server {
@@ -28,6 +30,8 @@ struct Server {
     no_etag: Mutex<bool>,
     /// Pause writes: signal the first Notify on entry, wait for the second.
     gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+    /// Also list the calendar `HOME`.
+    home: Mutex<bool>,
 }
 
 impl Server {
@@ -60,26 +64,38 @@ impl CalendarProvider for Fake {
     }
     async fn list_calendars(&self) -> ProviderResult<Vec<RemoteCalendar>> {
         self.0.check()?;
-        Ok(vec![RemoteCalendar {
-            href: CAL.into(),
-            name: "Work".into(),
-            color: None,
-            read_only: false,
-            ctag: None,
-            capabilities: Capabilities {
-                incremental_sync: false,
-                conditional_writes: true,
-            },
-        }])
+        let mut calendars = vec![(CAL, "Work")];
+        if *self.0.home.lock().unwrap() {
+            calendars.push((HOME, "Home"));
+        }
+        Ok(calendars
+            .into_iter()
+            .map(|(href, name)| RemoteCalendar {
+                href: href.into(),
+                name: name.into(),
+                color: None,
+                read_only: false,
+                ctag: None,
+                capabilities: Capabilities {
+                    incremental_sync: false,
+                    conditional_writes: true,
+                },
+            })
+            .collect())
     }
     async fn fetch_changes(
         &self,
-        _: &RemoteCalendar,
+        calendar: &RemoteCalendar,
         _: Option<&str>,
         known: &[(String, Option<String>)],
     ) -> ProviderResult<ChangeSet> {
         self.0.check()?;
-        let objects = self.0.objects.lock().unwrap();
+        let all = self.0.objects.lock().unwrap();
+        let objects: HashMap<String, (String, String)> = all
+            .iter()
+            .filter(|(href, _)| href.starts_with(&calendar.href))
+            .map(|(href, object)| (href.clone(), object.clone()))
+            .collect();
         let known: HashMap<_, _> = known.iter().cloned().collect();
         Ok(ChangeSet {
             upserted: objects
@@ -816,4 +832,84 @@ async fn two_programs_never_sync_the_same_account_at_once() {
     desktop.store.close().await;
     terminal.store.close().await;
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The calendar of the account named `name`.
+async fn calendar_named(store: &Store, name: &str) -> String {
+    store
+        .calendars_of("acct")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == name)
+        .unwrap()
+        .id
+}
+
+#[tokio::test]
+async fn moving_between_server_calendars_deletes_and_creates_once() {
+    let e = env().await;
+    *e.server.home.lock().unwrap() = true;
+    let href = format!("{CAL}remote.ics");
+    e.server.put_raw(&href, &ics("remote", "Planning"));
+    e.engine.sync_account("acct").await.unwrap();
+    let home = calendar_named(&e.store, "Home").await;
+
+    let moved = e
+        .store
+        .move_event(&format!("{}/remote", e.calendar_id), "moved", &home)
+        .await
+        .unwrap();
+    assert_eq!(moved.sync_status, SyncStatus::PendingSync);
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(report.uploaded, 2, "one deletion, one creation");
+    {
+        let objects = e.server.objects.lock().unwrap();
+        assert!(!objects.contains_key(&href), "gone from Work");
+        let copy = &objects[&format!("{HOME}moved.ics")].1;
+        assert!(copy.contains("SUMMARY:Planning") && copy.contains("UID:moved"));
+        assert_eq!(objects.len(), 1);
+    }
+    // Further passes change nothing: no duplicates, no ping-pong.
+    e.engine.sync_account("acct").await.unwrap();
+    let shown = e.store.query_range(june(), TZ).await.unwrap();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        (shown[0].calendar_id.as_str(), shown[0].sync_status),
+        (home.as_str(), SyncStatus::Synced)
+    );
+}
+
+#[tokio::test]
+async fn a_move_never_deletes_a_change_made_on_the_server() {
+    let e = env().await;
+    let href = format!("{CAL}remote.ics");
+    e.server.put_raw(&href, &ics("remote", "Shared"));
+    e.engine.sync_account("acct").await.unwrap();
+    e.store.ensure_local_calendar().await.unwrap();
+    e.store
+        .move_event(
+            &format!("{}/remote", e.calendar_id),
+            "moved",
+            "local-personal",
+        )
+        .await
+        .unwrap();
+    // Someone edits the old copy before our deletion arrives.
+    e.server.put_raw(&href, &ics("remote", "Shared, edited"));
+    assert_eq!(e.engine.sync_account("acct").await.unwrap().conflicts, 1);
+    assert!(e.server.objects.lock().unwrap().contains_key(&href), "kept");
+    // Keeping the server's version brings it back beside the moved copy.
+    e.engine
+        .resolve(&e.calendar_id, &href, Resolution::UseServer)
+        .await
+        .unwrap();
+    e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(
+        titles(&e.store).await,
+        vec![
+            ("Shared".into(), SyncStatus::Saved),
+            ("Shared, edited".into(), SyncStatus::Synced),
+        ]
+    );
 }

@@ -101,6 +101,7 @@ ucal sync
 - Sync problems are never hidden: the agenda ends with a warning when an account needs attention, and `ucal sync` exits with status 1 if an account fails.
 - Events added in a synchronized calendar upload on the next sync: run `ucal sync`, or the desktop app does it within 5 minutes. The two programs never sync the same account at the same time (see [docs/synchronization.md](docs/synchronization.md#two-programs-one-database)).
 - When the output isn't a terminal (a pipe or a script), `ucal` alone prints the agenda instead of opening the full-screen view.
+- To move an event to another calendar, change its Calendar field (←→) in the form. A repeating event moves as a whole.
 - For a repeating event, **e** and **x** ask which occurrences: **o** only this one, **f** this and the following ones (the series is split there, as in the desktop app), or **a** all of them. Changing an event keeps what the form doesn't show (description, reminders, repeat rule), and an untouched date and time keep the event's own time zone.
 - Adding accounts, resolving conflicts and editing descriptions, reminders or repeat rules are done in the desktop app for now. The `ucal` commands (`ucal add` …) only add events; changes go through the full-screen view.
 - Install it with `cargo install --path apps/ucal` (into `~/.cargo/bin`), or run it from the checkout with `cargo run -p ucal -- agenda`. Colours are used only in a terminal, and never with `NO_COLOR` set.
@@ -120,6 +121,7 @@ ucal sync
 - **Command palette (Ctrl+K):** type part of a command, for example "nxt wk", "week", "group work" or "hide personal", choose with ↑/↓ and press Enter. It covers navigation, views, new event, search, settings, groups, showing and hiding calendars, sync and adding accounts. It works entirely locally.
 - Multiple accounts and calendars, including read-only ones.
 - Event creation and editing (click, drag-to-create, or **N**), drag/resize to move events, and timed and all-day events.
+- **Moving events to another calendar:** choose a different calendar in the editor. It works between any calendars you can write to, including between accounts (Nextcloud to Google, local to Outlook, …). A repeating event moves with all its occurrences. On the server it is a deletion plus a new event, so attendees and invitation links aren't carried over; see [docs/synchronization.md](docs/synchronization.md#moving-events-between-calendars).
 - **Local persistence** in SQLite (WAL, migrations). Events, calendar colours, hidden calendars, theme and dataset choice survive restarts. The database lives at `~/.local/share/org.universalcalendar.desktop/calendar.db`.
 - **Recurring events** (RRULE, RDATE including RDATE-only series, EXDATE, moved occurrences, cancelled series) expanded by the Rust core for the visible range only, in the series' time zone so wall-clock times hold across DST. Old hourly, daily and weekly series jump straight to the visible range. Unsupported cases (custom VTIMEZONE rules, `RANGE=THISANDFUTURE`) are shown approximately and flagged:
   - **Dragging** an occurrence moves just that one.

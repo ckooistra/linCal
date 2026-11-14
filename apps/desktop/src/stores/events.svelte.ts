@@ -266,8 +266,11 @@ export class EventStore {
     this.#set(optimistic);
     this.#wrote(id);
     const generation = this.#sourceGeneration;
-    const affectsOthers = effective === "series" || effective === "following" || rrule !== previous.rrule;
-    const newId = effective === "following" ? (this.#options.newId?.() ?? newEventId()) : undefined;
+    // A new calendar moves the event (or series): it gets a new id there.
+    const moving = draft.calendarId !== previous.calendarId;
+    const affectsOthers = effective === "series" || effective === "following" || rrule !== previous.rrule || moving;
+    const newId =
+      effective === "following" || moving ? (this.#options.newId?.() ?? newEventId()) : undefined;
     this.#source.updateEvent(id, { ...draft, rrule }, effective, newId).then(
       (saved) => {
         if (generation !== this.#sourceGeneration) return;

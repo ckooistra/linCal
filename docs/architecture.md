@@ -33,6 +33,7 @@ crates/
 └── calendar-storage/         SQLite via SQLx; depends only on calendar-core
     ├── migrations/           Embedded, applied on open
     ├── src/lib.rs            Store: queries, transactional writes, settings
+    ├── src/moving.rs         Moving events to another calendar (copy under a new id + delete, one transaction)
     ├── src/codec.rs          Row ↔ model mapping
     └── examples/bench_queries.rs
 

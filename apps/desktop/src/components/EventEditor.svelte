@@ -294,6 +294,8 @@
     choosing?.action !== "save" ||
       (choosing.draft.rrule === event?.rrule && choosing.draft.calendarId === event?.calendarId),
   );
+  /** A series moves to another calendar as a whole. */
+  const followingAllowed = $derived(choosing?.action !== "save" || choosing.draft.calendarId === event?.calendarId);
 
   function choose(scope: SeriesScope): void {
     const question = choosing;
@@ -529,7 +531,7 @@
             <button type="button" class:danger={choosing.action === "delete"} disabled={!singleAllowed} onclick={() => choose("occurrence")}>
               This event
             </button>
-            <button type="button" class:danger={choosing.action === "delete"} onclick={() => choose("following")}>
+            <button type="button" class:danger={choosing.action === "delete"} disabled={!followingAllowed} onclick={() => choose("following")}>
               This and following events
             </button>
             <button type="button" class:danger={choosing.action === "delete"} onclick={() => choose("series")}>
@@ -538,8 +540,10 @@
             <span class="spacer"></span>
             <button type="button" onclick={() => (choosing = null)}>Back</button>
           </div>
-          {#if !singleAllowed}
-            <p class="hint">A new repeat rule or calendar can't apply to a single event.</p>
+          {#if !followingAllowed}
+            <p class="hint">A repeating event moves to another calendar with all its events.</p>
+          {:else if !singleAllowed}
+            <p class="hint">A new repeat rule can't apply to a single event.</p>
           {/if}
         </div>
       {:else}

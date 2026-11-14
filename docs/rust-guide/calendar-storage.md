@@ -97,6 +97,22 @@ The `Sent` state exists because a network failure can happen *after* the server 
 - **`&mut Transaction<'_, Sqlite>` parameters:** helpers borrow the caller's transaction, so many steps join one commit. `'_` means "some lifetime, let the compiler work it out".
 - **Enums as state machines** (`Presence`, `OpKind`, `Resolution`).
 
+### `moving.rs`: moving events to another calendar
+
+`Store::move_event(id, new_id, calendar_id)` moves an event, or a whole series with its exceptions, as a deletion plus a creation in **one transaction**:
+1. the rows are copied into the new calendar under `new_id` (exception ids are rebuilt from it with `occurrence_id`);
+2. the originals are deleted with the same helpers as `delete_event`, which queue the server deletion;
+3. in a synchronized calendar, `attach_new_object` queues the copy's upload.
+
+A new id is essential: if the old server copy came back (a conflict resolved by keeping the server's version), it would otherwise collide with the moved event.
+
+`Store::update_and_move` is what the editors call. It checks the new calendar first, saves the other edits, then moves.
+
+**Rust concepts:**
+- **Struct update syntax with a closure:** `let copy = |event: &CalendarEvent, id, series| CalendarEvent { id, calendar_id: …, series, ..event.clone() };` builds each copy from the original, changing only what a move changes.
+- **`std::iter::once(&master).chain(&overrides)`** checks the master and every exception with one loop ([concepts §11](concepts.md#11-iterators)).
+- **`mut` parameters:** `mut draft: EventDraft` lets the function change its own copy of the argument (`draft.calendar_id = from`) without the caller seeing it ([§1](concepts.md#1-variables-ownership-and-borrowing)).
+
 ### `import.rs`: importing events from a file
 
 `Store::import_objects(calendar_id, objects)` stores events read from an `.ics` file, in **one transaction**. Each event becomes a new local event (queued for upload in a synced calendar), and the result is an `ImportReport`: imported, already there, skipped, adjusted.

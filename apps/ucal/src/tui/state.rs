@@ -124,6 +124,13 @@ pub struct Choice {
     pub action: Action,
 }
 
+impl Choice {
+    /// Saving this changes the event's calendar.
+    pub fn moves(&self) -> bool {
+        matches!(&self.action, Action::Save(saved) if saved.0.calendar_id != self.event.calendar_id)
+    }
+}
+
 #[derive(Debug)]
 pub enum Action {
     /// Save this draft; the form comes back if the choice is cancelled.
@@ -193,6 +200,8 @@ pub struct State {
     pub message: Option<String>,
     /// Calendar colours (off with `NO_COLOR`).
     pub colors: bool,
+    /// An event just saved: selected again once the view has reloaded.
+    follow: Option<String>,
 }
 
 fn monday_of(day: NaiveDate) -> NaiveDate {
@@ -240,6 +249,7 @@ impl State {
             attention: 0,
             message: None,
             colors: true,
+            follow: None,
         };
         let mut effects = vec![Effect::Calendars, Effect::Statuses];
         effects.extend(state.ensure_loaded());
@@ -360,6 +370,9 @@ impl State {
                     Ok(events) => {
                         self.events = events;
                         self.loaded = Some(range);
+                        if let Some(id) = self.follow.take() {
+                            self.select_saved(&id);
+                        }
                     }
                     Err(e) => self.message = Some(format!("Could not load events: {e}")),
                 }
@@ -460,6 +473,7 @@ impl State {
                 }
                 self.message = Some(message);
                 self.selected = 0;
+                self.follow = Some(event.id.clone());
                 effects.extend(self.reload());
                 effects
             }
@@ -488,9 +502,27 @@ impl State {
                     effects.push(Effect::Changed);
                 }
                 self.message = Some(message);
+                self.follow = Some(occurrence.id.clone());
                 effects.extend(self.after_change());
                 effects
             }
+        }
+    }
+
+    /// Selects the saved event `id` (or an occurrence of the series `id`)
+    /// on the selected day.
+    fn select_saved(&mut self, id: &str) {
+        let is = |o: &Occurrence| o.id == id || o.series_id.as_deref() == Some(id);
+        let found = match self.view {
+            View::Week | View::Day => self.on_day(self.day).iter().position(|(o, _)| is(o)),
+            View::Agenda => self
+                .list()
+                .iter()
+                .position(|(d, o, _)| *d == self.day && is(o)),
+            View::Month => None,
+        };
+        if let Some(found) = found {
+            self.selected = found;
         }
     }
 
@@ -577,9 +609,11 @@ impl State {
             return Vec::new();
         };
         let repeating = choice.event.series_id.is_some();
+        // A repeating event moves to another calendar as a whole.
+        let part = !choice.moves();
         let scope = match (letter(&key), repeating) {
-            (Some('o'), true) => Some(Scope::Occurrence),
-            (Some('f'), true) => Some(Scope::Following),
+            (Some('o'), true) if part => Some(Scope::Occurrence),
+            (Some('f'), true) if part => Some(Scope::Following),
             (Some('a'), true) => Some(Scope::Series),
             (Some('y'), false) => Some(Scope::Event),
             _ if key.code == KeyCode::Enter && !repeating => Some(Scope::Event),
@@ -1444,5 +1478,67 @@ mod tests {
         assert_eq!(state.message.as_deref(), Some("Deleted “Call”."));
         assert!(!effects.contains(&Effect::Changed), "nothing to upload");
         assert!(effects.iter().any(|e| matches!(e, Effect::Load { .. })));
+    }
+
+    #[test]
+    fn a_repeating_event_moves_to_another_calendar_as_a_whole() {
+        let mut state = ready(vec![repeating("Standup", "2026-11-14 09:30")]);
+        state.update(key('d'));
+        state.update(key('e'));
+        for _ in 0..4 {
+            state.update(press(KeyCode::Tab));
+        }
+        state.update(press(KeyCode::Right)); // Personal → Work
+        state.update(press(KeyCode::Enter));
+        let Overlay::Choose(choice) = &state.overlay else {
+            panic!("asks first")
+        };
+        assert!(choice.moves());
+        assert!(state.update(key('o')).is_empty(), "not for one occurrence");
+        assert!(
+            state.update(key('f')).is_empty(),
+            "nor for the following ones"
+        );
+        let effects = state.update(key('a'));
+        let [Effect::Update { draft, scope, .. }] = effects.as_slice() else {
+            panic!("{effects:?}")
+        };
+        assert_eq!(
+            (draft.calendar_id.as_str(), *scope),
+            ("work", Scope::Series)
+        );
+    }
+
+    #[test]
+    fn the_saved_event_stays_selected() {
+        let mut state = ready(vec![
+            event("Standup", "2026-11-14 09:30", 15),
+            event("Lunch", "2026-11-14 12:00", 60),
+        ]);
+        state.update(key('d'));
+        state.update(press(KeyCode::Down));
+        state.update(key('e'));
+        let effects = state.update(press(KeyCode::Enter));
+        assert!(matches!(effects.as_slice(), [Effect::Update { .. }]));
+        let mut lunch = event("Lunch", "2026-11-14 12:00", 60);
+        lunch.id = "moved".into();
+        let effects = state.update(Msg::Updated(Ok(Box::new(lunch.clone()))));
+        let Some(Effect::Load {
+            generation,
+            start,
+            end,
+        }) = effects
+            .into_iter()
+            .find(|e| matches!(e, Effect::Load { .. }))
+        else {
+            panic!("reloads")
+        };
+        assert_eq!(state.selected, 0, "reset until the reload arrives");
+        state.update(Msg::Loaded {
+            generation,
+            range: (start, end),
+            result: Ok(vec![event("Standup", "2026-11-14 09:30", 15), lunch]),
+        });
+        assert_eq!(state.selected_event().unwrap().id, "moved");
     }
 }

@@ -132,6 +132,18 @@ Each calendar remembers the version of the provider readers its events were read
 
 `calendar-sync::reminders` runs beside the sync scheduler, without polling. It looks for reminders due in the window since its last check, shows them through the desktop shell, and sleeps until the next one (at most an hour). Local edits and sync passes that changed data wake it early. Because the window is half-open, no reminder is shown twice, and none is skipped when the loop runs late. After the computer was asleep, missed reminders are shown only for events that haven't ended.
 
+## Moving events between calendars
+
+Choosing another calendar for an event (or a whole series) moves it. This works between any two writable calendars: local ones, calendars of one account, or of different accounts and providers. `Store::move_event` does it in one transaction, as a deletion plus a creation:
+
+- The rows are copied into the new calendar under a **new id**, with the series' modified and cancelled occurrences. The originals are deleted the usual way.
+- **The old server copy** is queued for deletion with the version we knew, so a change someone made there meanwhile becomes a conflict, shown under *Review…*, instead of being deleted. Keeping the server's version brings it back beside the moved copy; the new id keeps the two apart. An object that was never uploaded is simply forgotten.
+- **The copy**, in a synchronized calendar, is queued for upload as a new object, with a new UID.
+- The local rows are the source of truth throughout: if the deletion or the upload fails, it is retried, and nothing is lost.
+- **Checked first:** a read-only calendar can't receive events, and the new calendar's limits apply (Outlook: one reminder, fewer repeat rules). `Store::update_and_move` saves the other edits of the same save only once these checks pass.
+- **A series moves as a whole.** "Only this one" and "this and following" can't change the calendar.
+- **Not carried over:** what the app doesn't model (attendees, conferencing, links to invitations). The server sees a new event. For meetings with other people, a provider-native move would be better (see *Not yet supported*).
+
 ## Splitting a series ("this and following")
 
 A split is two ordinary changes: the original series is uploaded with its shortened rule, and the new series is created like any new event. Both go through the queue, version checks and conflicts as usual.
@@ -141,7 +153,7 @@ A split is two ordinary changes: the original series is uploaded with its shorte
 
 ## Not yet supported
 
-- Moving events between calendars once a synchronized calendar is involved (needs a server-side move, or delete + create).
+- Moving an event within one Google or CalDAV account with the provider's own move (Google `events.move`, WebDAV `MOVE`), which would keep its identity and invitations. Moves are a deletion plus a creation today (see above).
 - Creating or deleting calendars on the server (MKCALENDAR).
 - HTTP Digest authentication.
 - Generating VTIMEZONE components for new events (IANA TZIDs are sent by reference, which Nextcloud and Radicale accept).

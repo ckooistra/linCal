@@ -2187,6 +2187,260 @@ mod sync {
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].reminders, vec![10]);
     }
+
+    #[tokio::test]
+    async fn a_series_moves_whole_with_its_exceptions() {
+        let (store, _) = remote_store().await;
+        store
+            .create_event(
+                "s",
+                draft(
+                    "cal-personal",
+                    "Run",
+                    zoned(local(2026, 6, 1, 7, 0), 30),
+                    Some("FREQ=DAILY;COUNT=4"),
+                ),
+            )
+            .await
+            .unwrap();
+        let occurrences = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+        // One occurrence changed, one cancelled.
+        store
+            .update_occurrence(
+                &occurrences[1].id,
+                draft(
+                    "cal-personal",
+                    "Long run",
+                    zoned(local(2026, 6, 2, 7, 0), 90),
+                    None,
+                ),
+                BERLIN,
+            )
+            .await
+            .unwrap();
+        store.delete_occurrence(&occurrences[2].id).await.unwrap();
+
+        // Any occurrence stands for the series.
+        let moved = store
+            .move_event(&occurrences[3].id, "moved", "cal-fitness")
+            .await
+            .unwrap();
+        assert_eq!(
+            (moved.id.as_str(), moved.calendar_id.as_str()),
+            ("moved", "cal-fitness")
+        );
+        assert_eq!(
+            moved.sync_status,
+            SyncStatus::Saved,
+            "both calendars are local"
+        );
+        let shown = store.query_range(month(2026, 6), BERLIN).await.unwrap();
+        assert_eq!(
+            shown.iter().map(|o| o.title.as_str()).collect::<Vec<_>>(),
+            ["Run", "Long run", "Run"]
+        );
+        assert!(shown.iter().all(|o| o.calendar_id == "cal-fitness"));
+        assert!(
+            shown
+                .iter()
+                .all(|o| o.series_id.as_deref() == Some("moved"))
+        );
+        assert!(
+            store.get_event("s").await.unwrap().is_none(),
+            "the original is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn moving_off_a_server_deletes_the_server_copy() {
+        let (store, cal) = remote_store().await;
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming("a.ics", "\"1\"", content("a", "Review", None))],
+                &[],
+                Some("tok-1"),
+            )
+            .await
+            .unwrap();
+        let moved = store
+            .move_event(&format!("{cal}/a"), "moved", "cal-personal")
+            .await
+            .unwrap();
+        assert_eq!(moved.title, "Review");
+        assert_eq!(moved.sync_status, SyncStatus::Saved);
+        let ops = store.due_operations("acct-dav", now_ms()).await.unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            (ops[0].kind, ops[0].href.as_str()),
+            (OpKind::Delete, format!("{CAL_URL}a.ics").as_str())
+        );
+        // The deletion is conditional on the version we knew.
+        let push = store
+            .object_for_push(&cal, &ops[0].href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(push.etag.as_deref(), Some("\"1\""));
+        assert_eq!(titles(&store, month(2026, 6)).await, ["Review"]);
+    }
+
+    #[tokio::test]
+    async fn moving_onto_a_server_uploads_a_new_object() {
+        let (store, cal) = remote_store().await;
+        store
+            .create_event(
+                "e",
+                draft(
+                    "cal-personal",
+                    "Plan",
+                    zoned(local(2026, 6, 10, 9, 0), 60),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        let moved = store.move_event("e", "moved", &cal).await.unwrap();
+        assert_eq!(moved.sync_status, SyncStatus::PendingSync);
+        let ops = store.due_operations("acct-dav", now_ms()).await.unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            (ops[0].kind, ops[0].href.as_str()),
+            (OpKind::Put, format!("{CAL_URL}moved.ics").as_str())
+        );
+        let push = store
+            .object_for_push(&cal, &ops[0].href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((push.uid.as_str(), push.etag.as_deref()), ("moved", None));
+        assert_eq!(push.content.master.unwrap().title, "Plan");
+    }
+
+    #[tokio::test]
+    async fn an_event_never_sent_leaves_nothing_behind() {
+        let (store, cal) = remote_store().await;
+        store
+            .create_event(
+                "e",
+                draft(&cal, "Draft", zoned(local(2026, 6, 10, 9, 0), 60), None),
+            )
+            .await
+            .unwrap();
+        store
+            .move_event("e", "moved", "cal-personal")
+            .await
+            .unwrap();
+        assert!(
+            store
+                .due_operations("acct-dav", now_ms())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.known_objects(&cal).await.unwrap().is_empty());
+        // And back: a new object again.
+        store.move_event("moved", "back", &cal).await.unwrap();
+        let ops = store.due_operations("acct-dav", now_ms()).await.unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].href, format!("{CAL_URL}back.ics"));
+    }
+
+    #[tokio::test]
+    async fn an_edit_and_a_move_are_saved_together() {
+        let (store, cal) = remote_store().await;
+        store
+            .apply_remote_changes(
+                &cal,
+                &[incoming(
+                    "a.ics",
+                    "\"1\"",
+                    content("a", "Review", Some("FREQ=DAILY;COUNT=2")),
+                )],
+                &[],
+                Some("tok-1"),
+            )
+            .await
+            .unwrap();
+        let first = store.query_range(month(2026, 6), BERLIN).await.unwrap()[0].clone();
+        let mut edit = draft(
+            "cal-personal",
+            "Review (moved)",
+            first.timing.clone(),
+            Some("FREQ=DAILY;COUNT=2"),
+        );
+        // Refused first: nothing changes.
+        edit.calendar_id = "cal-holidays".into();
+        assert!(matches!(
+            store
+                .update_and_move(&first.id, "moved", edit.clone())
+                .await,
+            Err(StorageError::ReadOnly(_))
+        ));
+        assert_eq!(titles(&store, month(2026, 6)).await, ["Review", "Review"]);
+        edit.calendar_id = "cal-personal".into();
+        let moved = store
+            .update_and_move(&first.id, "moved", edit.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            (moved.id.as_str(), moved.calendar_id.as_str()),
+            ("moved", "cal-personal")
+        );
+        assert_eq!(
+            titles(&store, month(2026, 6)).await,
+            ["Review (moved)", "Review (moved)"]
+        );
+        let ops = store.due_operations("acct-dav", now_ms()).await.unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, OpKind::Delete, "the server copy goes");
+        // Same calendar: a plain edit, the id stays.
+        let first = store.query_range(month(2026, 6), BERLIN).await.unwrap()[0].clone();
+        edit.title = "Review again".into();
+        let saved = store
+            .update_and_move(&first.id, "unused", edit)
+            .await
+            .unwrap();
+        assert_eq!(saved.id, "moved");
+    }
+
+    #[tokio::test]
+    async fn moves_respect_read_only_calendars_and_provider_limits() {
+        let (store, cal) = remote_store().await;
+        store
+            .create_event(
+                "e",
+                EventDraft {
+                    reminders: Some(vec![5, 10]),
+                    ..draft(
+                        "cal-personal",
+                        "Two reminders",
+                        zoned(local(2026, 6, 10, 9, 0), 60),
+                        None,
+                    )
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.move_event("e", "x", "cal-holidays").await,
+            Err(StorageError::ReadOnly(_))
+        ));
+        store.set_reminder_limit(ProviderKind::Caldav, 1);
+        assert!(matches!(
+            store.move_event("e", "x", &cal).await,
+            Err(StorageError::TooManyReminders(1))
+        ));
+        assert_eq!(
+            store.get_event("e").await.unwrap().unwrap().calendar_id,
+            "cal-personal",
+            "nothing changed"
+        );
+        assert!(matches!(
+            store.move_event("e", "a::b", "cal-family").await,
+            Err(StorageError::Unsupported(_))
+        ));
+    }
 }
 
 #[tokio::test]
