@@ -48,6 +48,19 @@ Whatever remains after JS + layout is paint and compositing, plus any async foll
 
 The scenarios run at 100, 1,000 and 5,000 events.
 
+## Results: `ucal` full-screen view, 2026-11-14
+
+Time to draw one screen (200 × 60 cells) after moving a day, with the simulated datasets loaded as the view loads them (the visible days plus as many on each side). Release build, same QEMU VM (8 vCPUs), ratatui's in-memory test backend, so the terminal's own output time is not included. 40 draws per view. Reproduce with `cargo test --release -p ucal -- --ignored --nocapture drawing_time`.
+
+| p50 / p95 ms | 100 events (218 occurrences) | 1,000 (629) | 5,000 (2,328) | Target |
+|---|---|---|---|---|
+| month | 1.4 / 1.6 | 3.3 / 3.7 | 10.2 / 10.5 | < 50 (month navigation) |
+| week | 0.6 / 0.6 | 0.9 / 0.9 | 2.2 / 2.4 | < 50 |
+| day | 0.3 / 0.4 | 0.4 / 0.4 | 0.7 / 0.8 | < 50 |
+| agenda (28 days) | 1.1 / 1.3 | 2.3 / 2.3 | 7.0 / 7.2 | < 100 |
+
+Every view meets its target with room to spare. The month view is slowest because each of its 42 cells filters the loaded occurrences. If that ever matters, pre-filtering the loaded list to the visible six weeks would cut it by about two thirds. Loading runs in the background and never delays a draw; `ucal agenda` (printed) took 13 ms end to end on a small database.
+
 ## Results: settings dialog, calendar groups, command palette, 2026-10-31
 
 Raw data: [`benchmarks/20261031-214414-vm-xvfb-m5-ui.json`](benchmarks/20261031-214414-vm-xvfb-m5-ui.json). Same VM and Xvfb setup (software rendering).

@@ -33,6 +33,22 @@ One enum, `CoreError`, listing every way validation can fail ("end before start"
 
 **Rust concepts:** enums as error types, derive macros, `Result<T, CoreError>` as the return type of anything that can fail ([§9](concepts.md#9-error-handling-with-thiserror)).
 
+### `input.rs`: what a person types
+
+Reads the dates, times and lengths typed into `ucal`: `parse_date` ("tomorrow", "fri", "2026-12-24"), `parse_time` ("14:00", "2:30pm"), `parse_time_span` ("22:00-1am" crosses midnight) and `parse_length` ("1h30m"). "Today" is a parameter, so the functions give the same answer whenever they run, and the tests can pin it to a known Saturday. Errors say what was expected: *“25:00” is not a time; use 14:30, 9:00 or 2:30pm*. They use the `CoreError::Input` variant.
+
+```rust
+let ahead = (7 + day.num_days_from_monday() - today.weekday().num_days_from_monday()) % 7;
+return Ok(today + Duration::days(i64::from(ahead)));   // the next "fri", today included
+```
+
+**Rust concepts:**
+- **Matching on string slices:** `match word.as_str() { "today" => …, "tomorrow" => … }` ([§4](concepts.md#4-match-and-pattern-matching)).
+- **`strip_suffix`** returns `Option<&str>`, so `match (lower.strip_suffix("am"), lower.strip_suffix("pm"))` tests both endings at once ([§2](concepts.md#2-string-vs-str)).
+- **Shrinking a slice:** `parse_length` keeps the units still allowed in `units: &[char]` and drops the used ones with `&units[position + 1..]`, so "1m1h" (wrong order) is refused without extra flags.
+- **`ok_or_else`** turns an `Option` into a `Result` with an error built only when needed ([§5](concepts.md#5-option-and-result-no-null-no-exceptions)).
+- **`i64::from(u32)`** converts a number in a way that can't lose data. Rust never converts number types silently.
+
 ### `model.rs`: the vocabulary
 
 The provider-neutral data types:

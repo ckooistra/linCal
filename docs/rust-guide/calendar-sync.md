@@ -2,7 +2,7 @@
 
 **Where:** `crates/calendar-sync/`
 **Depends on:** `calendar-storage`, `calendar-provider-api`, all four provider crates, `calendar-oauth`, `calendar-core`, `tokio`, and `keyring` (optional).
-**Used by:** the desktop app.
+**Used by:** the desktop app and `ucal`.
 
 ## Its job in the architecture
 
@@ -146,6 +146,26 @@ It takes a `&Store` rather than the engine, because importing into a local calen
 - **`move` into `spawn_blocking`:** the `String` is moved into the closure, so the thread owns it and no copy is made ([§1](concepts.md#1-variables-ownership-and-borrowing)).
 - **Unit structs as values:** `ICalendarCodec.read(…)` calls a method on a struct with no fields.
 
+### `process_lock.rs`: one program syncs an account at a time
+
+The desktop app and `ucal` share one database, and each has its own engine. The per-account lock in `engine.rs` lives in memory, so it can't see the other program. With `SyncEngine::with_lock_dir(dir)`, each pass also takes an **OS file lock** on `sync-<account>.lock`. A second program waits until the first finishes, then finds nothing left to upload.
+
+```rust
+tokio::task::spawn_blocking(move || {
+    let file = OpenOptions::new().create(true).write(true).truncate(false).open(&path)?;
+    file.lock()?;          // waits while another program holds it
+    Ok(file)               // locked until the File is dropped
+})
+```
+
+The OS releases the lock when the file is closed, even if the program crashes, so a stale lock can't block syncing forever.
+
+**Rust concepts:**
+- **Ownership as a lock:** the returned `File` *is* the lock. Keeping it in a variable (`let _file_lock = …`) holds it for the rest of the pass, and dropping it unlocks. No "unlock" call can be forgotten ([§1](concepts.md#1-variables-ownership-and-borrowing)).
+- **Blocking work off the async threads:** `file.lock()` can wait a long time, so it runs on the blocking pool ([§14](concepts.md#14-asyncawait-and-tokio)).
+- **`pub(crate)`:** only the engine uses this module ([§8](concepts.md#8-modules-and-visibility)).
+- **Builder-style method:** `with_lock_dir(mut self, …) -> Self` takes the engine by value and returns it changed, marked `#[must_use]` so the result isn't thrown away by mistake.
+
 ### `credentials.rs`: where passwords live
 
 ```rust
@@ -176,6 +196,7 @@ Keyring calls can block, so the engine always calls them inside `spawn_blocking`
 | `engine.rs` | the CalDAV engine against wiremock: upload, download, conflicts, merges, retries, backoff |
 | `google.rs`, `microsoft.rs` | the full engine with `FakeGoogle` and `FakeGraph` |
 | `ics.rs` | subscriptions end to end |
+| `engine.rs` (`two_programs_never_sync_the_same_account_at_once`) | two engines on one database file: the second pass waits for the first and uploads nothing twice |
 | `engine.rs` (`imported_files_are_uploaded_once`) | an imported series with an exception uploaded once, then skipped on re-import |
 | `real_server.rs` | optional, against a real CalDAV server (Radicale or Nextcloud), when `UC_CALDAV_URL` is set |
 

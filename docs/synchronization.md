@@ -111,6 +111,19 @@ When a conflict remains, the server's version is kept (`remote_objects.conflict_
 | Crash during sync | Pull transactions are atomic; queued uploads are replayed |
 | Password missing from keyring | Account shows *Could not read the account password*; re-add the account |
 
+## Two programs, one database
+
+The desktop app and `ucal` (the terminal tool) open the same SQLite database. Reading and writing at the same time is safe: SQLite runs in WAL mode with a busy timeout, and every related write is one transaction.
+
+Syncing needs more. The engine's per-account lock lives in memory, so it only sees its own process. Two programs running a pass for the same account at once could both upload the same queued change. So each pass also takes an **OS file lock** for its account (`sync-<account id>.lock` next to the database, `SyncEngine::with_lock_dir`).
+
+- A second program's pass **waits** for the first, then finds the queue already sent and has nothing to upload. The wait counts towards the 10-minute pass limit.
+- Different accounts still sync in parallel.
+- The OS releases the lock when the program exits, even after a crash, so a stale lock file is harmless.
+- Programs that share a database must use the same lock directory. Tests using their own `UC_DATA_DIR` have their own.
+
+Changes `ucal` saves are picked up by the desktop app's next pass (within 5 minutes), by `ucal sync`, or by `ucal`'s full-screen view, which runs the same scheduler in the background while it is open. The desktop window shows them when it next loads that range.
+
 ## Reading again after an update
 
 Each calendar remembers the version of the provider readers its events were read with (`calendars.reader_version`). When an update teaches the readers something new, `calendar-sync::READER_VERSION` goes up. The next pass then lists such a calendar in full and treats every object as changed, so existing events gain the new data. Version 1 added reminders. Deletions are detected as usual, and objects with queued local changes are not overwritten.

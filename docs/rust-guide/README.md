@@ -44,7 +44,7 @@ Arrows point from a crate to the crates it uses. The lower a crate sits, the few
 
 These rules come from `CLAUDE.md`, and Rust's crate system enforces them:
 
-1. **The calendar engine doesn't know about Tauri.** Only `apps/desktop/src-tauri` depends on Tauri, and it holds no calendar logic. The engine could run in a different shell (a CLI, another GUI toolkit) unchanged.
+1. **The calendar engine doesn't know about Tauri.** Only `apps/desktop/src-tauri` depends on Tauri, and it holds no calendar logic. The engine runs in a different shell unchanged: `apps/ucal`, the terminal tool, uses the same crates.
 2. **Providers are plug-ins.** CalDAV, Google, Microsoft and ICS each implement one trait (`CalendarProvider`). The sync engine only sees that trait, never "Google".
 3. **Local-first.** The UI only ever reads from SQLite (`calendar-storage`). Network work happens in the background (`calendar-sync`), and its results land in SQLite.
 4. **The UI is never blocked.** Everything that waits (disk, network) is `async`. Heavy CPU work, such as expanding recurring events, runs on a separate thread pool.
@@ -76,6 +76,7 @@ Start at the bottom of the diagram and work up:
 | 9 | [calendar-ics.md](calendar-ics.md) | `calendar-ics` | reuse, builder methods, hashing |
 | 10 | [calendar-sync.md](calendar-sync.md) | `calendar-sync` | Tokio tasks, `select!`, closures, isolation |
 | 11 | [desktop-app.md](desktop-app.md) | `apps/desktop/src-tauri` | Tauri commands, shared state, `From` |
+| 12 | [ucal.md](ucal.md) | `apps/ucal` | a terminal program: clap, channels, a testable full-screen UI |
 
 ## Words you'll see everywhere
 

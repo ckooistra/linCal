@@ -2,6 +2,7 @@
 //! refresh the calendar list, then download server changes.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -58,6 +59,8 @@ pub enum SyncError {
     Task,
     #[error("cancelled")]
     Cancelled,
+    #[error("could not take the sync lock: {0}")]
+    Lock(String),
 }
 
 /// Status changes reported to the UI.
@@ -225,6 +228,9 @@ pub struct SyncEngine {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Accounts whose last pass failed, and when to try them again.
     backoff: Mutex<HashMap<String, Backoff>>,
+    /// Where the per-account lock files live, when other programs may sync
+    /// the same database (see [`Self::with_lock_dir`]).
+    lock_dir: Option<PathBuf>,
 }
 
 /// One problem operation, described for the UI.
@@ -331,7 +337,17 @@ impl SyncEngine {
             listener,
             locks: Mutex::new(HashMap::new()),
             backoff: Mutex::new(HashMap::new()),
+            lock_dir: None,
         }
+    }
+
+    /// Also locks each account across processes while it syncs, with lock
+    /// files in `dir` (normally next to the database). Every program that
+    /// syncs the same database must use the same directory.
+    #[must_use]
+    pub fn with_lock_dir(mut self, dir: PathBuf) -> Self {
+        self.lock_dir = Some(dir);
+        self
     }
 
     fn account_lock(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -765,7 +781,19 @@ impl SyncEngine {
         (self.listener)(SyncEvent::Syncing {
             account_id: account_id.to_owned(),
         });
-        let result = match tokio::time::timeout(PASS_TIMEOUT, self.run(account_id)).await {
+        let pass = async {
+            // Waiting for another program's pass counts towards the timeout.
+            let _file_lock = match &self.lock_dir {
+                Some(dir) => Some(
+                    crate::process_lock::lock_account(dir, account_id)
+                        .await
+                        .map_err(|e| SyncError::Lock(e.to_string()))?,
+                ),
+                None => None,
+            };
+            self.run(account_id).await
+        };
+        let result = match tokio::time::timeout(PASS_TIMEOUT, pass).await {
             Ok(result) => result,
             Err(_) => Err(SyncError::TimedOut),
         };
@@ -1267,6 +1295,7 @@ pub fn user_message(e: &SyncError) -> String {
         SyncError::TimedOut => "Synchronization took too long and will be retried.".into(),
         SyncError::Task => "Synchronization failed unexpectedly and will be retried.".into(),
         SyncError::Cancelled => "Cancelled.".into(),
+        SyncError::Lock(m) => format!("Could not coordinate syncing with other programs ({m}). Will retry."),
         SyncError::SignIn(calendar_oauth::OAuthError::Cancelled) => "Cancelled.".into(),
         SyncError::SignIn(e) => format!("Sign-in failed: {e}."),
     }

@@ -57,6 +57,51 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 - In a synchronized calendar the imported events upload like events created in the app. Importing the same file again skips events already there, including ones the server already has (same UID).
 - A summary lists what was imported, what was already there, and events that were skipped or changed to fit the calendar: for example a repeat rule Outlook can't hold, or reminders beyond what the calendar keeps. Attendees and other details the app doesn't model aren't copied.
 
+### Terminal (`ucal`)
+
+`ucal` shows and adds events from a terminal. It uses the same database, calendars and accounts as the desktop app, and both can run at the same time.
+
+**Full screen:** `ucal` on its own opens month, week, day and agenda views.
+
+| Keys | |
+|---|---|
+| **m w d a** | month, week, day, agenda |
+| **t** | today |
+| **← →** (h l) | previous or next day |
+| **↑ ↓** (k j) | previous or next event (a week in the month view) |
+| **PgUp PgDn** ([ ]) | previous or next month, week, day or agenda page |
+| **Enter** | open the day (month view) or the event's details |
+| **n** | new event: title, date, time, length, calendar, location |
+| **/** or **Ctrl+F** | search |
+| **s** | sync now (it also syncs in the background, as the desktop app does) |
+| **r** | read again from the database, for example after changes in the desktop app |
+| **?** | all the keys |
+| **q** or **Esc** | quit |
+
+Queries and syncing run in the background, so the screen answers keys while they work. Sync problems show in the bottom line.
+
+**Commands** print their result and exit, for scripts and quick checks:
+
+```sh
+ucal agenda                              # the next 7 days
+ucal agenda mon --days 5                 # Monday to Friday
+ucal search dentist
+ucal add "Dentist" fri 14:00 --for 45m -l "Main St" --remind 1h
+ucal add "Standup" tomorrow 9:30-9:45 -c Work
+ucal add "Holiday" 2026-12-24 --for 3d   # no time: all day
+ucal import team.ics -c Work
+ucal calendars                           # calendars, and accounts that need attention
+ucal sync
+```
+
+- Dates: `today`, `tomorrow`, a weekday (`fri`, the next one, today included) or `2026-12-24`. Times: `14:00`, `2:30pm`, or a span such as `22:00-1am`. Lengths: `45m`, `1h30m`, `2d`.
+- `-c` takes a calendar name. Use `Account/Name` when two accounts have a calendar of the same name. Without `-c`, events go to the desktop app's default calendar.
+- Sync problems are never hidden: the agenda ends with a warning when an account needs attention, and `ucal sync` exits with status 1 if an account fails.
+- Events added in a synchronized calendar upload on the next sync: run `ucal sync`, or the desktop app does it within 5 minutes. The two programs never sync the same account at the same time (see [docs/synchronization.md](docs/synchronization.md#two-programs-one-database)).
+- When the output isn't a terminal (a pipe or a script), `ucal` alone prints the agenda instead of opening the full-screen view.
+- Adding accounts, resolving conflicts and editing or deleting events are done in the desktop app for now.
+- Install it with `cargo install --path apps/ucal` (into `~/.cargo/bin`), or run it from the checkout with `cargo run -p ucal -- agenda`. Colours are used only in a terminal, and never with `NO_COLOR` set.
+
 ### Calendar
 
 - Tauri 2 desktop shell with a Svelte 5 + TypeScript (strict) + Vite frontend.
@@ -213,6 +258,7 @@ crates/calendar-sync/        Sync engine, offline queue processing, scheduler, c
 crates/calendar-storage/     SQLite (SQLx) persistence, migrations, range queries, sync state
 apps/desktop/src/            Svelte UI: components, stores, services, bench runner
 apps/desktop/src-tauri/      Thin Tauri 2 shell: commands forward to the crates
+apps/ucal/                   `ucal`, the terminal front end: the same crates, no Tauri
 docs/                        Architecture, performance, provider/sync design, decisions
 scripts/                     Benchmark and screenshot tooling
 ```
@@ -225,7 +271,7 @@ See [docs/architecture.md](docs/architecture.md). New to Rust? [docs/rust-guide/
 2. Rust calendar core, SQLite storage, Tauri commands, recurrence ✔
 3. CalDAV (Nextcloud reference) with offline queue ✔
 4. Google Calendar and Microsoft Graph ✔ (Google checked live; Microsoft tested against an API fake, live check pending)
-5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, importing .ics files, reminders and notifications, automatic merging and conflict comparison, accessibility pass, settings dialog with calendar groups and command palette, packaging (deb, rpm, AppImage). Next: user guide, profiling.
+5. **Production quality** ← current. Done: agenda view, full-database search, local calendar, recurrence editing ("this and following", custom repeat), ICS subscriptions, importing .ics files, the `ucal` terminal app (commands and a full-screen view), reminders and notifications, automatic merging and conflict comparison, accessibility pass, settings dialog with calendar groups and command palette, packaging (deb, rpm, AppImage). Next: user guide, profiling.
 
 ## License
 

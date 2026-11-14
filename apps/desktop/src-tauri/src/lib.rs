@@ -184,7 +184,7 @@ pub fn run() {
                 Ok(store) => {
                     let handle = app.handle().clone();
                     let wake = reminders.clone();
-                    let engine = Arc::new(SyncEngine::new(
+                    let mut engine = SyncEngine::new(
                         store.clone(),
                         credentials(),
                         default_factory(),
@@ -196,7 +196,12 @@ pub fn run() {
                             }
                             let _ = handle.emit("sync-event", event);
                         }),
-                    ));
+                    );
+                    // `ucal` may sync the same database: one program per account at a time.
+                    if let Ok(dir) = data_dir(app) {
+                        engine = engine.with_lock_dir(dir);
+                    }
+                    let engine = Arc::new(engine);
                     let (scheduler, run) =
                         calendar_sync::scheduler(Arc::clone(&engine), SYNC_INTERVAL);
                     if !bench::enabled() {

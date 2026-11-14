@@ -1,0 +1,27 @@
+[package]
+name = "ucal"
+version = "0.1.0"
+description = "Universal Calendar in the terminal"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+calendar-core = { path = "../../crates/calendar-core" }
+calendar-storage = { path = "../../crates/calendar-storage" }
+calendar-sync = { path = "../../crates/calendar-sync", features = ["keyring"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
+# Command-line arguments, subcommands and --help.
+clap = { version = "4", features = ["derive"] }
+# The system time zone (as the desktop app uses).
+iana-time-zone = "0.1"
+# The full-screen view (`ucal` in a terminal); its crossterm re-export reads keys.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[dev-dependencies]
+# The simulated 100/1,000/5,000-event datasets, for the drawing benchmark.
+calendar-core = { path = "../../crates/calendar-core", features = ["sim"] }

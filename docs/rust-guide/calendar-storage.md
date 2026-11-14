@@ -2,7 +2,7 @@
 
 **Where:** `crates/calendar-storage/`
 **Depends on:** `calendar-core`, `sqlx` (async SQLite), `tokio`, `serde_json`.
-**Used by:** `calendar-sync` and the desktop app.
+**Used by:** `calendar-sync`, the desktop app and `ucal`.
 
 ## Its job in the architecture
 

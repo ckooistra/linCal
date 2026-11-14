@@ -19,4 +19,8 @@ pub enum CoreError {
     InvalidTime,
     #[error("invalid date: {0}")]
     InvalidDate(String),
+    /// Text a person typed (a date, time or length) that could not be read;
+    /// the message says what was expected.
+    #[error("{0}")]
+    Input(String),
 }

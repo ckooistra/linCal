@@ -776,3 +776,44 @@ SUMMARY:Weekly (moved)\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
     assert_eq!((again.imported, again.already_present), (0, 1));
     assert_eq!(e.engine.sync_account("acct").await.unwrap().uploaded, 0);
 }
+
+#[tokio::test]
+async fn two_programs_never_sync_the_same_account_at_once() {
+    // The desktop app and `ucal`: two stores on one database file, each
+    // with its own engine, sharing the lock directory.
+    let dir = std::env::temp_dir().join(format!("uc-two-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.sqlite");
+    let server = Arc::new(Server::default());
+    let mut desktop = env_with(Store::open(&path).await.unwrap(), Arc::clone(&server)).await;
+    let mut terminal = env_with(Store::open(&path).await.unwrap(), Arc::clone(&server)).await;
+    desktop.engine = desktop.engine.with_lock_dir(dir.clone());
+    terminal.engine = terminal.engine.with_lock_dir(dir.clone());
+    terminal
+        .store
+        .create_event("local-1", draft(&terminal.calendar_id, "From the terminal"))
+        .await
+        .unwrap();
+
+    // The desktop app's pass stops in the middle of the upload.
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    *server.gate.lock().unwrap() = Some((Arc::clone(&entered), Arc::clone(&release)));
+    let first = desktop.engine.sync_account("acct");
+    let second = async {
+        entered.notified().await;
+        *server.gate.lock().unwrap() = None;
+        let pass = terminal.engine.sync_account("acct");
+        tokio::pin!(pass);
+        let waited = tokio::time::timeout(std::time::Duration::from_millis(300), &mut pass).await;
+        assert!(waited.is_err(), "the second pass waits for the first");
+        release.notify_one();
+        pass.await
+    };
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.unwrap().uploaded, 1);
+    assert_eq!(second.unwrap().uploaded, 0, "nothing left to upload");
+    assert_eq!(*server.version.lock().unwrap(), 1, "uploaded once");
+    desktop.store.close().await;
+    terminal.store.close().await;
+    std::fs::remove_dir_all(&dir).ok();
+}

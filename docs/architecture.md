@@ -25,6 +25,7 @@ crates/
 ├── calendar-core/            No I/O, no Tauri
 │   ├── model.rs              Account, Calendar, CalendarEvent, EventTiming, Recurrence, SeriesLink, Occurrence, SyncStatus
 │   ├── timing.rs             Instants for zoned/floating/all-day timings, DST-gap/overlap resolution, validation
+│   ├── input.rs              Dates, times and lengths typed by a person (used by ucal)
 │   ├── occurrence_key.rs     RECURRENCE-ID / EXDATE values (instant, floating, date)
 │   ├── recurrence.rs         Bounded range expansion (rrule crate), series retiming, index bounds
 │   ├── wire.rs               Serializable shapes shared with the UI (mirror of src/types/calendar.ts)
@@ -58,6 +59,13 @@ apps/desktop/
     ├── stores/groups.svelte.ts  Calendar groups and which group the visible calendars match
     ├── services/commands.ts  Palette matching (the commands themselves are built in App.svelte)
     └── components/, bench/, App.svelte
+
+apps/ucal/                    `ucal`, the terminal front end: commands (clap) and a full-screen view (ratatui)
+├── src/main.rs               Arguments and one small function per command, calling the same crates
+├── src/show.rs               Text output (pure, tested): days, multi-day events, repeat rules, account notes
+├── src/calendars.rs          Finding a calendar by name
+└── src/tui/                  Full-screen view: state.rs (keys → state + effects, no I/O),
+                              draw.rs (ratatui), mod.rs (event loop, background tasks, sync scheduler)
 ```
 
 None of the engine crates depend on Tauri (`cargo tree -p calendar-sync | grep tauri` is empty), and they build on their own.

@@ -76,7 +76,7 @@ impl From<SyncError> for CommandError {
             SyncError::Credentials(_) => "credentials",
             SyncError::Config(_) => "invalid",
             SyncError::TimedOut => "offline",
-            SyncError::Task => "internal",
+            SyncError::Task | SyncError::Lock(_) => "internal",
             SyncError::Cancelled => "cancelled",
             SyncError::SignIn(calendar_oauth_error) => match calendar_oauth_error {
                 calendar_sync::OAuthError::Cancelled => "cancelled",

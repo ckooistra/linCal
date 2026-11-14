@@ -67,6 +67,8 @@ let engine = Arc::new(SyncEngine::new(
 ));
 ```
 
+`with_lock_dir(data dir)` makes each sync pass take a file lock per account, so the desktop app and `ucal` never sync the same account at once (see [calendar-sync.md](calendar-sync.md#process_lockrs-one-program-syncs-an-account-at-a-time)).
+
 This is where **dependency injection** happens: the engine gets the real keyring, real providers and a Tauri-aware listener. Tests give it fakes instead.
 
 Other helpers: `system_zone()` reads the computer's time zone; `notify()` formats "In 15 min, 10:30 · Room 3" and shows it.
