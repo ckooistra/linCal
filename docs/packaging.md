@@ -13,7 +13,7 @@ The configuration is in `apps/desktop/src-tauri/tauri.conf.json` (`bundle`) and 
 ## What the packages install
 
 - `/usr/bin/universal-calendar`: the application.
-- `/usr/share/applications/universal-calendar.desktop`: the menu entry, from the template `linux/universal-calendar.desktop`. It has category Office/Calendar, search keywords, and a `StartupWMClass` matching the window, so Plasma's task manager groups the window with its launcher.
+- `/usr/share/applications/universal-calendar.desktop`: the menu entry, from the template `linux/universal-calendar.desktop`. It has category Office/Calendar, search keywords, and a `StartupWMClass` matching the window, so Plasma's task manager groups the window with its launcher. It declares `MimeType=text/calendar`, so the app is offered for `.ics` files (Open With, or the default app when chosen).
 - `/usr/share/icons/hicolor/{32,64,128,256,512}/apps/universal-calendar.png`.
 - `/usr/share/metainfo/org.universalcalendar.desktop.metainfo.xml`: AppStream metadata, used by Discover and GNOME Software. It passes `appstreamcli validate --pedantic`.
 
@@ -29,6 +29,16 @@ At runtime, without being a package dependency:
 
 - **Secret Service** (KWallet on Plasma, GNOME Keyring elsewhere) for account passwords and sign-in tokens. Without it, adding an account fails with a message.
 - **A notification service** (every desktop has one) for reminders.
+
+## Opening .ics files
+
+Opening an `.ics` file with the app (double-click, or Open With) starts it with the file's path. The **Import events** dialog then opens with the file already chosen.
+
+- **If the app is already running,** the new launch passes its files to the running app over D-Bus (`tauri-plugin-single-instance`) and exits. The running window comes to the front with the dialog open. Two copies never run against the same database.
+- Runs with `UC_DATA_DIR` set (tests) or in benchmark mode use their own database and skip this, so they can run beside your normal app.
+- **Running from source,** without a package: `scripts/install-desktop-entry.sh` adds a menu entry and the `.ics` association for `target/release/universal-calendar` in `~/.local/share`.
+  - `--default` also makes it the default app for `.ics` files.
+  - `--remove` undoes it.
 
 ## Testing the packages
 

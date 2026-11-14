@@ -7,7 +7,7 @@
 mod bench;
 mod commands;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -97,10 +97,62 @@ fn open_store(app: &tauri::App) -> Result<Store, String> {
     tauri::async_runtime::block_on(Store::open(&path)).map_err(|e| e.to_string())
 }
 
+/// Files named on a command line (`args` without the program name), such
+/// as an .ics file opened from the file manager. Options are skipped;
+/// `file://` URIs and relative paths (against `cwd`) are accepted.
+fn file_args(args: impl IntoIterator<Item = String>, cwd: &Path) -> Vec<PathBuf> {
+    args.into_iter()
+        .filter(|a| !a.is_empty() && !a.starts_with('-'))
+        .filter_map(|a| {
+            if a.starts_with("file:") {
+                tauri::Url::parse(&a).ok()?.to_file_path().ok()
+            } else {
+                Some(cwd.join(a))
+            }
+        })
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// Queues files for the UI to import and tells it.
+fn open_files(app: &tauri::AppHandle, files: Vec<PathBuf>) {
+    if files.is_empty() {
+        return;
+    }
+    if let Some(state) = app.try_state::<AppState>() {
+        state
+            .opened
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(files);
+        let _ = app.emit("file-opened", ());
+    }
+}
+
+/// Whether a second launch should hand over to the running app. Benchmark
+/// and test runs use their own database, so they run on their own.
+fn single_instance() -> bool {
+    !bench::enabled() && std::env::var_os("UC_DATA_DIR").is_none()
+}
+
 /// Builds and runs the desktop application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    if single_instance() {
+        // Must come first: a second launch (e.g. double-clicking an .ics
+        // file) passes its files to this one and exits, so two copies never
+        // share the database.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            open_files(app, file_args(argv.into_iter().skip(1), Path::new(&cwd)));
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
@@ -171,11 +223,13 @@ pub fn run() {
                     None
                 }
             };
+            let cwd = std::env::current_dir().unwrap_or_default();
             app.manage(AppState {
                 store,
                 sync,
                 reminders,
                 notifications,
+                opened: std::sync::Mutex::new(file_args(std::env::args().skip(1), &cwd).into()),
             });
             Ok(())
         })
@@ -194,6 +248,7 @@ pub fn run() {
             commands::add_caldav_account,
             commands::add_ics_subscription,
             commands::import_ics,
+            commands::take_opened_file,
             commands::cancel_add_account,
             commands::oauth_client_id,
             commands::add_google_account,
@@ -212,4 +267,22 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Universal Calendar");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_arguments_are_existing_files_only() {
+        let dir = std::env::temp_dir().join(format!("uc-args-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("team events.ics");
+        std::fs::write(&file, "BEGIN:VCALENDAR").unwrap();
+        let uri = tauri::Url::from_file_path(&file).unwrap().to_string();
+        let args = ["--flag", "", "team events.ics", "missing.ics", uri.as_str()];
+        let found = file_args(args.iter().map(|a| a.to_string()), &dir);
+        assert_eq!(found, vec![file.clone(), file.clone()]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

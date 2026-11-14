@@ -30,6 +30,9 @@ pub struct AppState {
     pub reminders: Option<calendar_sync::RemindersHandle>,
     /// The "notifications" setting (desktop reminders on or off).
     pub notifications: Arc<std::sync::atomic::AtomicBool>,
+    /// Files the app was asked to open (e.g. an .ics double-clicked in the
+    /// file manager), waiting for the UI to import them.
+    pub opened: std::sync::Mutex<std::collections::VecDeque<std::path::PathBuf>>,
 }
 
 impl AppState {
@@ -415,6 +418,50 @@ pub async fn import_ics(
         });
     }
     Ok(report)
+}
+
+/// A file the app was asked to open, read for the UI.
+#[derive(Debug, Serialize)]
+pub struct OpenedFile {
+    name: String,
+    text: String,
+}
+
+/// The next file the app was asked to open, if any. The path comes from
+/// the command line or the desktop (never from the web page); the UI gets
+/// the content to import.
+#[tauri::command]
+pub async fn take_opened_file(state: State<'_, AppState>) -> CommandResult<Option<OpenedFile>> {
+    let Some(path) = state
+        .opened
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop_front()
+    else {
+        return Ok(None);
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let shown = name.clone();
+    let read = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        if size > calendar_sync::import::MAX_IMPORT_BYTES as u64 {
+            return Err("the file is too large to import (the limit is 20 MB)".into());
+        }
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    })
+    .await
+    .map_err(|_| CommandError::from(StorageError::Task))?;
+    match read {
+        Ok(text) => Ok(Some(OpenedFile { name, text })),
+        Err(reason) => Err(CommandError {
+            code: "invalid",
+            message: format!("“{shown}” could not be opened: {reason}"),
+        }),
+    }
 }
 
 /// Subscribes to an iCalendar feed (read-only calendar).

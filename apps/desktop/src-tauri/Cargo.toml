@@ -30,3 +30,5 @@ tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 # The system time zone, for reminders of all-day and floating events.
 iana-time-zone = "0.1"
+# A second launch (e.g. double-clicking an .ics file) hands its files to the running app.
+tauri-plugin-single-instance = "2"

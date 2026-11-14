@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import { tick } from "svelte";
 import ImportDialog from "../components/ImportDialog.svelte";
 import SettingsDialog from "../components/SettingsDialog.svelte";
 import { GroupsStore } from "../stores/groups.svelte";
@@ -93,6 +94,33 @@ describe("ImportDialog", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("not an iCalendar");
     await fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(onclose).toHaveBeenCalled();
+  });
+
+  it("imports a file opened from the file manager without choosing it again", async () => {
+    const onimport = vi.fn(async () => report({ imported: 1 }));
+    render(ImportDialog, {
+      calendars: store(),
+      defaultCalendarId: "dav/personal",
+      opened: { name: "concert.ics", text: ICS },
+      onimport,
+      onclose: vi.fn(),
+    });
+    expect(screen.getByText("concert.ics")).toBeTruthy();
+    // The file is chosen; the calendar is what is left to decide.
+    expect(document.activeElement).toBe(screen.getByLabelText("Import into"));
+    expect(screen.getByLabelText("Or choose another file")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    expect(onimport).toHaveBeenCalledWith("dav/personal", ICS);
+    expect(await screen.findByText(/Imported 1 event into/)).toBeTruthy();
+  });
+
+  it("chooses a calendar once the calendars have loaded", async () => {
+    const calendars = new CalendarsStore();
+    render(ImportDialog, { calendars, defaultCalendarId: null, opened: { name: "a.ics", text: ICS }, onimport: vi.fn(), onclose: vi.fn() });
+    const loaded = store();
+    calendars.load(loaded.accounts, loaded.calendars);
+    await tick();
+    expect((screen.getByLabelText("Import into") as HTMLSelectElement).value).toBe("local/personal");
   });
 
   it("says when a file has no events", async () => {

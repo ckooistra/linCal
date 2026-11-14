@@ -9,6 +9,7 @@ import type {
   AccountStatus,
   ConflictVersions,
   ImportReport,
+  OpenedFile,
   Resolution,
   SyncEvent,
   SyncProblem,
@@ -190,6 +191,17 @@ export async function syncProblems(): Promise<SyncProblem[]> {
 
 export async function resolveSyncProblem(calendarId: string, href: string, resolution: Resolution): Promise<void> {
   await invoke("resolve_sync_problem", { calendarId, href, resolution });
+}
+
+/** The next file the app was asked to open (e.g. a double-clicked .ics), if any. */
+export async function takeOpenedFile(): Promise<OpenedFile | null> {
+  return invoke<OpenedFile | null>("take_opened_file");
+}
+
+/** Called when the app is asked to open files while running. Returns an unsubscribe function. */
+export async function onFileOpened(listener: () => void): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen("file-opened", () => listener());
 }
 
 /** Subscribes to sync progress events. Returns an unsubscribe function. */

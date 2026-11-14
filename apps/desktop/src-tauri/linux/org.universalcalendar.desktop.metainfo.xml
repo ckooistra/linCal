@@ -19,12 +19,16 @@
       <li>Month, week, day and agenda views, with search across all your events</li>
       <li>Repeating events, including changes to "this and following" events</li>
       <li>Reminders with desktop notifications</li>
+      <li>Opens .ics files: their events are imported into the calendar you choose</li>
       <li>Changes made elsewhere are merged automatically where they do not overlap</li>
       <li>Calendar groups, a command palette and full keyboard control</li>
       <li>No account with us, no telemetry, no hosted backend</li>
     </ul>
   </description>
   <launchable type="desktop-id">universal-calendar.desktop</launchable>
+  <provides>
+    <mediatype>text/calendar</mediatype>
+  </provides>
   <url type="homepage">https://github.com/ckooistra/linCal</url>
   <url type="bugtracker">https://github.com/ckooistra/linCal/issues</url>
   <categories>

@@ -124,6 +124,12 @@ export interface ImportProblem {
   reason: string;
 }
 
+/** A file the app was asked to open (e.g. from the file manager). */
+export interface OpenedFile {
+  name: string;
+  text: string;
+}
+
 /** What importing an .ics file did. */
 export interface ImportReport {
   /** Events imported (a repeating event counts once). */

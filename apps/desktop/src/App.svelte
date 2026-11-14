@@ -45,6 +45,7 @@
     EventDraft,
     EventTiming,
     ImportReport,
+    OpenedFile,
     Resolution,
     SyncEvent,
     SyncProblem,
@@ -158,11 +159,42 @@
 
   /** The "Import events" dialog is open. */
   let importing = $state(false);
+  /** The file it imports, when opened from the file manager. */
+  let openedFile = $state<OpenedFile | null>(null);
 
   /** Opens above Settings when started from there. */
-  function openImport(): void {
+  function openImport(file: OpenedFile | null = null): void {
     paletteOpen = false;
+    openedFile = file;
     importing = true;
+  }
+
+  function closeImport(): void {
+    importing = false;
+    openedFile = null;
+    void checkOpenedFiles();
+  }
+
+  let checkingOpened = false;
+  /** Offers to import the next file the app was asked to open (one at a time). */
+  async function checkOpenedFiles(): Promise<void> {
+    if (checkingOpened) return;
+    checkingOpened = true;
+    try {
+      while (!importing) {
+        let file: OpenedFile | null;
+        try {
+          file = await backend.takeOpenedFile();
+        } catch (error) {
+          notifications.push(error instanceof Error ? error.message : "The file could not be opened.");
+          continue;
+        }
+        if (!file) break;
+        if (!importing) openImport(file);
+      }
+    } finally {
+      checkingOpened = false;
+    }
   }
 
   async function importFile(calendarId: string, text: string): Promise<ImportReport> {
@@ -700,7 +732,7 @@
         { id: "add-google", title: "Add Google account…", section: "Accounts", run: () => void openAddAccount("google") },
         { id: "add-microsoft", title: "Add Microsoft account…", keywords: "outlook", section: "Accounts", run: () => void openAddAccount("microsoft") },
         { id: "add-ics", title: "Subscribe to a calendar…", keywords: "ics webcal feed", section: "Accounts", run: () => void openAddAccount("ics") },
-        { id: "import-ics", title: "Import events from a file…", keywords: "ics icalendar open add", section: "Events", run: openImport },
+        { id: "import-ics", title: "Import events from a file…", keywords: "ics icalendar open add", section: "Events", run: () => openImport() },
       );
     }
     return list;
@@ -801,8 +833,13 @@
       disposed = true;
       unlisten?.();
     });
+    void backend.onFileOpened(() => void checkOpenedFiles()).then((stop) => {
+      if (disposed) stop();
+      else cleanups.push(stop);
+    });
     refreshStatuses();
-    void reloadCalendars();
+    // Files opened from the file manager need the calendars to choose from.
+    void reloadCalendars().then(checkOpenedFiles);
     void startBenchIfRequested();
   });
 
@@ -1043,7 +1080,7 @@
 {/if}
 
 {#if importing}
-  <ImportDialog {calendars} {defaultCalendarId} onimport={importFile} onclose={() => (importing = false)} />
+  <ImportDialog {calendars} {defaultCalendarId} opened={openedFile} onimport={importFile} onclose={closeImport} />
 {/if}
 
 {#if reviewing}
@@ -1085,7 +1122,7 @@
     oncolor={setCalendarColor}
     ongroupschange={saveGroups}
     onaddaccount={desktop ? (kind) => void openAddAccount(kind) : undefined}
-    onimport={desktop ? openImport : undefined}
+    onimport={desktop ? () => openImport() : undefined}
     onsignin={(id) => void signInAgain(id)}
     onremoveaccount={(id) => (removing = { id, name: calendars.accounts.find((a) => a.id === id)?.name ?? id })}
     onsyncnow={() => void backend.syncNow()}

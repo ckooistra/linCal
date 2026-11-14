@@ -4,21 +4,23 @@
   changed.
 -->
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { modal } from "../services/modal";
   import type { CalendarsStore } from "../stores/calendars.svelte";
-  import type { CalendarId, ImportReport } from "../types/calendar";
+  import type { CalendarId, ImportReport, OpenedFile } from "../types/calendar";
 
   interface Props {
     calendars: CalendarsStore;
     /** Preselected calendar (the default for new events). */
     defaultCalendarId: CalendarId | null;
+    /** A file opened from the file manager, already read. */
+    opened?: OpenedFile | null;
     /** Imports the file's text; rejects with a message when nothing could be imported. */
     onimport: (calendarId: CalendarId, text: string) => Promise<ImportReport>;
     onclose: () => void;
   }
 
-  let { calendars, defaultCalendarId, onimport, onclose }: Props = $props();
+  let { calendars, defaultCalendarId, opened = null, onimport, onclose }: Props = $props();
 
   /** Same limit as the engine; checked here to avoid reading huge files. */
   const MAX_BYTES = 20 * 1024 * 1024;
@@ -29,24 +31,41 @@
       .filter((a) => a.items.length > 0),
   );
 
-  let file = $state<File | null>(null);
+  /** The file to import: picked here, or opened from the file manager. */
+  interface Source {
+    name: string;
+    size: number;
+    read: () => Promise<string>;
+  }
+  let file = $state<Source | null>(
+    untrack(() => (opened ? { name: opened.name, size: opened.text.length, read: async () => opened!.text } : null)),
+  );
+  const fromFileManager = untrack(() => opened !== null);
   let calendarId = $state<CalendarId>("");
   let busy = $state(false);
   let error = $state<string | null>(null);
   let report = $state<ImportReport | null>(null);
   let fileInput: HTMLInputElement | undefined = $state();
+  let calendarSelect: HTMLSelectElement | undefined = $state();
   let doneButton: HTMLButtonElement | undefined = $state();
 
   const target = $derived(calendarId ? calendars.label(calendarId) : "");
   const problems = $derived(report ? report.failed.length + report.adjusted.length + report.unlisted : 0);
 
+  // The calendars may still be loading when the app was opened with a file.
+  $effect(() => {
+    if (!calendarId || !calendars.writable.some((c) => c.id === calendarId))
+      calendarId = defaultCalendarId ?? calendars.writable[0]?.id ?? "";
+  });
+
   onMount(() => {
-    calendarId = defaultCalendarId ?? calendars.writable[0]?.id ?? "";
-    fileInput?.focus();
+    // With a file already chosen, what is left to decide is the calendar.
+    (fromFileManager ? calendarSelect : fileInput)?.focus();
   });
 
   function pick(e: Event & { currentTarget: HTMLInputElement }) {
-    file = e.currentTarget.files?.[0] ?? null;
+    const picked = e.currentTarget.files?.[0];
+    file = picked ? { name: picked.name, size: picked.size, read: () => picked.text() } : null;
     error = null;
   }
 
@@ -69,7 +88,7 @@
     busy = true;
     error = null;
     try {
-      report = await onimport(calendarId, await file.text());
+      report = await onimport(calendarId, await file.read());
       await tick();
       doneButton?.focus();
     } catch (err) {
@@ -134,13 +153,16 @@
           calendar they are then uploaded to the server. Events already imported are skipped.
         </p>
         <fieldset disabled={busy}>
+          {#if fromFileManager && file}
+            <p class="opened">File: <strong>{file.name}</strong></p>
+          {/if}
           <label>
-            <span>File</span>
+            <span>{fromFileManager ? "Or choose another file" : "File"}</span>
             <input bind:this={fileInput} type="file" accept=".ics,.ical,.ifb,.icalendar,text/calendar" onchange={pick} />
           </label>
           <label>
             <span>Import into</span>
-            <select bind:value={calendarId}>
+            <select bind:this={calendarSelect} bind:value={calendarId}>
               {#each byAccount as { account, items } (account.id)}
                 <optgroup label={account.name}>
                   {#each items as cal (cal.id)}
@@ -213,6 +235,10 @@
   }
   .hint {
     margin: 0;
+  }
+  .opened {
+    margin: 0;
+    overflow-wrap: anywhere;
   }
   .result {
     margin: 0.5rem 0;

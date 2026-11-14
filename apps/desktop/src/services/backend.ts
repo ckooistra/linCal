@@ -9,6 +9,7 @@ import type {
   Calendar,
   ConflictVersions,
   ImportReport,
+  OpenedFile,
   Resolution,
   SyncEvent,
   SyncProblem,
@@ -25,6 +26,7 @@ import {
   isTauri,
   loadSettings,
   loadSimulatedDataset,
+  onFileOpened,
   onSyncEvent,
   removeAccount,
   resolveConflict,
@@ -35,6 +37,7 @@ import {
   signInAgain,
   syncNow,
   syncProblems,
+  takeOpenedFile,
   type Settings,
 } from "./bridge";
 import { SourceError } from "./eventSource";
@@ -66,6 +69,10 @@ export interface Backend {
   cancelAddAccount(): Promise<void>;
   /** Imports the events of an .ics file's text into a calendar (desktop only). */
   importIcs(calendarId: string, text: string): Promise<ImportReport>;
+  /** The next file the app was asked to open, e.g. a double-clicked .ics (desktop only). */
+  takeOpenedFile(): Promise<OpenedFile | null>;
+  /** Called when files are opened while the app runs. */
+  onFileOpened(listener: () => void): Promise<() => void>;
   oauthClientId(provider: "google" | "microsoft"): Promise<string | null>;
   addGoogleAccount(clientId: string, clientSecret: string | null): Promise<string>;
   addMicrosoftAccount(clientId: string): Promise<string>;
@@ -123,6 +130,8 @@ async function desktopBackend(): Promise<Backend> {
     addIcsSubscription,
     cancelAddAccount,
     importIcs,
+    takeOpenedFile,
+    onFileOpened,
     oauthClientId,
     addGoogleAccount,
     addMicrosoftAccount,
@@ -165,6 +174,8 @@ function previewBackend(settings: Settings): Backend {
     cancelAddAccount: async () => {},
     importIcs: () =>
       Promise.reject(new SourceError("Importing files is only available in the desktop app, not the browser preview.")),
+    takeOpenedFile: async () => null,
+    onFileOpened: async () => () => {},
     oauthClientId: async () => null,
     addGoogleAccount: desktopOnly,
     addMicrosoftAccount: desktopOnly,

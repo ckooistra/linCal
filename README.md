@@ -53,6 +53,7 @@ A fast, local-first, free and open-source desktop calendar for Linux (KDE Plasma
 ### Importing .ics files
 
 - **Import events from a file…** (Settings → Calendars, or Ctrl+K) copies the events of an `.ics` file into any writable calendar, preselecting the default one. Repeating events keep their exceptions, time zones and reminders.
+- **Double-clicking an `.ics` file** (or Open With → Universal Calendar) opens the same dialog with the file chosen. If the app is already open, the file goes to that window. When running from source, `scripts/install-desktop-entry.sh` sets up the file association: add `--default` to make it the default app for `.ics` files.
 - In a synchronized calendar the imported events upload like events created in the app. Importing the same file again skips events already there, including ones the server already has (same UID).
 - A summary lists what was imported, what was already there, and events that were skipped or changed to fit the calendar: for example a repeat rule Outlook can't hold, or reminders beyond what the calendar keeps. Attendees and other details the app doesn't model aren't copied.
 

@@ -78,11 +78,29 @@ Other helpers: `system_zone()` reads the computer's time zone; `notify()` format
 - **`block_on`** runs an async call to completion from non-async code. That's OK here, at start-up before the window shows, and nowhere else.
 - **`Result<Store, String>` kept in state:** if the database can't open, the app still starts and the UI explains why, rather than crashing.
 
+**Opening files.** When the file manager opens an `.ics` file with the app, its path arrives as a command-line argument.
+- `file_args` picks out paths of existing files, skipping options and accepting `file://` addresses. `setup` queues them in `AppState::opened`.
+- If the app is already running, `tauri-plugin-single-instance` (registered first, so it runs before anything else) passes the new launch's arguments to the running app's callback. The callback queues the files, emits `file-opened` to the UI and brings the window forward. The second launch then exits.
+- The UI fetches each file with the `take_opened_file` command.
+
+```rust
+fn file_args(args: impl IntoIterator<Item = String>, cwd: &Path) -> Vec<PathBuf> {
+    args.into_iter()
+        .filter(|a| !a.is_empty() && !a.starts_with('-'))
+        .filter_map(|a| if a.starts_with("file:") { tauri::Url::parse(&a).ok()?.to_file_path().ok() }
+                        else { Some(cwd.join(a)) })
+        .filter(|p| p.is_file())
+        .collect()
+}
+```
+
+**Rust concepts:** `impl IntoIterator<Item = String>` accepts a `Vec`, `std::env::args()` or the plugin's list alike ([concepts §7](concepts.md#7-generics-and-trait-objects-dyn)). `?` works inside a closure that returns `Option` ([§5](concepts.md#5-option-and-result-no-null-no-exceptions)). `VecDeque` is a queue: files are taken from the front (`pop_front`) in the order they were opened. `let mut builder = …; if … { builder = builder.plugin(…) }` adds a plugin only when it's needed.
+
 ### `commands.rs`: what the UI may call
 
 About 25 small `#[tauri::command]` functions: `query_range`, `search_events`, `create_event`, `update_event`, `delete_event`, `set_setting`, `add_caldav_account`, `add_google_account`, `import_ics`, `sync_now`, `resolve_conflict`, and more.
 
-`import_ics` receives the file's text, not a path: the UI reads the file the user picked. That way the Rust side never opens files by a path the web page chose.
+`import_ics` receives the file's text, not a path: the UI reads the file the user picked. `take_opened_file` reads files whose paths came from the desktop, never from the web page. Either way, the Rust side never opens a file at a path the web page chose.
 
 ```rust
 #[tauri::command]
