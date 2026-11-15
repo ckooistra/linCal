@@ -32,6 +32,10 @@ struct Server {
     gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
     /// Also list the calendar `HOME`.
     home: Mutex<bool>,
+    /// Refuse to move objects between calendars (as some servers do).
+    no_moves: Mutex<bool>,
+    /// Requests made, as "MOVE <href>" (moves only).
+    moves: Mutex<Vec<String>>,
 }
 
 impl Server {
@@ -174,6 +178,35 @@ impl CalendarProvider for Fake {
         }
         objects.remove(href);
         Ok(())
+    }
+    async fn move_object(
+        &self,
+        href: &str,
+        to_calendar: &str,
+        version: Option<&str>,
+    ) -> ProviderResult<Option<WriteResult>> {
+        self.0.check()?;
+        if *self.0.no_moves.lock().unwrap() {
+            return Ok(None);
+        }
+        self.0.moves.lock().unwrap().push(format!("MOVE {href}"));
+        let target = format!("{to_calendar}{}", href.rsplit('/').next().unwrap());
+        let etag = self.0.bump();
+        let mut objects = self.0.objects.lock().unwrap();
+        let Some((current, data)) = objects.get(href).cloned() else {
+            return Err(ProviderError::NotFound(href.into()));
+        };
+        if version.is_some_and(|v| v != current) || objects.contains_key(&target) {
+            return Err(ProviderError::PreconditionFailed);
+        }
+        objects.remove(href);
+        objects.insert(target.clone(), (etag, data));
+        // Like most CalDAV servers: no ETag in the answer.
+        Ok(Some(WriteResult {
+            href: target,
+            etag: None,
+            data: None,
+        }))
     }
 }
 
@@ -847,9 +880,171 @@ async fn calendar_named(store: &Store, name: &str) -> String {
 }
 
 #[tokio::test]
-async fn moving_between_server_calendars_deletes_and_creates_once() {
+async fn the_server_moves_an_event_between_its_calendars() {
     let e = env().await;
     *e.server.home.lock().unwrap() = true;
+    let href = format!("{CAL}remote.ics");
+    e.server.put_raw(&href, &ics("remote", "Planning"));
+    e.engine.sync_account("acct").await.unwrap();
+    let home = calendar_named(&e.store, "Home").await;
+    let id = format!("{}/remote", e.calendar_id);
+
+    let moved = e.store.move_event(&id, "unused", &home).await.unwrap();
+    assert_eq!(
+        (moved.id.as_str(), moved.sync_status),
+        (id.as_str(), SyncStatus::PendingSync)
+    );
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(report.uploaded, 1, "one request");
+    assert_eq!(*e.server.moves.lock().unwrap(), [format!("MOVE {href}")]);
+    {
+        let objects = e.server.objects.lock().unwrap();
+        assert_eq!(objects.len(), 1);
+        let kept = &objects[&format!("{HOME}remote.ics")].1;
+        assert_eq!(
+            kept,
+            &ics("remote", "Planning"),
+            "untouched, X-KEEP included"
+        );
+    }
+    // Further passes change nothing: no duplicates, no ping-pong.
+    let again = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(
+        (again.uploaded, again.downloaded),
+        (0, 0),
+        "the new version was read right after the move"
+    );
+    e.engine.sync_account("acct").await.unwrap();
+    let shown = e.store.query_range(june(), TZ).await.unwrap();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        (
+            shown[0].series_id.as_deref().unwrap_or(&shown[0].id),
+            shown[0].calendar_id.as_str(),
+            shown[0].sync_status
+        ),
+        (id.as_str(), home.as_str(), SyncStatus::Synced)
+    );
+}
+
+#[tokio::test]
+async fn an_edit_made_with_a_move_follows_it() {
+    let e = env().await;
+    *e.server.home.lock().unwrap() = true;
+    e.server
+        .put_raw(&format!("{CAL}remote.ics"), &ics("remote", "Planning"));
+    e.engine.sync_account("acct").await.unwrap();
+    let home = calendar_named(&e.store, "Home").await;
+    let shown = e.store.query_range(june(), TZ).await.unwrap();
+    let mut edit = draft(&home, "Planning (Home)");
+    edit.timing = shown[0].timing.clone();
+    e.store
+        .update_and_move(&shown[0].id, "unused", edit)
+        .await
+        .unwrap();
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(report.uploaded, 2, "the move, then the edit");
+    let objects = e.server.objects.lock().unwrap().clone();
+    assert_eq!(objects.len(), 1);
+    let data = &objects[&format!("{HOME}remote.ics")].1;
+    assert!(data.contains("SUMMARY:Planning (Home)") && data.contains("X-KEEP:me"));
+    assert!(data.contains("UID:remote"), "the same event");
+    assert_eq!(
+        titles(&e.store).await,
+        [("Planning (Home)".into(), SyncStatus::Synced)]
+    );
+}
+
+#[tokio::test]
+async fn a_move_conflicting_with_a_server_change_waits_for_the_user() {
+    let e = env().await;
+    *e.server.home.lock().unwrap() = true;
+    let href = format!("{CAL}remote.ics");
+    e.server.put_raw(&href, &ics("remote", "Planning"));
+    e.engine.sync_account("acct").await.unwrap();
+    let home = calendar_named(&e.store, "Home").await;
+    let id = format!("{}/remote", e.calendar_id);
+    e.store.move_event(&id, "unused", &home).await.unwrap();
+    e.server.put_raw(&href, &ics("remote", "Planning, edited"));
+
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(report.conflicts, 1);
+    // Work's listing still has it: it isn't imported there a second time.
+    assert_eq!(
+        titles(&e.store).await,
+        [("Planning".into(), SyncStatus::Conflict)]
+    );
+    let problems = e.engine.problems().await.unwrap();
+    assert!(
+        problems[0].message.contains("moved"),
+        "{}",
+        problems[0].message
+    );
+
+    // Keeping the local version moves the server's edited copy.
+    e.engine
+        .resolve(&home, &href, Resolution::KeepLocal)
+        .await
+        .unwrap();
+    e.engine.sync_account("acct").await.unwrap();
+    e.engine.sync_account("acct").await.unwrap();
+    assert!(
+        e.server
+            .objects
+            .lock()
+            .unwrap()
+            .contains_key(&format!("{HOME}remote.ics"))
+    );
+    assert_eq!(
+        titles(&e.store).await,
+        [("Planning, edited".into(), SyncStatus::Synced)]
+    );
+}
+
+#[tokio::test]
+async fn using_the_servers_version_of_a_move_leaves_the_event_where_it_was() {
+    let e = env().await;
+    *e.server.home.lock().unwrap() = true;
+    let href = format!("{CAL}remote.ics");
+    e.server.put_raw(&href, &ics("remote", "Planning"));
+    e.engine.sync_account("acct").await.unwrap();
+    let home = calendar_named(&e.store, "Home").await;
+    e.store
+        .move_event(&format!("{}/remote", e.calendar_id), "unused", &home)
+        .await
+        .unwrap();
+    e.server.put_raw(&href, &ics("remote", "Planning, edited"));
+    e.engine.sync_account("acct").await.unwrap();
+    e.engine
+        .resolve(&home, &href, Resolution::UseServer)
+        .await
+        .unwrap();
+    e.engine.sync_account("acct").await.unwrap();
+    let shown = e.store.query_range(june(), TZ).await.unwrap();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        (
+            shown[0].title.as_str(),
+            shown[0].calendar_id.as_str(),
+            shown[0].sync_status
+        ),
+        (
+            "Planning, edited",
+            e.calendar_id.as_str(),
+            SyncStatus::Synced
+        )
+    );
+    assert!(
+        e.server.moves.lock().unwrap().len() == 1,
+        "nothing tried again"
+    );
+}
+
+#[tokio::test]
+async fn a_server_that_cannot_move_gets_a_copy_and_a_deletion() {
+    let e = env().await;
+    *e.server.home.lock().unwrap() = true;
+    *e.server.no_moves.lock().unwrap() = true;
     let href = format!("{CAL}remote.ics");
     e.server.put_raw(&href, &ics("remote", "Planning"));
     e.engine.sync_account("acct").await.unwrap();
@@ -862,13 +1057,17 @@ async fn moving_between_server_calendars_deletes_and_creates_once() {
         .unwrap();
     assert_eq!(moved.sync_status, SyncStatus::PendingSync);
     let report = e.engine.sync_account("acct").await.unwrap();
-    assert_eq!(report.uploaded, 2, "one deletion, one creation");
+    assert_eq!(
+        report.uploaded, 2,
+        "one deletion, one creation, in the same pass"
+    );
     {
         let objects = e.server.objects.lock().unwrap();
         assert!(!objects.contains_key(&href), "gone from Work");
-        let copy = &objects[&format!("{HOME}moved.ics")].1;
-        assert!(copy.contains("SUMMARY:Planning") && copy.contains("UID:moved"));
         assert_eq!(objects.len(), 1);
+        let (copy_href, (_, copy)) = objects.iter().next().unwrap();
+        assert!(copy_href.starts_with(HOME));
+        assert!(copy.contains("SUMMARY:Planning") && !copy.contains("UID:remote"));
     }
     // Further passes change nothing: no duplicates, no ping-pong.
     e.engine.sync_account("acct").await.unwrap();
@@ -911,5 +1110,45 @@ async fn a_move_never_deletes_a_change_made_on_the_server() {
             ("Shared".into(), SyncStatus::Saved),
             ("Shared, edited".into(), SyncStatus::Synced),
         ]
+    );
+}
+
+#[tokio::test]
+async fn moving_while_an_edit_uploads_is_not_a_conflict() {
+    let e = env().await;
+    *e.server.home.lock().unwrap() = true;
+    e.server
+        .put_raw(&format!("{CAL}remote.ics"), &ics("remote", "Planning"));
+    e.engine.sync_account("acct").await.unwrap();
+    let home = calendar_named(&e.store, "Home").await;
+    let id = format!("{}/remote", e.calendar_id);
+    let shown = e.store.query_range(june(), TZ).await.unwrap();
+    let mut edit = draft(&e.calendar_id, "Planning (edited)");
+    edit.timing = shown[0].timing.clone();
+    e.store.update_event(&id, edit).await.unwrap();
+
+    // The edit's upload is under way when the user moves the event.
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    *e.server.gate.lock().unwrap() = Some((Arc::clone(&entered), Arc::clone(&release)));
+    let user = async {
+        entered.notified().await;
+        e.store.move_event(&id, "unused", &home).await.unwrap();
+        *e.server.gate.lock().unwrap() = None;
+        release.notify_one();
+    };
+    let (first, ()) = tokio::join!(e.engine.sync_account("acct"), user);
+    first.unwrap();
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(report.conflicts, 0, "the upload's own version is known");
+    let objects = e.server.objects.lock().unwrap().clone();
+    assert_eq!(objects.len(), 1);
+    assert!(
+        objects[&format!("{HOME}remote.ics")]
+            .1
+            .contains("SUMMARY:Planning (edited)")
+    );
+    assert_eq!(
+        titles(&e.store).await,
+        [("Planning (edited)".into(), SyncStatus::Synced)]
     );
 }

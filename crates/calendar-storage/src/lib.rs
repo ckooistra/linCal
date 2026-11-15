@@ -12,8 +12,8 @@ mod remote;
 
 pub use import::{ImportProblem, ImportReport};
 pub use remote::{
-    AccountStatus, ApplyReport, IncomingObject, OpFailure, OpKind, PendingOp, Presence,
-    ProblemOperation, PushObject, RemoteAccount, RemoteCalendarSpec, RemoteCalendarState,
+    AccountStatus, ApplyReport, IncomingObject, OpFailure, OpKind, PendingMove, PendingOp,
+    Presence, ProblemOperation, PushObject, RemoteAccount, RemoteCalendarSpec, RemoteCalendarState,
     Resolution,
 };
 
@@ -87,6 +87,8 @@ pub struct Store {
     /// Per provider kind: limits on the series its calendars can hold.
     recurrence_checks: std::sync::Arc<std::sync::RwLock<HashMap<ProviderKind, RecurrenceCheck>>>,
     reminder_limits: std::sync::Arc<std::sync::RwLock<HashMap<ProviderKind, usize>>>,
+    /// Providers whose servers move events between calendars of an account.
+    moves_on_server: std::sync::Arc<std::sync::RwLock<HashSet<ProviderKind>>>,
     /// Bounds concurrent decode/expansion jobs: rapid navigation must not
     /// pile up CPU work for ranges nobody looks at any more.
     expansions: std::sync::Arc<tokio::sync::Semaphore>,
@@ -145,6 +147,7 @@ impl Store {
             expansions: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_EXPANSIONS)),
             recurrence_checks: std::sync::Arc::default(),
             reminder_limits: std::sync::Arc::default(),
+            moves_on_server: std::sync::Arc::default(),
         };
         store.run_fixups().await?;
         Ok(store)

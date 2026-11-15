@@ -2404,6 +2404,385 @@ mod sync {
         assert_eq!(saved.id, "moved");
     }
 
+    const HOME_URL: &str = "https://dav.example/cal/alice/home/";
+    const TEAM_URL: &str = "https://dav.example/cal/alice/team/";
+
+    /// `remote_store` with two more calendars in the account (Home, Team),
+    /// optionally with server-side moves, and the event "a.ics" in Work.
+    async fn moving_store(on_server: bool) -> (Store, [String; 3]) {
+        let (store, work) = remote_store().await;
+        if on_server {
+            store.set_moves_on_server(ProviderKind::Caldav);
+        }
+        let spec = |url: &str, name: &str| RemoteCalendarSpec {
+            remote_url: url.into(),
+            name: name.into(),
+            color: None,
+            read_only: false,
+            supports_sync: true,
+            ctag: None,
+        };
+        store
+            .update_remote_calendars(
+                "acct-dav",
+                &[
+                    spec(CAL_URL, "Work"),
+                    spec(HOME_URL, "Home"),
+                    spec(TEAM_URL, "Team"),
+                ],
+            )
+            .await
+            .unwrap();
+        let id = |name: &str| {
+            let store = store.clone();
+            let name = name.to_owned();
+            async move {
+                store
+                    .calendars_of("acct-dav")
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|c| c.name == name)
+                    .unwrap()
+                    .id
+            }
+        };
+        let (home, team) = (id("Home").await, id("Team").await);
+        let mut series = content("a", "Review", Some("FREQ=DAILY;COUNT=3"));
+        series.overrides.push(EventContent {
+            title: "Review (long)".into(),
+            timing: zoned(local(2026, 6, 2, 9, 0), 90),
+            recurrence: None,
+            recurrence_id: Some(zoned(local(2026, 6, 2, 9, 0), 30).start_key()),
+            ..series.master.clone().unwrap()
+        });
+        store
+            .apply_remote_changes(
+                &work,
+                &[incoming("a.ics", "\"1\"", series)],
+                &[],
+                Some("tok-1"),
+            )
+            .await
+            .unwrap();
+        (store, [work, home, team])
+    }
+
+    fn a_ics() -> String {
+        format!("{CAL_URL}a.ics")
+    }
+
+    async fn queued(store: &Store) -> Vec<PendingOp> {
+        store.due_operations("acct-dav", now_ms()).await.unwrap()
+    }
+
+    async fn shown_in(store: &Store) -> Vec<(String, String, SyncStatus)> {
+        store
+            .query_range(month(2026, 6), BERLIN)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|o| (o.title, o.calendar_id, o.sync_status))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_move_the_server_makes_keeps_the_event_and_waits_in_the_queue() {
+        let (store, [work, home, _]) = moving_store(true).await;
+        let occurrence = store.query_range(month(2026, 6), BERLIN).await.unwrap()[2].clone();
+        let moved = store
+            .move_event(&occurrence.id, "unused", &home)
+            .await
+            .unwrap();
+        let master_id = format!("{work}/a");
+        assert_eq!(
+            (
+                moved.id.as_str(),
+                moved.calendar_id.as_str(),
+                moved.sync_status
+            ),
+            (master_id.as_str(), home.as_str(), SyncStatus::PendingSync),
+            "same id, new calendar"
+        );
+        let shown = shown_in(&store).await;
+        assert_eq!(shown.len(), 3, "with its exception");
+        assert!(
+            shown
+                .iter()
+                .all(|(_, c, s)| *c == home && *s == SyncStatus::PendingSync)
+        );
+
+        let ops = queued(&store).await;
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            (
+                ops[0].kind,
+                ops[0].calendar_id.as_str(),
+                ops[0].href.as_str()
+            ),
+            (OpKind::Move, home.as_str(), a_ics().as_str())
+        );
+        assert_eq!(
+            ops[0].moving,
+            Some(crate::PendingMove {
+                from_calendar: work.clone(),
+                from_url: CAL_URL.into(),
+                to_url: HOME_URL.into(),
+            })
+        );
+        // Until it is sent, neither calendar's listing changes anything:
+        // Work still has it on the server, Home doesn't yet.
+        let listed = store
+            .apply_remote_changes(
+                &work,
+                &[incoming("a.ics", "\"1\"", content("a", "Review", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.skipped_pending, [a_ics()]);
+        let listed = store
+            .apply_remote_changes(&home, &[], &[a_ics()], None)
+            .await
+            .unwrap();
+        assert_eq!(listed.skipped_pending, [a_ics()]);
+        assert_eq!(shown_in(&store).await.len(), 3);
+
+        // Sent: the object is the server's in Home now.
+        let new_href = format!("{HOME_URL}a.ics");
+        let left = store
+            .complete_move(&ops[0], &new_href, Some("\"2\""), None)
+            .await
+            .unwrap();
+        assert_eq!(left, None, "nothing else to send");
+        assert!(queued(&store).await.is_empty());
+        assert!(
+            shown_in(&store)
+                .await
+                .iter()
+                .all(|(_, c, s)| *c == home && *s == SyncStatus::Synced)
+        );
+        assert_eq!(
+            store.known_objects(&home).await.unwrap(),
+            [(new_href.clone(), Some("\"2\"".to_owned()))]
+        );
+        assert!(store.known_objects(&work).await.unwrap().is_empty());
+        let push = store
+            .object_for_push(&home, &new_href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(push.base_ical, "ICS \"1\"", "the content didn't change");
+    }
+
+    #[tokio::test]
+    async fn without_server_moves_the_event_is_copied() {
+        let (store, [work, home, _]) = moving_store(false).await;
+        let moved = store
+            .move_event(&format!("{work}/a"), "copy", &home)
+            .await
+            .unwrap();
+        assert_eq!(moved.id, "copy");
+        let mut kinds: Vec<_> = queued(&store).await.into_iter().map(|o| o.kind).collect();
+        kinds.sort_by_key(|k| *k == OpKind::Put);
+        assert_eq!(kinds, [OpKind::Delete, OpKind::Put]);
+    }
+
+    #[tokio::test]
+    async fn moving_back_before_it_is_sent_undoes_the_move() {
+        let (store, [work, home, _]) = moving_store(true).await;
+        let id = format!("{work}/a");
+        store.move_event(&id, "unused", &home).await.unwrap();
+        store.move_event(&id, "unused", &work).await.unwrap();
+        assert!(queued(&store).await.is_empty());
+        assert!(
+            shown_in(&store)
+                .await
+                .iter()
+                .all(|(_, c, s)| *c == work && *s == SyncStatus::Synced)
+        );
+        // An edit stays queued, as an edit.
+        let mut edit = draft(
+            &work,
+            "Review (new)",
+            zoned(local(2026, 6, 1, 9, 0), 30),
+            None,
+        );
+        edit.rrule = Some("FREQ=DAILY;COUNT=3".into());
+        let first = store.query_range(month(2026, 6), BERLIN).await.unwrap()[0].clone();
+        store.update_series(&first.id, edit).await.unwrap();
+        store.move_event(&id, "unused", &home).await.unwrap();
+        let ops = queued(&store).await;
+        assert_eq!((ops[0].kind, ops[0].moving.is_some()), (OpKind::Put, true));
+        store.move_event(&id, "unused", &work).await.unwrap();
+        let ops = queued(&store).await;
+        assert_eq!(
+            (
+                ops[0].kind,
+                ops[0].calendar_id.as_str(),
+                ops[0].moving.is_some()
+            ),
+            (OpKind::Put, work.as_str(), false)
+        );
+    }
+
+    #[tokio::test]
+    async fn changes_made_while_a_move_is_sent_follow_it() {
+        // Moved on to Team while the move to Home was on its way.
+        let (store, [work, home, team]) = moving_store(true).await;
+        let id = format!("{work}/a");
+        store.move_event(&id, "unused", &home).await.unwrap();
+        let sent = queued(&store).await.remove(0);
+        store.move_event(&id, "unused", &team).await.unwrap();
+        let new_href = format!("{HOME_URL}a.ics");
+        let next = store
+            .complete_move(&sent, &new_href, Some("\"2\""), None)
+            .await
+            .unwrap()
+            .expect("another move");
+        assert_eq!(
+            (next.kind, next.calendar_id.as_str(), next.href.as_str()),
+            (OpKind::Move, team.as_str(), new_href.as_str())
+        );
+        assert_eq!(next.moving.unwrap().from_calendar, home);
+
+        // Deleted meanwhile: the deletion goes to where it is now.
+        let (store, [work, home, _]) = moving_store(true).await;
+        let id = format!("{work}/a");
+        store.move_event(&id, "unused", &home).await.unwrap();
+        let sent = queued(&store).await.remove(0);
+        let first = store.query_range(month(2026, 6), BERLIN).await.unwrap()[0].clone();
+        store.delete_series(&first.id).await.unwrap();
+        let next = store
+            .complete_move(&sent, &new_href, Some("\"2\""), None)
+            .await
+            .unwrap()
+            .expect("the deletion");
+        assert_eq!(
+            (next.kind, next.href.as_str()),
+            (OpKind::Delete, new_href.as_str())
+        );
+        let push = store
+            .object_for_push(&home, &new_href)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            push.etag.as_deref(),
+            Some("\"2\""),
+            "conditional on the new version"
+        );
+
+        // Moved back meanwhile: now it has to move back on the server.
+        let (store, [work, home, _]) = moving_store(true).await;
+        let id = format!("{work}/a");
+        store.move_event(&id, "unused", &home).await.unwrap();
+        let sent = queued(&store).await.remove(0);
+        store.move_event(&id, "unused", &work).await.unwrap();
+        let next = store
+            .complete_move(&sent, &new_href, None, None)
+            .await
+            .unwrap()
+            .expect("a move back");
+        assert_eq!(
+            (next.kind, next.calendar_id.as_str()),
+            (OpKind::Move, work.as_str())
+        );
+        assert_eq!(next.moving.unwrap().to_url, CAL_URL);
+    }
+
+    #[tokio::test]
+    async fn a_move_the_server_refuses_becomes_a_copy() {
+        let (store, [work, home, _]) = moving_store(true).await;
+        let id = format!("{work}/a");
+        store.move_event(&id, "unused", &home).await.unwrap();
+        let op = queued(&store).await.remove(0);
+        let mut ops = store.copy_instead_of_move(&op).await.unwrap();
+        ops.sort_by_key(|o| o.kind == OpKind::Put);
+        assert_eq!(
+            (
+                ops[0].kind,
+                ops[0].calendar_id.as_str(),
+                ops[0].href.as_str()
+            ),
+            (OpKind::Delete, work.as_str(), a_ics().as_str())
+        );
+        assert_eq!(
+            (ops[1].kind, ops[1].calendar_id.as_str()),
+            (OpKind::Put, home.as_str())
+        );
+        assert!(ops[1].href.starts_with(HOME_URL));
+        // The deletion is checked against the version the server had.
+        let push = store
+            .object_for_push(&work, &a_ics())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(push.etag.as_deref(), Some("\"1\""));
+        let shown = shown_in(&store).await;
+        assert_eq!(shown.len(), 3);
+        assert!(shown.iter().all(|(_, c, _)| *c == home));
+        assert!(store.get_event(&id).await.unwrap().is_none(), "a new id");
+        // Already handled: a second call changes nothing.
+        assert!(store.copy_instead_of_move(&op).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn using_the_servers_version_of_a_move_puts_it_back() {
+        let (store, [work, home, _]) = moving_store(true).await;
+        store
+            .move_event(&format!("{work}/a"), "unused", &home)
+            .await
+            .unwrap();
+        let op = queued(&store).await.remove(0);
+        store
+            .fail_operation(&op, "changed on the server", OpFailure::Conflict)
+            .await
+            .unwrap();
+        let problems = store.problem_operations("acct-dav").await.unwrap();
+        assert!(problems[0].moving && problems[0].conflict);
+        assert!(
+            shown_in(&store)
+                .await
+                .iter()
+                .all(|(_, _, s)| *s == SyncStatus::Conflict)
+        );
+
+        store
+            .resolve_operation(&home, &a_ics(), Resolution::UseServer)
+            .await
+            .unwrap();
+        assert!(shown_in(&store).await.is_empty(), "gone from Home");
+        assert!(queued(&store).await.is_empty());
+        // Work is listed afresh, and the server's version comes back there.
+        let work_state = store
+            .remote_calendars("acct-dav")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.calendar_id == work)
+            .unwrap();
+        assert_eq!(work_state.sync_token, None);
+        store
+            .apply_remote_changes(
+                &work,
+                &[incoming(
+                    "a.ics",
+                    "\"3\"",
+                    content("a", "Review (theirs)", None),
+                )],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            shown_in(&store).await,
+            [("Review (theirs)".into(), work.clone(), SyncStatus::Synced)]
+        );
+    }
+
     #[tokio::test]
     async fn moves_respect_read_only_calendars_and_provider_limits() {
         let (store, cal) = remote_store().await;

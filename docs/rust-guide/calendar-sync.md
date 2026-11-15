@@ -79,6 +79,7 @@ Main parts:
 - **`sync_account`** takes that account's lock, runs the pass with a 10-minute `timeout`, records success or failure, and tells the listener.
 - **`pass`** runs the three steps. Parsing downloaded data is CPU work on untrusted input, so it runs in `spawn_blocking`.
 - **`push` / `upload` / `merge_with_server`:** on `PreconditionFailed`, the engine fetches the server's version and tries `calendar_core::merge::three_way`. If both sides changed the same thing, the server's copy is kept for the comparison dialog and the event is marked as a conflict.
+- **`relocate`** sends a queued move with `move_object`, then lets storage record where the event is now. What's left to send (an edit made with the move, or the copy and deletion when the server refused) comes back from `push`, and `pass` sends it straight away from a `VecDeque` work queue. A private enum, `Relocated::{Moved, Copying}`, says which of the two happened.
 - **`conflict_view`, `problems`, `resolve`** feed the "Review…" dialog.
 - **`user_message`** turns each error into one friendly sentence.
 - **`default_factory`** matches on `ProviderKind` and builds the right provider from the stored config and secret:
@@ -198,6 +199,8 @@ Keyring calls can block, so the engine always calls them inside `spawn_blocking`
 | `ics.rs` | subscriptions end to end |
 | `engine.rs` (`two_programs_never_sync_the_same_account_at_once`) | two engines on one database file: the second pass waits for the first and uploads nothing twice |
 | `engine.rs` (`imported_files_are_uploaded_once`) | an imported series with an exception uploaded once, then skipped on re-import |
-| `real_server.rs` | optional, against a real CalDAV server (Radicale or Nextcloud), when `UC_CALDAV_URL` is set |
+| `engine.rs` (`the_server_moves_an_event_between_its_calendars` and the tests after it) | moves within an account: one request, an edit following its move, conflicts either way, and a server that can't move |
+| `google.rs` (`events_move_between_google_calendars`) | a series moved by Google with its attendees, and an invitation copied instead |
+| `real_server.rs` | optional, against a real CalDAV server (Radicale or Nextcloud), when `UC_CALDAV_URL` is set; with a calendar "UC Test 2", one client moves a series there and the other sees it there, once |
 
 Each test builds its own engine with an in-memory `Store` and `MemoryCredentials`. Trait objects make this swap easy: the engine can't tell a fake from the real thing.

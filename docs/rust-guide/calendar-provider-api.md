@@ -48,9 +48,13 @@ pub trait CalendarProvider: Send + Sync {
                            -> ProviderResult<WriteResult>;
     async fn get_object(&self, href: &str) -> ProviderResult<Option<RemoteObject>>;
     async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()>;
+    async fn move_object(&self, href: &str, to_calendar: &str, version: Option<&str>)
+                           -> ProviderResult<Option<WriteResult>> { Ok(None) }  // default
     fn take_updated_secret(&self) -> Option<String> { None }   // default method
 }
 ```
+
+`move_object` moves an event to another calendar of the same account, keeping its identity. Its **default body** returns `Ok(None)`, meaning "can't": a provider that doesn't override it (Microsoft) gets the engine's fallback, a copy plus a deletion. Providers also answer `Ok(None)` for single events they can't move. Adding a method with a default is how a trait grows without breaking the types that implement it.
 
 **`Precondition`** makes writes safe. A write is `Create` (it must not exist yet), `Version(etag)` (only if nobody changed it since we last read it), or `Overwrite` (the user chose "keep mine"). If someone else changed the event, the server refuses, and the engine sees `PreconditionFailed` instead of silently overwriting their change.
 

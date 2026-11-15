@@ -242,3 +242,71 @@ async fn expired_access_tokens_are_refreshed_and_reported() {
     assert_eq!(saved.tokens.access_token, "token-2");
     assert_eq!(saved.tokens.refresh_token.as_deref(), Some("refresh-1"));
 }
+
+#[tokio::test]
+async fn moves_a_series_with_its_exceptions_and_attendees() {
+    let fake = FakeGoogle::start().await;
+    {
+        let mut s = fake.state.lock().unwrap();
+        s.team_calendar = true;
+        s.put("alice@example.com", standup());
+        s.put(
+            "alice@example.com",
+            json!({"id": "abc_20260602T070000Z", "iCalUID": "abc@google.com", "recurringEventId": "abc",
+            "originalStartTime": {"dateTime": "2026-06-02T09:00:00+02:00", "timeZone": "Europe/Berlin"},
+            "summary": "Long stand-up",
+            "start": {"dateTime": "2026-06-02T09:00:00+02:00", "timeZone": "Europe/Berlin"},
+            "end": {"dateTime": "2026-06-02T10:00:00+02:00", "timeZone": "Europe/Berlin"}}),
+        );
+        s.put(
+            "alice@example.com",
+            json!({"id": "inv", "iCalUID": "inv", "summary": "Bob's meeting",
+            "organizer": {"email": "bob@example.com", "self": false},
+            "start": {"date": "2026-06-10"}, "end": {"date": "2026-06-11"}}),
+        );
+    }
+    let p = provider(&fake, "token-1", FAR);
+    let cals = p.list_calendars().await.unwrap();
+    let (alice, team) = (&cals[0], cals.iter().find(|c| c.name == "Team").unwrap());
+    let listed = p.fetch_changes(alice, None, &[]).await.unwrap();
+    let series = listed
+        .upserted
+        .iter()
+        .find(|o| o.href.ends_with("/events/abc"))
+        .unwrap();
+    let version = series.etag.clone().unwrap();
+
+    assert_eq!(
+        p.move_object(&series.href, &team.href, Some("\"stale\""))
+            .await,
+        Err(ProviderError::PreconditionFailed)
+    );
+    let moved = p
+        .move_object(&series.href, &team.href, Some(&version))
+        .await
+        .unwrap()
+        .expect("moved");
+    assert_eq!(moved.href, format!("{}events/abc", team.href));
+    let data = moved.data.unwrap();
+    assert!(data.contains("bob@example.com") && data.contains("Long stand-up"));
+
+    let in_team = p.fetch_changes(team, None, &[]).await.unwrap();
+    assert_eq!(in_team.upserted.len(), 1);
+    assert_eq!(in_team.upserted[0].etag, moved.etag);
+    let content = GoogleCodec.read(&in_team.upserted[0].data).unwrap().content;
+    assert_eq!(content.overrides.len(), 1, "the exception moved too");
+    let in_alice = p.fetch_changes(alice, None, &[]).await.unwrap();
+    assert!(
+        in_alice
+            .upserted
+            .iter()
+            .all(|o| o.href.ends_with("/events/inv"))
+    );
+
+    // Google refuses to move another organizer's event: copied instead.
+    let invitation = format!("{}events/inv", alice.href);
+    assert_eq!(p.move_object(&invitation, &team.href, None).await, Ok(None));
+    // Never created on the server: nothing to move.
+    let local = format!("{}local-1.ics", alice.href);
+    assert_eq!(p.move_object(&local, &team.href, None).await, Ok(None));
+}

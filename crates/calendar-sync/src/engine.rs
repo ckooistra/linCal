@@ -169,6 +169,14 @@ pub fn default_factory() -> ProviderFactory {
     )
 }
 
+/// What became of a move (see `SyncEngine::relocate`), with what is left
+/// to send for the event.
+enum Relocated {
+    Moved(Vec<PendingOp>),
+    /// The server can't move it: it is copied instead.
+    Copying(Vec<PendingOp>),
+}
+
 /// Both versions of an event in conflict, for comparison: the local one
 /// and the server's at the time of the conflict (`None` = deleted there).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,6 +338,9 @@ impl SyncEngine {
         store.set_recurrence_check(ProviderKind::Microsoft, calendar_microsoft::pattern::check);
         // Outlook events have a single reminder.
         store.set_reminder_limit(ProviderKind::Microsoft, 1);
+        // CalDAV MOVE and Google events.move; Graph has no move for events.
+        store.set_moves_on_server(ProviderKind::Caldav);
+        store.set_moves_on_server(ProviderKind::Google);
         Self {
             store,
             credentials,
@@ -872,8 +883,15 @@ impl SyncEngine {
         let mut report = SyncReport::default();
 
         // 1. Upload first, so server changes never silently replace queued edits.
-        for op in self.store.due_operations(account_id, now_ms()).await? {
-            self.push(provider, &op, &mut report).await?;
+        //    A move can leave more to send (an edit made with it, or the
+        //    copy that replaces a move the server refused): sent right after.
+        let mut queue: std::collections::VecDeque<PendingOp> = self
+            .store
+            .due_operations(account_id, now_ms())
+            .await?
+            .into();
+        while let Some(op) = queue.pop_front() {
+            queue.extend(self.push(provider, &op, &mut report).await?);
         }
 
         // 2. Calendar list (new, renamed, removed, permissions).
@@ -945,12 +963,14 @@ impl SyncEngine {
         Ok(report)
     }
 
+    /// Sends one queued operation. Returns what is left to send for the
+    /// same object (after a move).
     async fn push(
         &self,
         provider: &dyn CalendarProvider,
         op: &PendingOp,
         report: &mut SyncReport,
-    ) -> Result<(), SyncError> {
+    ) -> Result<Vec<PendingOp>, SyncError> {
         let Some(obj) = self
             .store
             .object_for_push(&op.calendar_id, &op.href)
@@ -958,11 +978,24 @@ impl SyncEngine {
         else {
             // The object is gone locally and never existed remotely.
             self.store.complete_delete(op).await?;
-            return Ok(());
+            return Ok(Vec::new());
         };
-        let outcome = match op.kind {
-            OpKind::Put => self.upload(provider, op, &obj).await?,
-            OpKind::Delete => self.delete(provider, op, &obj).await?,
+        let mut next = Vec::new();
+        let outcome = match (op.kind, &op.moving) {
+            // A deletion goes to wherever the server has it (the href).
+            (OpKind::Delete, _) => self.delete(provider, op, &obj).await?,
+            (_, Some(moving)) => match self.relocate(provider, op, &obj, moving).await? {
+                Ok(Relocated::Moved(left)) => {
+                    next = left;
+                    Ok(())
+                }
+                // Nothing sent yet: the copy and deletion are.
+                Ok(Relocated::Copying(queued)) => return Ok(queued),
+                Err(e) => Err(e),
+            },
+            // A move whose original calendar has since been removed: what is
+            // left is to upload it.
+            (OpKind::Put | OpKind::Move, None) => self.upload(provider, op, &obj).await?,
         };
         match outcome {
             Ok(()) => report.uploaded += 1,
@@ -1005,7 +1038,7 @@ impl SyncEngine {
                     .await?;
             }
         }
-        Ok(())
+        Ok(next)
     }
 }
 
@@ -1197,6 +1230,77 @@ impl SyncEngine {
         Ok(Ok(()))
     }
 
+    /// Moves an object on the server to the calendar it was moved to here.
+    /// Returns what is left to send: an edit made with the move, or the
+    /// copy and deletion that replace a move the server can't make.
+    async fn relocate(
+        &self,
+        provider: &dyn CalendarProvider,
+        op: &PendingOp,
+        obj: &PushObject,
+        moving: &calendar_storage::PendingMove,
+    ) -> Result<Result<Relocated, ProviderError>, SyncError> {
+        let version = match (&obj.etag, op.force) {
+            (_, true) => None,
+            (Some(etag), false) => Some(etag.clone()),
+            (None, false) => match provider.get_object(&op.href).await {
+                Ok(Some(current)) => current.etag,
+                // Deleted on the server while moved here.
+                Ok(None) => return Ok(Err(ProviderError::PreconditionFailed)),
+                Err(e) => return Ok(Err(e)),
+            },
+        };
+        let written = match provider
+            .move_object(&op.href, &moving.to_url, version.as_deref())
+            .await
+        {
+            Ok(Some(written)) => written,
+            Ok(None) => {
+                let queued = self.store.copy_instead_of_move(op).await?;
+                return Ok(Ok(Relocated::Copying(queued)));
+            }
+            Err(ProviderError::NotFound(_)) => return Ok(Err(ProviderError::PreconditionFailed)),
+            Err(e) => return Ok(Err(e)),
+        };
+        // A move doesn't change the content: without the server's copy, the
+        // stored one stays the base, and the version is asked for.
+        let (etag, data) = match (written.etag, written.data) {
+            (etag, Some(data)) => (etag, Some(data)),
+            (_, None) => match provider.get_object(&written.href).await {
+                Ok(Some(current)) => (current.etag, Some(current.data)),
+                _ => (None, None),
+            },
+        };
+        let left = self
+            .store
+            .complete_move(op, &written.href, etag.as_deref(), data.as_deref())
+            .await?;
+        // The server's copy differs from ours (it was changed there, and the
+        // user chose to move it anyway; or the server rewrote it): show it,
+        // as a download would. With more to send, that comes first.
+        if let Some(data) = data.filter(|d| left.is_none() && *d != obj.base_ical)
+            && self
+                .store
+                .object_for_push(&op.calendar_id, &written.href)
+                .await?
+                .is_some()
+        {
+            let codec = provider.codec();
+            let object = RemoteObject {
+                href: written.href.clone(),
+                etag: etag.clone(),
+                data,
+            };
+            let incoming = tokio::task::spawn_blocking(move || read_objects(&*codec, vec![object]))
+                .await
+                .map_err(|_| SyncError::Task)?;
+            self.store
+                .apply_remote_changes(&op.calendar_id, &incoming, &[], None)
+                .await?;
+        }
+        Ok(Ok(Relocated::Moved(left.into_iter().collect())))
+    }
+
     async fn delete(
         &self,
         provider: &dyn CalendarProvider,
@@ -1262,6 +1366,9 @@ fn describe(codec: &dyn ObjectCodec, account_id: &str, p: ProblemOperation) -> S
         .unwrap_or_else(|| "Untitled event".into());
     let message = match (p.conflict, deletion) {
         (true, true) => "You deleted this event, but it was changed on the server.".to_owned(),
+        (true, false) if p.moving => {
+            "You moved this event to another calendar, but it was changed on the server.".to_owned()
+        }
         (true, false) => "This event was changed on the server and here.".to_owned(),
         (false, _) => format!(
             "The server refused the change: {}.",

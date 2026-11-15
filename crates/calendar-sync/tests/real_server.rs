@@ -59,6 +59,19 @@ impl Client {
         self.engine.sync_account(&self.account).await.expect("sync");
     }
     async fn find(&self, title_prefix: &str) -> Vec<calendar_core::Occurrence> {
+        self.find_in(&self.calendar, title_prefix).await
+    }
+    /// The calendar of this account named `name`, if there is one.
+    async fn calendar_named(&self, name: &str) -> Option<String> {
+        self.store
+            .calendars_of(&self.account)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.name == name)
+            .map(|c| c.id)
+    }
+    async fn find_in(&self, calendar: &str, title_prefix: &str) -> Vec<calendar_core::Occurrence> {
         let range = TimeRange::new(
             resolve_local(
                 &TZ,
@@ -80,7 +93,7 @@ impl Client {
             .await
             .unwrap()
             .into_iter()
-            .filter(|o| o.calendar_id == self.calendar && o.title.starts_with(title_prefix))
+            .filter(|o| o.calendar_id == calendar && o.title.starts_with(title_prefix))
             .collect()
     }
 }
@@ -298,6 +311,34 @@ async fn two_clients_stay_in_sync() {
     );
     let weekly_a = a.find(&format!("{tag} weekly")).await;
 
+    // A moves the later series to "<calendar> 2", if there is one: the
+    // server moves it, and B sees it there, once.
+    let second = format!("{cal_name} 2");
+    if let (Some(to_a), Some(to_b)) = (
+        a.calendar_named(&second).await,
+        b.calendar_named(&second).await,
+    ) {
+        let moved = a
+            .store
+            .move_event(&weekly_a[3].id, "unused", &to_a)
+            .await
+            .unwrap();
+        assert_eq!(moved.id, tail, "moved by the server: the same event");
+        a.sync().await;
+        assert!(
+            a.find_in(&to_a, &tag)
+                .await
+                .iter()
+                .all(|o| o.sync_status == SyncStatus::Synced)
+        );
+        b.sync().await;
+        let later = format!("{tag} weekly later");
+        assert_eq!(b.find_in(&to_b, &later).await.len(), 2);
+        assert!(b.find(&later).await.is_empty(), "not left behind");
+    } else {
+        eprintln!("no calendar {second:?}; skipping the move");
+    }
+
     // Clean up from A; B sees the deletions.
     let one = a.find(&format!("{tag} meeting")).await.remove(0);
     a.store.delete_event(&one.id).await.unwrap();
@@ -306,4 +347,7 @@ async fn two_clients_stay_in_sync() {
     a.sync().await;
     b.sync().await;
     assert!(b.find(&tag).await.is_empty(), "deletions propagate");
+    if let Some(to_b) = b.calendar_named(&second).await {
+        assert!(b.find_in(&to_b, &tag).await.is_empty());
+    }
 }

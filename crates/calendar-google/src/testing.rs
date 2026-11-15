@@ -19,6 +19,8 @@ pub struct State {
     pub valid_token: String,
     pub requests: Vec<String>,
     pub page_size: usize,
+    /// Also list a second calendar Alice owns, "team@group".
+    pub team_calendar: bool,
 }
 
 impl State {
@@ -91,16 +93,24 @@ impl Respond for Handler {
             .collect();
         let path: Vec<&str> = path.iter().map(String::as_str).collect();
         match (req.method.as_str(), path.as_slice()) {
-            ("GET", ["users", "me", "calendarList"]) => json_response(
-                200,
-                json!({"items": [
+            ("GET", ["users", "me", "calendarList"]) => {
+                let mut items = json!([
                     {"id": "alice@example.com", "summary": "Alice", "accessRole": "owner", "primary": true, "backgroundColor": "#9FC6E7", "etag": "\"c1\"",
                      "defaultReminders": [{"method": "popup", "minutes": 10}, {"method": "email", "minutes": 60}]},
                     {"id": "holidays@group", "summary": "Holidays", "accessRole": "reader"},
                     {"id": "busy@group", "summary": "Busy", "accessRole": "freeBusyReader"}
-                ]}),
-            ),
+                ]);
+                if s.team_calendar {
+                    items.as_array_mut().unwrap().push(
+                        json!({"id": "team@group", "summary": "Team", "accessRole": "owner"}),
+                    );
+                }
+                json_response(200, json!({ "items": items }))
+            }
             ("GET", ["users", "me", "calendarList", cal]) => match *cal {
+                "team@group" if s.team_calendar => {
+                    json_response(200, json!({"id": cal, "defaultReminders": []}))
+                }
                 "alice@example.com" => json_response(
                     200,
                     json!({"id": cal, "defaultReminders": [{"method": "popup", "minutes": 10}]}),
@@ -164,6 +174,32 @@ impl Respond for Handler {
                 let cal = cal.to_string();
                 s.put(&cal, body);
                 json_response(200, s.events[&cal][&id].1.clone())
+            }
+            ("POST", ["calendars", cal, "events", id, "move"]) => {
+                // The series with its exceptions; the source lists them as
+                // cancelled from now on, as Google does.
+                let (cal, id) = (cal.to_string(), id.to_string());
+                let Some(to) = q.get("destination").cloned() else {
+                    return error(400, "required");
+                };
+                if s.events.get(&cal).and_then(|m| m.get(&id)).is_none() {
+                    return error(404, "notFound");
+                }
+                if s.events.get(&cal).unwrap()[&id].1["organizer"]["self"] == json!(false) {
+                    return error(400, "cannotChangeOrganizer");
+                }
+                let members: Vec<Value> = s.events[&cal]
+                    .values()
+                    .map(|(_, e)| e.clone())
+                    .filter(|e| e["id"] == json!(id) || e["recurringEventId"] == json!(id))
+                    .collect();
+                for e in members {
+                    let mut gone = e.clone();
+                    gone["status"] = json!("cancelled");
+                    s.put(&cal, gone);
+                    s.put(&to, e);
+                }
+                json_response(200, s.events[&to][&id].1.clone())
             }
             ("PATCH", ["calendars", cal, "events", id]) => {
                 let cal = cal.to_string();

@@ -35,10 +35,13 @@ CONF
       curl -s -o /dev/null "$base/" && break
       sleep 0.1
     done
-    # Create the test calendar (ignored if it already exists).
-    curl -s -o /dev/null -u test:test -X MKCALENDAR "$base/test/uc-test/" \
-      -H 'Content-Type: application/xml' --data-binary \
-      '<?xml version="1.0"?><c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/"><d:set><d:prop><d:displayname>UC Test</d:displayname><a:calendar-color>#2e7d32ff</a:calendar-color><c:supported-calendar-component-set><c:comp name="VEVENT"/></c:supported-calendar-component-set></d:prop></d:set></c:mkcalendar>'
+    # Create the test calendars (ignored if they already exist); the second
+    # one is for moving events between calendars.
+    for name in "UC Test:uc-test" "UC Test 2:uc-test-2"; do
+      curl -s -o /dev/null -u test:test -X MKCALENDAR "$base/test/${name#*:}/" \
+        -H 'Content-Type: application/xml' --data-binary \
+        "<?xml version=\"1.0\"?><c:mkcalendar xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\" xmlns:a=\"http://apple.com/ns/ical/\"><d:set><d:prop><d:displayname>${name%%:*}</d:displayname><a:calendar-color>#2e7d32ff</a:calendar-color><c:supported-calendar-component-set><c:comp name=\"VEVENT\"/></c:supported-calendar-component-set></d:prop></d:set></c:mkcalendar>"
+    done
     echo "Radicale running at $base (user test/test), data in $dir"
     ;;
   stop)

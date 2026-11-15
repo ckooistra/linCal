@@ -27,6 +27,7 @@ To keep "one object = one series" (the contract), the provider bundles a master 
 - `GoogleSecret` is what goes into the keyring: the tokens and an optional client secret. It's stored as JSON.
 - `GoogleProvider::send` handles each API request: it adds the bearer token, and on a 401 refreshes the token and **retries once**.
 - `impl CalendarProvider for GoogleProvider`: paging through results, sync tokens, and conditional writes with `If-Match`.
+- `move_object` calls `events.move`. The API takes no version for it, so the series' version is compared first, as for deletions. Google refuses to move another organizer's events (invitations), and those get `Ok(None)`: the engine copies them instead.
 - `account_email` fetches the address, shown as the account name.
 
 ```rust
@@ -84,6 +85,6 @@ impl Respond for Handler {
 ## Tests
 
 - **Unit tests** in `codec.rs`: series with exceptions and cancellations, "patch only what changed", all-day events, malformed data.
-- **`tests/provider.rs`** drives the real provider against `FakeGoogle`: sync tokens, paging, 410 recovery, token refresh on 401, and conditional writes.
+- **`tests/provider.rs`** drives the real provider against `FakeGoogle`: sync tokens, paging, 410 recovery, token refresh on 401, conditional writes, and moving a series with its exceptions (an invitation can't move).
 
 The crate turns on its own `testing` feature for its tests (`calendar-google = { path = ".", features = ["testing"] }` under `[dev-dependencies]`), a common Cargo trick.

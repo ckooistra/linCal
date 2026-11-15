@@ -173,7 +173,7 @@ fn perform(
                 let result = match scope {
                     // A new calendar moves the event (or series) there.
                     Scope::Event | Scope::Series => {
-                        // Moving off a server queues a deletion there.
+                        // Moving off a server queues a deletion or a move there.
                         if matches!(store.object_of(&id).await, Ok(Some(_))) {
                             scheduler.trigger();
                         }

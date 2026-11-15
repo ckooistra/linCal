@@ -33,7 +33,7 @@ crates/
 └── calendar-storage/         SQLite via SQLx; depends only on calendar-core
     ├── migrations/           Embedded, applied on open
     ├── src/lib.rs            Store: queries, transactional writes, settings
-    ├── src/moving.rs         Moving events to another calendar (copy under a new id + delete, one transaction)
+    ├── src/moving.rs         Moving events to another calendar (by the server within an account, else copy + delete)
     ├── src/codec.rs          Row ↔ model mapping
     └── examples/bench_queries.rs
 
@@ -87,7 +87,8 @@ Storage knows nothing about iCalendar or HTTP. It stores parsed `ObjectContent` 
                                                                         │ (debounced 1.5 s, or every 5 min, or retry due)
  SyncEngine.sync_account
    1. push   due operations: rebuild the object from rows + last server copy (calendar-ical),
-             PUT with If-Match / If-None-Match:* (DELETE with If-Match)
+             PUT with If-Match / If-None-Match:* (DELETE with If-Match;
+             a move within an account: MOVE / events.move with the same check)
              412 → conflict · network/5xx/429 → retry with backoff · 401 → account error
    2. list   calendars (added / renamed / permissions / removed-unless-pending)
    3. pull   per calendar: sync-collection(token) or ETag listing → multiget changed →
@@ -175,6 +176,8 @@ Migration 3 (sync integrity) adds:
 - `remote_objects.presence`, so an object's existence on the server is tracked separately from its version;
 - `import_error` and `import_warnings`, recording objects that couldn't be read or were read only approximately;
 - `events.base_recurrence_id`, so a moved override is matched to its component in the server copy.
+
+Migration 8 (native moves) rebuilds `pending_operations` to add the `move` kind and `move_from`, the calendar the server still has a moved event in (see [synchronization.md](synchronization.md#moving-events-between-calendars)).
 
 ### Widget adapter
 

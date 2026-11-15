@@ -134,15 +134,33 @@ Each calendar remembers the version of the provider readers its events were read
 
 ## Moving events between calendars
 
-Choosing another calendar for an event (or a whole series) moves it. This works between any two writable calendars: local ones, calendars of one account, or of different accounts and providers. `Store::move_event` does it in one transaction, as a deletion plus a creation:
+Choosing another calendar for an event (or a whole series) moves it. This works between any two writable calendars: local ones, calendars of one account, or of different accounts and providers. Either way, a series moves as a whole, with its modified and cancelled occurrences. "Only this one" and "this and following" can't change the calendar.
 
-- The rows are copied into the new calendar under a **new id**, with the series' modified and cancelled occurrences. The originals are deleted the usual way.
-- **The old server copy** is queued for deletion with the version we knew, so a change someone made there meanwhile becomes a conflict, shown under *Review…*, instead of being deleted. Keeping the server's version brings it back beside the moved copy; the new id keeps the two apart. An object that was never uploaded is simply forgotten.
+**Checked first:** a read-only calendar can't receive events, and the new calendar's limits apply (Outlook: one reminder, fewer repeat rules). `Store::update_and_move` saves the other edits of the same save only once these checks pass.
+
+### Within a Google or CalDAV account: the server moves it
+
+Between two calendars of one Google or CalDAV account, the server moves the event: Google `events.move`, WebDAV `MOVE` (with `Overwrite: F` and `If-Match`). It stays **the same event**: same UID and id, and everything the app doesn't model stays with it, such as attendees, conferencing and invitation links.
+
+- **Locally**, the rows and their remote object change calendar at once and keep their ids. One `move` operation is queued in `pending_operations`; its `move_from` names the calendar the server still has the event in.
+- **Until the move is sent**, neither calendar's sync changes the event. The old calendar's listing still has it, but it isn't imported there again; the new calendar's listing doesn't have it yet, and it isn't deleted.
+- **Moved again before syncing:** the queued move is updated to go from where the server has the event, or dropped if the event went back there. An edit made with the move, or after it, is uploaded right after the move, in the same pass.
+- **Version check:** the move is conditional on the version we knew. If someone changed the event on the server meanwhile, the move becomes a conflict ("You moved this event to another calendar, but it was changed on the server"):
+  - **Keep mine** moves the server's copy anyway, and then shows the changes made there;
+  - **Use server version** puts the event back in its old calendar, as the server has it.
+- **Changes during the move** are kept. If the event was edited, moved on or deleted here while the request ran, that change is sent next, to the event's new place on the server.
+- **When the server can't move it**, the engine copies it instead (below), in the same pass. This happens for Google events organised by someone else (an invitation), and for CalDAV servers that refuse a `MOVE` between those calendars (403, 405, 501 or 502).
+- Outlook (Microsoft Graph) has no move for events: its moves are copies.
+
+### Otherwise: a copy and a deletion
+
+Between accounts, to or from a local calendar, and with Outlook, `Store::move_event` makes the move as a deletion plus a creation, in one transaction:
+
+- The rows are copied into the new calendar under a **new id**. The originals are deleted the usual way.
+- **The old server copy** is queued for deletion with the version we knew. A change someone made there meanwhile becomes a conflict, shown under *Review…*, instead of being deleted. Keeping the server's version brings it back beside the moved copy, and the new id keeps the two apart. An object that was never uploaded is simply forgotten.
 - **The copy**, in a synchronized calendar, is queued for upload as a new object, with a new UID.
 - The local rows are the source of truth throughout: if the deletion or the upload fails, it is retried, and nothing is lost.
-- **Checked first:** a read-only calendar can't receive events, and the new calendar's limits apply (Outlook: one reminder, fewer repeat rules). `Store::update_and_move` saves the other edits of the same save only once these checks pass.
-- **A series moves as a whole.** "Only this one" and "this and following" can't change the calendar.
-- **Not carried over:** what the app doesn't model (attendees, conferencing, links to invitations). The server sees a new event. For meetings with other people, a provider-native move would be better (see *Not yet supported*).
+- **Not carried over:** what the app doesn't model (attendees, conferencing, links to invitations). The server sees a new event.
 
 ## Splitting a series ("this and following")
 
@@ -153,7 +171,6 @@ A split is two ordinary changes: the original series is uploaded with its shorte
 
 ## Not yet supported
 
-- Moving an event within one Google or CalDAV account with the provider's own move (Google `events.move`, WebDAV `MOVE`), which would keep its identity and invitations. Moves are a deletion plus a creation today (see above).
 - Creating or deleting calendars on the server (MKCALENDAR).
 - HTTP Digest authentication.
 - Generating VTIMEZONE components for new events (IANA TZIDs are sent by reference, which Nextcloud and Radicale accept).

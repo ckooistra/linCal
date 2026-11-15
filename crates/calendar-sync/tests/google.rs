@@ -68,19 +68,8 @@ async fn titles(store: &Store) -> Vec<String> {
     v
 }
 
-#[tokio::test]
-async fn google_account_round_trip() {
-    let fake = FakeGoogle::start().await;
-    fake.state.lock().unwrap().put(
-        "alice@example.com",
-        json!({
-            "id": "abc", "iCalUID": "abc@google.com", "summary": "Stand-up",
-            "start": {"dateTime": "2026-06-01T09:00:00+02:00", "timeZone": "Europe/Berlin"},
-            "end": {"dateTime": "2026-06-01T09:15:00+02:00", "timeZone": "Europe/Berlin"},
-            "recurrence": ["RRULE:FREQ=DAILY;COUNT=3"],
-            "attendees": [{"email": "bob@example.com"}]
-        }),
-    );
+/// A store and engine with the fake's Google account signed in.
+async fn signed_in(fake: &FakeGoogle) -> (Store, SyncEngine, String) {
     let store = Store::open_in_memory().await.unwrap();
     let api = fake.api();
     let factory_api = api.clone();
@@ -114,6 +103,23 @@ async fn google_account_round_trip() {
         )
         .await
         .unwrap();
+    (store, engine, id)
+}
+
+#[tokio::test]
+async fn google_account_round_trip() {
+    let fake = FakeGoogle::start().await;
+    fake.state.lock().unwrap().put(
+        "alice@example.com",
+        json!({
+            "id": "abc", "iCalUID": "abc@google.com", "summary": "Stand-up",
+            "start": {"dateTime": "2026-06-01T09:00:00+02:00", "timeZone": "Europe/Berlin"},
+            "end": {"dateTime": "2026-06-01T09:15:00+02:00", "timeZone": "Europe/Berlin"},
+            "recurrence": ["RRULE:FREQ=DAILY;COUNT=3"],
+            "attendees": [{"email": "bob@example.com"}]
+        }),
+    );
+    let (store, engine, id) = signed_in(&fake).await;
     let accounts = store.remote_accounts().await.unwrap();
     assert_eq!(accounts[0].account.provider, ProviderKind::Google);
     assert_eq!(accounts[0].account.name, "alice@example.com (Google)");
@@ -304,5 +310,86 @@ async fn google_account_round_trip() {
     assert_eq!(
         titles(&store).await,
         vec!["Daily (moved)", "Last one", "Later"]
+    );
+}
+
+#[tokio::test]
+async fn events_move_between_google_calendars() {
+    let fake = FakeGoogle::start().await;
+    {
+        let mut s = fake.state.lock().unwrap();
+        s.team_calendar = true;
+        s.put(
+            "alice@example.com",
+            json!({
+                "id": "abc", "iCalUID": "abc@google.com", "summary": "Stand-up",
+                "start": {"dateTime": "2026-06-01T09:00:00+02:00", "timeZone": "Europe/Berlin"},
+                "end": {"dateTime": "2026-06-01T09:15:00+02:00", "timeZone": "Europe/Berlin"},
+                "recurrence": ["RRULE:FREQ=DAILY;COUNT=3"],
+                "attendees": [{"email": "bob@example.com"}]
+            }),
+        );
+        s.put(
+            "alice@example.com",
+            json!({"id": "inv", "iCalUID": "inv", "summary": "Bob's meeting",
+            "organizer": {"email": "bob@example.com", "self": false},
+            "start": {"date": "2026-06-10"}, "end": {"date": "2026-06-11"}}),
+        );
+    }
+    let (store, engine, id) = signed_in(&fake).await;
+    engine.sync_account(&id).await.unwrap();
+    let calendars = store.calendars_of(&id).await.unwrap();
+    let team = calendars
+        .iter()
+        .find(|c| c.name == "Team")
+        .unwrap()
+        .id
+        .clone();
+    let shown = store.query_range(june(), TZ).await.unwrap();
+    let series = shown[0].series_id.clone().unwrap();
+    let invitation = shown
+        .iter()
+        .find(|o| o.title == "Bob's meeting")
+        .unwrap()
+        .id
+        .clone();
+
+    store.move_event(&series, "unused", &team).await.unwrap();
+    store.move_event(&invitation, "copy", &team).await.unwrap();
+    engine.sync_account(&id).await.unwrap();
+    {
+        let s = fake.state.lock().unwrap();
+        let moved = &s.events["team@group"]["abc"].1;
+        assert_eq!(
+            moved["attendees"][0]["email"], "bob@example.com",
+            "the same event"
+        );
+        assert_eq!(
+            s.events["alice@example.com"]["abc"].1["status"],
+            "cancelled"
+        );
+        // The invitation couldn't move: a copy, and the original deleted.
+        assert_eq!(
+            s.events["alice@example.com"]["inv"].1["status"],
+            "cancelled"
+        );
+        assert_eq!(s.events["team@group"].len(), 2);
+    }
+    let again = engine.sync_account(&id).await.unwrap();
+    assert_eq!((again.uploaded, again.conflicts), (0, 0));
+    let shown = store.query_range(june(), TZ).await.unwrap();
+    assert_eq!(shown.len(), 4, "three stand-ups and the meeting, once each");
+    assert!(shown.iter().all(|o| o.calendar_id == team));
+    assert!(
+        shown
+            .iter()
+            .all(|o| o.sync_status == calendar_core::SyncStatus::Synced)
+    );
+    assert_eq!(
+        shown
+            .iter()
+            .filter(|o| o.series_id.as_deref() == Some(series.as_str()))
+            .count(),
+        3
     );
 }

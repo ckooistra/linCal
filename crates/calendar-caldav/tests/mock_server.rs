@@ -270,3 +270,72 @@ async fn unreachable_servers_are_network_errors() {
         Err(ProviderError::Network(_))
     ));
 }
+
+#[tokio::test]
+async fn moves_between_collections_with_webdav_move() {
+    let server = nextcloud().await;
+    let p = provider(&server).await;
+    let base = server.uri();
+    let object = format!("{base}/remote.php/dav/calendars/alice/personal/e1.ics");
+    let work = format!("{base}/remote.php/dav/calendars/alice/work/");
+    Mock::given(method("MOVE"))
+        .and(path("/remote.php/dav/calendars/alice/personal/e1.ics"))
+        .and(header("Destination", format!("{work}e1.ics").as_str()))
+        .and(header("Overwrite", "F"))
+        .and(header("If-Match", "\"v1\""))
+        .respond_with(ResponseTemplate::new(201))
+        .mount(&server)
+        .await;
+    let moved = p
+        .move_object(&object, &work, Some("\"v1\""))
+        .await
+        .unwrap()
+        .expect("moved");
+    assert_eq!(moved.href, format!("{work}e1.ics"));
+    assert_eq!(
+        (moved.etag, moved.data),
+        (None, None),
+        "asked for afterwards"
+    );
+
+    // Changed on the server meanwhile, or the name is taken there.
+    Mock::given(method("MOVE"))
+        .and(path("/remote.php/dav/calendars/alice/personal/e2.ics"))
+        .respond_with(ResponseTemplate::new(412))
+        .mount(&server)
+        .await;
+    let e2 = format!("{base}/remote.php/dav/calendars/alice/personal/e2.ics");
+    assert_eq!(
+        p.move_object(&e2, &work, Some("\"v1\"")).await,
+        Err(ProviderError::PreconditionFailed)
+    );
+    // A server that can't move between these collections: copied instead.
+    for (name, status) in [("e3", 403), ("e4", 405), ("e5", 502)] {
+        Mock::given(method("MOVE"))
+            .and(path(format!(
+                "/remote.php/dav/calendars/alice/personal/{name}.ics"
+            )))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let href = format!("{base}/remote.php/dav/calendars/alice/personal/{name}.ics");
+        assert_eq!(
+            p.move_object(&href, &work, None).await,
+            Ok(None),
+            "{status}"
+        );
+    }
+    // Offline: try again later, as for any write.
+    Mock::given(method("MOVE"))
+        .and(path("/remote.php/dav/calendars/alice/personal/e6.ics"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let e6 = format!("{base}/remote.php/dav/calendars/alice/personal/e6.ics");
+    assert!(
+        p.move_object(&e6, &work, None)
+            .await
+            .unwrap_err()
+            .is_transient()
+    );
+}

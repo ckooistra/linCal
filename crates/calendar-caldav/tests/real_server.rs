@@ -96,6 +96,35 @@ async fn round_trip_against_a_real_server() {
         .and_then(|o| o.etag.clone())
         .or(w.etag);
 
+    // Moved to "<calendar> 2", if there is one: the same object (UID), now
+    // there, and only there.
+    let mut href = href;
+    let mut new_etag = new_etag;
+    let mut cal = cal;
+    let mut after = after;
+    let second = format!("{calendar_name} 2");
+    if let Some(to) = calendars.iter().find(|c| c.name == second) {
+        let moved = p
+            .move_object(&href, &to.href, new_etag.as_deref())
+            .await
+            .expect("move")
+            .expect("the server moves between calendars");
+        assert!(moved.href.starts_with(&to.href));
+        let there = p
+            .get_object(&moved.href)
+            .await
+            .expect("read")
+            .expect("moved");
+        assert!(there.data.contains(&format!("UID:{uid}")));
+        assert_eq!(p.get_object(&href).await.expect("read"), None, "gone");
+        href = moved.href;
+        new_etag = there.etag;
+        cal = to.clone();
+        after = p.fetch_changes(&cal, None, &[]).await.expect("listing");
+    } else {
+        eprintln!("no calendar {second:?}; skipping the move");
+    }
+
     p.delete_object(&href, new_etag.as_deref())
         .await
         .expect("delete");

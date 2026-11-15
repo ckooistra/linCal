@@ -61,6 +61,7 @@ WebDAV answers with a "multistatus" XML document: one `<response>` per item, eac
   - `list_calendars` skips task lists and inboxes, and detects read-only calendars from your privileges.
   - `fetch_changes` uses sync tokens, falling back to comparing ETags when the server has none.
   - `put_object` and `delete_object` send conditional requests.
+  - `move_object` sends a WebDAV `MOVE` to the same file name in the other collection, with `Destination`, `Overwrite: F` (never replace what's there) and `If-Match`. A server that refuses moves between those collections (403, 405, 501, 502) gets `Ok(None)`, and the engine copies the event instead.
 
 ```rust
 // Skip collections that cannot hold events (task lists etc.).
@@ -81,4 +82,5 @@ if let Some(comps) = r.prop(CALDAV, "supported-calendar-component-set")
 ## Tests
 
 - **`tests/mock_server.rs`** starts a fake server with **wiremock** that answers like Nextcloud does (copied XML), then checks discovery, listing (including skipping the task list and spotting the read-only shared calendar), syncing and writing. It needs no network ([§17](concepts.md#17-tests)).
-- **`tests/real_server.rs`** runs against a real server, but only when `UC_CALDAV_URL` and the other variables are set. Otherwise it returns early and passes. Use it with the local Radicale from `scripts/dev-radicale.sh`.
+- **`tests/mock_server.rs`** also checks the exact `MOVE` request, and which answers mean "copy instead", "conflict" or "try again later".
+- **`tests/real_server.rs`** runs against a real server, but only when `UC_CALDAV_URL` and the other variables are set. Otherwise it returns early and passes. Use it with the local Radicale from `scripts/dev-radicale.sh`, which also creates a second calendar, "UC Test 2", for the move.

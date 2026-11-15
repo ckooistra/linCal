@@ -186,4 +186,22 @@ pub trait CalendarProvider: Send + Sync {
 
     /// Deletes an object; `version` makes the delete conditional.
     async fn delete_object(&self, href: &str, version: Option<&str>) -> ProviderResult<()>;
+
+    /// Moves an object to another calendar of the same account (CalDAV
+    /// `MOVE`, Google `events.move`), keeping its identity: the UID, and
+    /// whatever the application doesn't model (attendees, conferencing).
+    /// `version` makes the move conditional, as for [`Self::delete_object`].
+    ///
+    /// The result says where the object is now. `Ok(None)` means this
+    /// provider, server or object can't be moved (the default); the engine
+    /// then copies it into the new calendar and deletes the original.
+    async fn move_object(
+        &self,
+        href: &str,
+        to_calendar: &str,
+        version: Option<&str>,
+    ) -> ProviderResult<Option<WriteResult>> {
+        let _ = (href, to_calendar, version);
+        Ok(None)
+    }
 }

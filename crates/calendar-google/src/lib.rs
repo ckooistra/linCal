@@ -123,6 +123,16 @@ fn series_data(events: &[Value], time_zone: Option<&str>, defaults: &Value) -> S
     json!({ "timeZone": time_zone, "defaultReminders": defaults, "events": events }).to_string()
 }
 
+/// The Google calendar id in a calendar href (`…/calendars/<id>/`),
+/// percent-decoded (`+` is literal in a path).
+fn calendar_id_of(href: &str) -> Option<String> {
+    let segment = href.trim_end_matches('/').rsplit('/').next()?;
+    let query = format!("x={}", segment.replace('+', "%2B"));
+    url::form_urlencoded::parse(query.as_bytes())
+        .next()
+        .map(|(_, id)| id.into_owned())
+}
+
 /// (calendar href, Google event id or `None` for a not-yet-created object).
 fn split_href(href: &str) -> ProviderResult<(String, Option<String>, String)> {
     if let Some((calendar, id)) = href.split_once("/events/") {
@@ -685,6 +695,56 @@ impl CalendarProvider for GoogleProvider {
         )
         .await?;
         Ok(())
+    }
+
+    /// `events.move`: the series keeps its id and its exceptions. Google
+    /// takes no version for it, so the series' version is compared first
+    /// (as for deletions).
+    async fn move_object(
+        &self,
+        href: &str,
+        to_calendar: &str,
+        version: Option<&str>,
+    ) -> ProviderResult<Option<WriteResult>> {
+        let (calendar, Some(master_id), _) = split_href(href)? else {
+            return Ok(None); // never created on the server
+        };
+        let Some((members, _)) = self.fetch_series(&calendar, &master_id).await? else {
+            return Err(ProviderError::NotFound(href.to_owned()));
+        };
+        if let Some(v) = version
+            && series_etag(&members) != v
+        {
+            return Err(ProviderError::PreconditionFailed);
+        }
+        let destination =
+            calendar_id_of(to_calendar).ok_or_else(|| invalid("bad calendar href"))?;
+        let url = with_query(
+            &Url::parse(&format!("{calendar}events/{master_id}/move"))
+                .map_err(|_| invalid("bad event URL"))?,
+            &[("destination", &destination)],
+        );
+        match self.send(Method::POST, url.as_str(), None, None, &[]).await {
+            Ok(_) => {}
+            // Events Google won't move (another organizer's invitation,
+            // birthdays, out-of-office): copy them instead.
+            Err(ProviderError::Forbidden(_) | ProviderError::InvalidResponse(_)) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        }
+        let to = format!("{}/", to_calendar.trim_end_matches('/'));
+        let (members, zone) = self
+            .fetch_series(&to, &master_id)
+            .await?
+            .ok_or_else(|| ProviderError::NotFound(href.to_owned()))?;
+        let defaults = self.defaults_for(&to).await?;
+        let object = self.object(&to, &master_id, &members, zone.as_deref(), &defaults);
+        Ok(Some(WriteResult {
+            href: object.href,
+            etag: object.etag,
+            data: Some(object.data),
+        }))
     }
 }
 

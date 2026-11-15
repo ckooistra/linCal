@@ -255,9 +255,10 @@ pub async fn update_event(
     let store = state.store()?;
     let draft = draft.to_draft(&tz)?;
     let occurrence = match (scope, new_id) {
-        // With a new id, a change of calendar moves the event (or series).
+        // With a new id, a change of calendar moves the event (or series);
+        // the id is used if it is copied rather than moved by the server.
         (Scope::Event | Scope::Series, Some(new_id)) => {
-            // Moving off a server queues a deletion there.
+            // Moving off a server queues a deletion or a move there.
             if store.object_of(&id).await?.is_some() {
                 state.changed(calendar_core::SyncStatus::PendingSync);
             }

@@ -536,6 +536,56 @@ impl CalendarProvider for CalDavProvider {
             Err(e) => Err(e),
         }
     }
+
+    /// WebDAV `MOVE` (RFC 4918 §9.9) into the other collection, under the
+    /// same file name. `Overwrite: F` never replaces an object there.
+    async fn move_object(
+        &self,
+        href: &str,
+        to_calendar: &str,
+        version: Option<&str>,
+    ) -> ProviderResult<Option<WriteResult>> {
+        let url = Url::parse(href)
+            .map_err(|_| ProviderError::InvalidResponse("bad object URL".into()))?;
+        let name = url
+            .path_segments()
+            .and_then(|mut s| s.next_back())
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| ProviderError::InvalidResponse("bad object URL".into()))?
+            .to_owned();
+        let collection = Url::parse(to_calendar)
+            .map_err(|_| ProviderError::InvalidResponse("bad calendar URL".into()))?;
+        let target = resolve(&collection, &name)?;
+        let mut headers = vec![
+            ("Destination", target.to_string()),
+            ("Overwrite", "F".to_owned()),
+        ];
+        if let Some(v) = version {
+            headers.push(("If-Match", v.to_owned()));
+        }
+        match self
+            .client
+            .send(method("MOVE"), &url, &headers, None, &[])
+            .await
+        {
+            Ok(reply) => Ok(Some(WriteResult {
+                href: target.to_string(),
+                // Servers rarely send one for MOVE; the engine then asks.
+                etag: reply
+                    .headers
+                    .get("ETag")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                data: None,
+            })),
+            // The server can't move between these collections (403, 405,
+            // 501; 502 for a destination it doesn't serve, RFC 4918 §9.9.4).
+            Err(ProviderError::Forbidden(_)) => Ok(None),
+            Err(ProviderError::Server { status: 501 | 502 })
+            | Err(ProviderError::InvalidResponse(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]

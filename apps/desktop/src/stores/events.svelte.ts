@@ -266,7 +266,8 @@ export class EventStore {
     this.#set(optimistic);
     this.#wrote(id);
     const generation = this.#sourceGeneration;
-    // A new calendar moves the event (or series): it gets a new id there.
+    // A new calendar moves the event (or series). The server moves it within
+    // an account; otherwise it is copied there, under the new id.
     const moving = draft.calendarId !== previous.calendarId;
     const affectsOthers = effective === "series" || effective === "following" || rrule !== previous.rrule || moving;
     const newId =

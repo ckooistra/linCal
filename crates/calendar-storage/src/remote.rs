@@ -72,6 +72,29 @@ pub struct ApplyReport {
 pub enum OpKind {
     Put,
     Delete,
+    /// Move the object on the server (see [`PendingMove`]), nothing else.
+    Move,
+}
+
+impl OpKind {
+    fn parse(value: &str) -> Self {
+        match value {
+            "delete" => Self::Delete,
+            "move" => Self::Move,
+            _ => Self::Put,
+        }
+    }
+}
+
+/// An object moved to another calendar of its account, which the server
+/// still has in the calendar it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMove {
+    /// The calendar the server has it in.
+    pub from_calendar: String,
+    /// That calendar's remote URL, and the new calendar's.
+    pub from_url: String,
+    pub to_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +106,42 @@ pub struct PendingOp {
     pub attempts: i64,
     /// Upload unconditionally (the user chose to keep their version).
     pub force: bool,
+    /// For a `Move`, or a `Put` of a moved object: move it first.
+    pub moving: Option<PendingMove>,
+}
+
+/// Columns of a queued operation, read by [`pending_op`].
+macro_rules! op_columns {
+    () => {
+        "SELECT p.calendar_id, p.href, p.kind, p.generation, p.attempts, p.force, \
+     p.move_from, c.remote_url AS to_url, f.remote_url AS from_url \
+     FROM pending_operations p JOIN calendars c ON c.id = p.calendar_id \
+     LEFT JOIN calendars f ON f.id = p.move_from "
+    };
+}
+
+fn pending_op(r: &sqlx::sqlite::SqliteRow) -> PendingOp {
+    let moving = match (
+        r.get::<Option<String>, _>("move_from"),
+        r.get::<Option<String>, _>("from_url"),
+        r.get::<Option<String>, _>("to_url"),
+    ) {
+        (Some(from_calendar), Some(from_url), Some(to_url)) => Some(PendingMove {
+            from_calendar,
+            from_url,
+            to_url,
+        }),
+        _ => None,
+    };
+    PendingOp {
+        calendar_id: r.get("calendar_id"),
+        href: r.get("href"),
+        kind: OpKind::parse(&r.get::<String, _>("kind")),
+        generation: r.get("generation"),
+        attempts: r.get("attempts"),
+        force: r.get::<i64, _>("force") != 0,
+        moving,
+    }
 }
 
 /// Whether the server may hold an object (see migration 3).
@@ -143,6 +202,9 @@ pub struct ProblemOperation {
     pub error: Option<String>,
     /// Title of the local rows, if any are left (deletions have none).
     pub title: Option<String>,
+    /// The event was moved to this calendar, and the server still has it
+    /// in the one it came from.
+    pub moving: bool,
     /// Last server copy, for describing deleted objects.
     pub base_ical: String,
 }
@@ -697,11 +759,14 @@ impl Store {
         calendar_id: &str,
         href: &str,
     ) -> Result<bool> {
+        // An object moved away locally is still the server's in the
+        // calendar it came from: it must not be imported there again.
         let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pending_operations WHERE calendar_id = ? AND href = ?",
+            "SELECT COUNT(*) FROM pending_operations WHERE href = ? AND (calendar_id = ? OR move_from = ?)",
         )
-        .bind(calendar_id)
         .bind(href)
+        .bind(calendar_id)
+        .bind(calendar_id)
         .fetch_one(&mut **tx)
         .await?;
         Ok(n > 0)
@@ -943,30 +1008,33 @@ impl Store {
 
     /// Queued operations of an account that are due now.
     pub async fn due_operations(&self, account_id: &str, now_ms: i64) -> Result<Vec<PendingOp>> {
-        let rows = sqlx::query(
-            "SELECT p.calendar_id, p.href, p.kind, p.generation, p.attempts, p.force FROM pending_operations p \
-             JOIN calendars c ON c.id = p.calendar_id \
-             WHERE c.account_id = ? AND p.state = 'pending' AND p.next_attempt_ms <= ? ORDER BY p.created_at",
-        )
+        let rows = sqlx::query(concat!(
+            op_columns!(),
+            "WHERE c.account_id = ? AND p.state = 'pending' \
+             AND p.next_attempt_ms <= ? ORDER BY p.created_at"
+        ))
         .bind(account_id)
         .bind(now_ms)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| PendingOp {
-                calendar_id: r.get("calendar_id"),
-                href: r.get("href"),
-                kind: if r.get::<String, _>("kind") == "delete" {
-                    OpKind::Delete
-                } else {
-                    OpKind::Put
-                },
-                generation: r.get("generation"),
-                attempts: r.get("attempts"),
-                force: r.get::<i64, _>("force") != 0,
-            })
-            .collect())
+        Ok(rows.iter().map(pending_op).collect())
+    }
+
+    /// The operation queued for one object, if it is waiting to be sent.
+    pub async fn pending_operation(
+        &self,
+        calendar_id: &str,
+        href: &str,
+    ) -> Result<Option<PendingOp>> {
+        let row = sqlx::query(concat!(
+            op_columns!(),
+            "WHERE p.calendar_id = ? AND p.href = ? AND p.state = 'pending'"
+        ))
+        .bind(calendar_id)
+        .bind(href)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(pending_op))
     }
 
     /// Makes every waiting retry due immediately ("Sync now").
@@ -1253,12 +1321,15 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         } else {
+            // Changed again meanwhile, perhaps moved to another calendar of
+            // the account (the href still names the server's copy).
             sqlx::query(
-                "UPDATE remote_objects SET etag = ?, presence = 'present' WHERE calendar_id = ? AND href = ?",
+                "UPDATE remote_objects SET etag = ?, presence = 'present' WHERE href = ? AND calendar_id IN \
+                 (SELECT id FROM calendars WHERE account_id = (SELECT account_id FROM calendars WHERE id = ?))",
             )
             .bind(etag)
-            .bind(&op.calendar_id)
             .bind(&op.href)
+            .bind(&op.calendar_id)
             .execute(&mut *tx)
             .await?;
         }
@@ -1285,6 +1356,117 @@ impl Store {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Records that the server moved the object of `op` into `op`'s
+    /// calendar, where it is now `href` with version `etag` (and, if the
+    /// provider said, the server copy `ical`).
+    ///
+    /// The event may have changed here while the move ran: edited (the
+    /// upload follows), moved on (or back) to yet another calendar (another
+    /// move follows), or deleted (the deletion follows, at the new href).
+    /// Returns the operation still to send for the object, if any.
+    pub async fn complete_move(
+        &self,
+        op: &PendingOp,
+        href: &str,
+        etag: Option<&str>,
+        ical: Option<&str>,
+    ) -> Result<Option<PendingOp>> {
+        let mut tx = self.pool.begin().await?;
+        // Where the object is now (locally), among the account's calendars.
+        let here: Option<String> = sqlx::query_scalar(
+            "SELECT o.calendar_id FROM remote_objects o JOIN calendars c ON c.id = o.calendar_id \
+             WHERE o.href = ? AND c.account_id = (SELECT account_id FROM calendars WHERE id = ?)",
+        )
+        .bind(&op.href)
+        .bind(&op.calendar_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(here) = here else {
+            // Its calendar was removed meanwhile.
+            return Ok(None);
+        };
+        for sql in [
+            "UPDATE remote_objects SET href = ? WHERE calendar_id = ? AND href = ?",
+            "UPDATE pending_operations SET href = ? WHERE calendar_id = ? AND href = ?",
+            "UPDATE events SET remote_href = ? WHERE calendar_id = ? AND remote_href = ?",
+        ] {
+            sqlx::query(sql)
+                .bind(href)
+                .bind(&here)
+                .bind(&op.href)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query(
+            "UPDATE remote_objects SET etag = ?, ical = COALESCE(?, ical), presence = 'present' \
+             WHERE calendar_id = ? AND href = ?",
+        )
+        .bind(etag)
+        .bind(ical)
+        .bind(&here)
+        .bind(href)
+        .execute(&mut *tx)
+        .await?;
+        let kind: Option<String> = sqlx::query_scalar(
+            "SELECT kind FROM pending_operations WHERE calendar_id = ? AND href = ?",
+        )
+        .bind(&here)
+        .bind(href)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let moved_to = &op.calendar_id;
+        let set_status = |status: &'static str| {
+            sqlx::query(
+                "UPDATE events SET sync_status = ? WHERE calendar_id = ? AND remote_href = ?",
+            )
+            .bind(status)
+            .bind(&here)
+            .bind(href)
+        };
+        let set_origin = |origin: Option<&str>| {
+            sqlx::query(
+                "UPDATE pending_operations SET move_from = ? WHERE calendar_id = ? AND href = ?",
+            )
+            .bind(origin.map(str::to_owned))
+            .bind(&here)
+            .bind(href)
+        };
+        match (kind.as_deref(), here == *moved_to) {
+            // Done: nothing else changed.
+            (Some("move"), true) => {
+                sqlx::query("DELETE FROM pending_operations WHERE calendar_id = ? AND href = ?")
+                    .bind(&here)
+                    .bind(href)
+                    .execute(&mut *tx)
+                    .await?;
+                set_status("synced").execute(&mut *tx).await?;
+            }
+            (Some(_), true) => {
+                set_origin(None).execute(&mut *tx).await?;
+            }
+            // Moved on, or back: the server has it in `moved_to` now.
+            (Some(_), false) => {
+                set_origin(Some(moved_to)).execute(&mut *tx).await?;
+            }
+            (None, false) => {
+                sqlx::query(
+                    "INSERT INTO pending_operations (calendar_id, href, kind, created_at, move_from) \
+                     VALUES (?, ?, 'move', ?, ?)",
+                )
+                .bind(&here)
+                .bind(href)
+                .bind(now_ms())
+                .bind(moved_to)
+                .execute(&mut *tx)
+                .await?;
+                set_status("pending-sync").execute(&mut *tx).await?;
+            }
+            (None, true) => {}
+        }
+        tx.commit().await?;
+        self.pending_operation(&here, href).await
     }
 
     /// Records a failed upload and updates the affected rows' status.
@@ -1383,6 +1565,35 @@ impl Store {
                     .await?;
             }
             Resolution::UseServer => {
+                let origin: Option<String> = sqlx::query_scalar(
+                    "SELECT move_from FROM pending_operations WHERE calendar_id = ? AND href = ?",
+                )
+                .bind(calendar_id)
+                .bind(href)
+                .fetch_one(&mut *tx)
+                .await?;
+                if let Some(origin) = origin {
+                    // The server has it in the calendar it came from: drop
+                    // the local copy here and list that calendar afresh.
+                    for sql in [
+                        "DELETE FROM pending_operations WHERE calendar_id = ? AND href = ?",
+                        "DELETE FROM events WHERE calendar_id = ? AND remote_href = ?",
+                        "DELETE FROM remote_objects WHERE calendar_id = ? AND href = ?",
+                    ] {
+                        sqlx::query(sql)
+                            .bind(calendar_id)
+                            .bind(href)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+                    sqlx::query("UPDATE calendars SET sync_token = NULL WHERE id IN (?, ?)")
+                        .bind(calendar_id)
+                        .bind(&origin)
+                        .execute(&mut *tx)
+                        .await?;
+                    tx.commit().await?;
+                    return Ok(());
+                }
                 let presence: Option<String> = sqlx::query_scalar(
                     "SELECT presence FROM remote_objects WHERE calendar_id = ? AND href = ?",
                 )
@@ -1432,7 +1643,7 @@ impl Store {
     /// Failed and conflicting operations of an account, oldest first.
     pub async fn problem_operations(&self, account_id: &str) -> Result<Vec<ProblemOperation>> {
         let rows = sqlx::query(
-            "SELECT p.calendar_id, p.href, p.kind, p.state, p.last_error, o.ical, \
+            "SELECT p.calendar_id, p.href, p.kind, p.state, p.last_error, o.ical, p.move_from, \
                (SELECT e.title FROM events e WHERE e.calendar_id = p.calendar_id AND e.remote_href = p.href \
                 ORDER BY e.series_id IS NOT NULL, e.id LIMIT 1) AS title \
              FROM pending_operations p JOIN calendars c ON c.id = p.calendar_id \
@@ -1447,11 +1658,8 @@ impl Store {
             .map(|r| ProblemOperation {
                 calendar_id: r.get("calendar_id"),
                 href: r.get("href"),
-                kind: if r.get::<String, _>("kind") == "delete" {
-                    OpKind::Delete
-                } else {
-                    OpKind::Put
-                },
+                kind: OpKind::parse(&r.get::<String, _>("kind")),
+                moving: r.get::<Option<String>, _>("move_from").is_some(),
                 conflict: r.get::<String, _>("state") == "conflict",
                 error: r.get("last_error"),
                 title: r.get("title"),

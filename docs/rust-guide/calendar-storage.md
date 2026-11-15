@@ -77,7 +77,7 @@ Everything the sync engine needs to remember:
 
 - remote accounts and calendars (server URL, sync token, colour);
 - for each event, its server **href** (address) and **etag** (version);
-- the **operation queue** (`PendingOp`): uploads and deletes waiting to be sent, with attempt counts for retry and backoff;
+- the **operation queue** (`PendingOp`): uploads, deletes and moves waiting to be sent, with attempt counts for retry and backoff. A moved event's operation carries a `PendingMove` (where the server has it, where it goes), and `complete_move` records the result;
 - **conflicts** and the server's copy of a conflicting version (`record_conflict_copy`);
 - `apply_remote_changes`: writes a batch of server changes in **one transaction**. It skips objects with local changes still queued, so your edit is never overwritten while waiting to upload.
 
@@ -99,12 +99,20 @@ The `Sent` state exists because a network failure can happen *after* the server 
 
 ### `moving.rs`: moving events to another calendar
 
-`Store::move_event(id, new_id, calendar_id)` moves an event, or a whole series with its exceptions, as a deletion plus a creation in **one transaction**:
+`Store::move_event(id, new_id, calendar_id)` moves an event, or a whole series with its exceptions, in **one transaction**, one of two ways.
+
+**Within an account whose server can move events** (`moves_on_server` decides; the sync engine registers CalDAV and Google with `set_moves_on_server`), `relocate`:
+1. changes the calendar of the rows and of their remote object, keeping the ids;
+2. queues a `move` operation whose `move_from` says where the server still has it (or updates an operation already queued, or drops it if the event went back there).
+
+**Otherwise**, `copy_to` makes it a deletion plus a creation:
 1. the rows are copied into the new calendar under `new_id` (exception ids are rebuilt from it with `occurrence_id`);
 2. the originals are deleted with the same helpers as `delete_event`, which queue the server deletion;
 3. in a synchronized calendar, `attach_new_object` queues the copy's upload.
 
-A new id is essential: if the old server copy came back (a conflict resolved by keeping the server's version), it would otherwise collide with the moved event.
+Here a new id is essential: if the old server copy came back (a conflict resolved by keeping the server's version), it would otherwise collide with the moved event.
+
+If the server refuses a move after all, the engine calls `copy_instead_of_move`, which puts the rows back where the server has them and runs `copy_to`.
 
 `Store::update_and_move` is what the editors call. It checks the new calendar first, saves the other edits, then moves.
 
@@ -112,6 +120,8 @@ A new id is essential: if the old server copy came back (a conflict resolved by 
 - **Struct update syntax with a closure:** `let copy = |event: &CalendarEvent, id, series| CalendarEvent { id, calendar_id: …, series, ..event.clone() };` builds each copy from the original, changing only what a move changes.
 - **`std::iter::once(&master).chain(&overrides)`** checks the master and every exception with one loop ([concepts §11](concepts.md#11-iterators)).
 - **`mut` parameters:** `mut draft: EventDraft` lets the function change its own copy of the argument (`draft.calendar_id = from`) without the caller seeing it ([§1](concepts.md#1-variables-ownership-and-borrowing)).
+- **Matching on a tuple with a guard:** `Some((kind, origin)) if origin.as_deref().unwrap_or(from) == to && kind == "move"` picks out "moved back before it was sent" before the general `Some((_, origin))` arm ([§4](concepts.md#4-match-and-pattern-matching)).
+- **`HashSet<ProviderKind>` behind an `RwLock`:** which providers move on the server is registered once and read on every move, so many readers can look at the same time.
 
 ### `import.rs`: importing events from a file
 
