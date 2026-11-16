@@ -310,3 +310,31 @@ async fn moves_a_series_with_its_exceptions_and_attendees() {
     let local = format!("{}local-1.ics", alice.href);
     assert_eq!(p.move_object(&local, &team.href, None).await, Ok(None));
 }
+
+#[tokio::test]
+async fn refusals_say_what_google_refused() {
+    let fake = FakeGoogle::start().await;
+    let p = provider(&fake, "token-1", FAR);
+    let cal = primary(&p).await;
+    let mut content = GoogleCodec
+        .read(&format!(
+            r#"{{"timeZone":"Europe/Berlin","events":[{}]}}"#,
+            standup()
+        ))
+        .unwrap()
+        .content;
+    content.master.as_mut().unwrap().reminders = vec![60 * 24 * 30];
+    let payload = GoogleCodec.write(None, "new", &content, &[]);
+    let refused = p
+        .put_object(
+            &format!("{}new.ics", cal.href),
+            &payload,
+            &Precondition::Create,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "unexpected response from the server: HTTP 400 invalid: Invalid value for: Reminders override minutes"
+    );
+}

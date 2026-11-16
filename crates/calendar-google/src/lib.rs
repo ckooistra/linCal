@@ -251,7 +251,16 @@ impl GoogleProvider {
                 409 | 412 => ProviderError::PreconditionFailed,
                 429 => ProviderError::RateLimited { retry_after },
                 s if s >= 500 => ProviderError::Server { status: s },
-                s => ProviderError::InvalidResponse(format!("HTTP {s} {reason}")),
+                // Google says what it refused ("Invalid value for: …"):
+                // pass that on, so the problem can be fixed.
+                s => {
+                    let message = json["error"]["message"].as_str().unwrap_or_default();
+                    let text = format!("HTTP {s} {reason}");
+                    ProviderError::InvalidResponse(match message {
+                        "" => text,
+                        m => format!("{text}: {}", m.chars().take(300).collect::<String>()),
+                    })
+                }
             });
         }
         Err(ProviderError::Unauthorized)

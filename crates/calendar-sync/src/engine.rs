@@ -338,6 +338,8 @@ impl SyncEngine {
         store.set_recurrence_check(ProviderKind::Microsoft, calendar_microsoft::pattern::check);
         // Outlook events have a single reminder.
         store.set_reminder_limit(ProviderKind::Microsoft, 1);
+        // Google takes at most five reminder overrides per event.
+        store.set_reminder_limit(ProviderKind::Google, 5);
         // CalDAV MOVE and Google events.move; Graph has no move for events.
         store.set_moves_on_server(ProviderKind::Caldav);
         store.set_moves_on_server(ProviderKind::Google);

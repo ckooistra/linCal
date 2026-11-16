@@ -167,6 +167,22 @@ impl Respond for Handler {
             }
             ("POST", ["calendars", cal, "events"]) => {
                 let body: Value = serde_json::from_slice(&req.body).unwrap();
+                // Google's limits on reminders: five, up to four weeks.
+                let overrides = body["reminders"]["overrides"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                if overrides.len() > 5
+                    || overrides
+                        .iter()
+                        .any(|o| o["minutes"].as_u64() > Some(40320))
+                {
+                    return json_response(
+                        400,
+                        json!({"error": {"code": 400, "message": "Invalid value for: Reminders override minutes",
+                               "errors": [{"reason": "invalid", "message": "Invalid value for: Reminders override minutes"}]}}),
+                    );
+                }
                 let id = body["id"].as_str().unwrap().to_owned();
                 if s.events.get(*cal).is_some_and(|m| m.contains_key(&id)) {
                     return error(409, "duplicate");
