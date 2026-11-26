@@ -262,7 +262,7 @@ async fn events_move_to_nextcloud_and_back() {
     let fake = FakeGoogle::start().await;
     fake.state.lock().unwrap().put(
         "alice@example.com",
-        json!({"id": "marci0123", "iCalUID": "marci0123@google.com", "summary": "Marci",
+        json!({"id": "abcdefghijklmnopqrstuv0120", "iCalUID": "abcdefghijklmnopqrstuv0120@google.com", "summary": "Marci",
                "start": {"dateTime": "2026-06-12T21:00:00-04:00", "timeZone": "America/Toronto"},
                "end": {"dateTime": "2026-06-12T22:00:00-04:00", "timeZone": "America/Toronto"}}),
     );
@@ -288,7 +288,7 @@ async fn events_move_to_nextcloud_and_back() {
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(dav.0.lock().unwrap().len(), 1);
     assert_eq!(
-        fake.state.lock().unwrap().events["alice@example.com"]["marci0123"].1["status"],
+        fake.state.lock().unwrap().events["alice@example.com"]["abcdefghijklmnopqrstuv0120"].1["status"],
         "cancelled"
     );
 

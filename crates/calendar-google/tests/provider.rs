@@ -124,7 +124,14 @@ async fn creates_patches_and_deletes_conditionally() {
         )
         .await
         .unwrap();
-    assert!(created.href.contains("/events/uc"), "{}", created.href);
+    assert!(
+        created.href.ends_with(&format!(
+            "/events/{}",
+            calendar_google::event_id_for("local-1")
+        )),
+        "{}",
+        created.href
+    );
     // A retried create does not duplicate.
     assert_eq!(
         p.put_object(
@@ -336,11 +343,8 @@ async fn refusals_say_what_google_refused() {
     assert_eq!(
         refused.to_string(),
         format!(
-            "unexpected response from the server: HTTP 400 invalid: Invalid value for: Reminders override minutes (POST events, id uc{})",
-            "new"
-                .bytes()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            "unexpected response from the server: HTTP 400 invalid: Invalid value for: Reminders override minutes (POST events, id {})",
+            calendar_google::event_id_for("new")
         )
     );
 }

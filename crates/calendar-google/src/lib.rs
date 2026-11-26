@@ -83,11 +83,35 @@ fn invalid(what: &str) -> ProviderError {
     ProviderError::InvalidResponse(what.to_owned())
 }
 
-/// Google event ids are base32hex (`a-v`, `0-9`), 5–1024 characters.
-fn event_id_for(name: &str) -> String {
-    let hex: String = name.bytes().map(|b| format!("{b:02x}")).collect();
-    let id = format!("uc{hex}");
-    id.chars().take(1024).collect()
+/// The id a new event gets on Google, from the name of its local object.
+///
+/// Google event ids are base32hex (`0-9`, `a-v`), 5–1024 characters, and
+/// Google also requires them to *decode* as base32hex: a length no encoding
+/// produces (e.g. 86 characters) is refused with "Invalid resource id
+/// value". So the name, prefixed with `uc:` to keep these ids apart, is
+/// encoded properly (RFC 4648 §7, lowercase, unpadded). Names too long for
+/// 1024 characters are cut to 635 bytes, which encode to 1016.
+pub fn event_id_for(name: &str) -> String {
+    const ALPHABET: &[u8; 32] = b"0123456789abcdefghijklmnopqrstuv";
+    let bytes: Vec<u8> = b"uc:"
+        .iter()
+        .chain(name.as_bytes())
+        .copied()
+        .take(635)
+        .collect();
+    let mut id = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    for chunk in bytes.chunks(5) {
+        let mut block = [0u8; 5];
+        block[..chunk.len()].copy_from_slice(chunk);
+        let bits = block.iter().fold(0u64, |acc, b| acc << 8 | u64::from(*b));
+        // 8 bits per byte, 5 per character, rounded up.
+        let chars = (chunk.len() * 8).div_ceil(5);
+        for i in 0..chars {
+            let index = (bits >> (35 - 5 * i)) & 0x1f;
+            id.push(char::from(ALPHABET[usize::try_from(index).unwrap_or(0)]));
+        }
+    }
+    id
 }
 
 /// `url` with query parameters added (kept out of async code: the
@@ -818,6 +842,18 @@ mod tests {
 
     #[test]
     fn ids_are_base32hex() {
+        // RFC 4648 test vectors, behind the "uc:" prefix.
+        assert_eq!(event_id_for(""), "elhjk");
+        assert_eq!(event_id_for("f"), "elhjkpg");
+        assert_eq!(event_id_for("foobar"), "elhjkpjfdth62sg");
+        // A typical new event: a length base32hex can have (not 86).
+        let id = event_id_for("local-17b2cabd-0134-42a0-86c3-59f217bf86d0");
+        assert_eq!(
+            id,
+            "elhjkr3fcdgmob9h6th34or1c9i2qc1h6cq2qd1ic4o2qe1mccpiqd9pcop32dr2cos3cp1g"
+        );
+        assert!(matches!(id.len() % 8, 0 | 2 | 4 | 5 | 7));
+        assert!(event_id_for(&"x".repeat(2000)).len() <= 1024);
         let id = event_id_for("local-3f2a");
         assert!(id.len() >= 5);
         assert!(id.chars().all(|c| matches!(c, '0'..='9' | 'a'..='v')));

@@ -115,15 +115,25 @@ impl Respond for Handler {
             .map(decode)
             .collect();
         let path: Vec<&str> = path.iter().map(String::as_str).collect();
-        // Event ids are base32hex (instance ids add `_<time>`); Google
-        // refuses others. (It also wants 5–1024 characters, which the
-        // tests' short sample ids don't have.)
+        // Event ids are base32hex that decodes: no length an encoding
+        // can't have, no stray bits in the last character (instance ids
+        // add `_<time>`). Google refuses others. (It also wants 5–1024
+        // characters; the tests' short sample ids are let through.)
         let valid_id = |id: &str| {
             let master = id.split_once('_').map_or(id, |(m, _)| m);
-            !master.is_empty()
-                && master
-                    .bytes()
-                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'v'))
+            let digits: Option<Vec<u8>> = master
+                .bytes()
+                .map(|b| match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'v' => Some(b - b'a' + 10),
+                    _ => None,
+                })
+                .collect();
+            let Some(digits) = digits else { return false };
+            let spare = (digits.len() * 5) % 8;
+            let decodes = matches!(digits.len() % 8, 0 | 2 | 4 | 5 | 7)
+                && digits.last().is_some_and(|d| d & ((1 << spare) - 1) == 0);
+            !digits.is_empty() && (digits.len() < 5 || decodes)
         };
         let event_id = match path.as_slice() {
             ["calendars", _, "events", id, ..] => Some((*id).to_owned()),
