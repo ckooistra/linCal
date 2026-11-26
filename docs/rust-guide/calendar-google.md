@@ -29,7 +29,7 @@ To keep "one object = one series" (the contract), the provider bundles a master 
 - `impl CalendarProvider for GoogleProvider`: paging through results, sync tokens, and conditional writes with `If-Match`.
 - `move_object` calls `events.move`. The API takes no version for it, so the series' version is compared first, as for deletions. Google refuses to move another organizer's events (invitations), and those get `Ok(None)`: the engine copies them instead.
 - `account_email` fetches the address, shown as the account name.
-- `event_id_for` picks a new event's id from its local name. Google accepts only base32hex that *decodes* (a length an encoding can have, no stray bits at the end), which its documentation doesn't spell out. Hex digits behind a prefix are allowed characters but can have an impossible length, such as 86, and Google refuses those with "Invalid resource id value". So the id is a proper base32hex encoding of `uc:` plus the name.
+- `event_id_for` picks a new event's id from its local name: a base32hex encoding (`0-9`, `a-v`) of `uc:` plus the name, as Google's ids are. The create request sends that `id` and **no `iCalUID`**: Google refuses both at creation with "Invalid resource id value", and assigns the iCalUID itself (`<id>@google.com`). The fixed id is what makes a retried create safe: the retry gets 409.
 
 ```rust
 let mut token = self.tokens.access_token().await.map_err(oauth_error)?;

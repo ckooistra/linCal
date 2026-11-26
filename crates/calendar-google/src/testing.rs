@@ -243,6 +243,16 @@ impl Respond for Handler {
                     );
                 }
                 let id = body["id"].as_str().unwrap().to_owned();
+                // An id or an iCalUID at creation, not both.
+                if body.get("iCalUID").is_some() {
+                    return json_response(
+                        400,
+                        json!({"error": {"code": 400, "message": "Invalid resource id value.",
+                               "errors": [{"reason": "invalid", "message": "Invalid resource id value."}]}}),
+                    );
+                }
+                let mut body = body;
+                body["iCalUID"] = json!(format!("{id}@google.com"));
                 if s.events.get(*cal).is_some_and(|m| m.contains_key(&id)) {
                     return error(409, "duplicate");
                 }

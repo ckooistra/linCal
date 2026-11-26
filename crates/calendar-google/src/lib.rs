@@ -83,14 +83,10 @@ fn invalid(what: &str) -> ProviderError {
     ProviderError::InvalidResponse(what.to_owned())
 }
 
-/// The id a new event gets on Google, from the name of its local object.
-///
-/// Google event ids are base32hex (`0-9`, `a-v`), 5–1024 characters, and
-/// Google also requires them to *decode* as base32hex: a length no encoding
-/// produces (e.g. 86 characters) is refused with "Invalid resource id
-/// value". So the name, prefixed with `uc:` to keep these ids apart, is
-/// encoded properly (RFC 4648 §7, lowercase, unpadded). Names too long for
-/// 1024 characters are cut to 635 bytes, which encode to 1016.
+/// The id a new event gets on Google, from the name of its local object:
+/// base32hex (`0-9`, `a-v`, RFC 4648 §7, lowercase, unpadded) of `uc:`
+/// plus the name, 5–1024 characters as Google requires. Names too long
+/// for 1024 characters are cut to 635 bytes, which encode to 1016.
 pub fn event_id_for(name: &str) -> String {
     const ALPHABET: &[u8; 32] = b"0123456789abcdefghijklmnopqrstuv";
     let bytes: Vec<u8> = b"uc:"
@@ -674,7 +670,6 @@ impl CalendarProvider for GoogleProvider {
         let zone_name = zone.as_deref().unwrap_or("UTC");
         let payload = payload.replace(CALENDAR_ZONE, zone_name);
         let plan: Value = serde_json::from_str(&payload).map_err(|_| invalid("bad write plan"))?;
-        let uid = plan["uid"].as_str().unwrap_or(&master_id).to_owned();
         let conditional = !matches!(precondition, Precondition::Overwrite);
         for op in plan["ops"].as_array().into_iter().flatten() {
             let mut event_id = op["eventId"]
@@ -690,8 +685,10 @@ impl CalendarProvider for GoogleProvider {
             let mut body = op["body"].clone();
             match op["method"].as_str() {
                 Some("INSERT") => {
+                    // Our id makes a retried create safe. Google then
+                    // assigns the iCalUID: it refuses both at creation
+                    // ("Invalid resource id value").
                     body["id"] = json!(master_id);
-                    body["iCalUID"] = json!(uid);
                     let (status, _) = self
                         .send(
                             Method::POST,
