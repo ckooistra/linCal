@@ -24,7 +24,22 @@ describe("resolveShortcut", () => {
     const input = document.createElement("input");
     expect(resolveShortcut(key("k", { ctrlKey: true }, input))).toBe("palette");
     expect(resolveShortcut(key(",", { ctrlKey: true }, input))).toBe("settings");
-    expect(resolveShortcut(key("k"))).toBe("previous");
+    expect(resolveShortcut(key("k"))).toBe("next");
+    expect(resolveShortcut(key("j"))).toBe("previous");
+  });
+
+  it("maps ← and → to previous and next, except where arrows already move", () => {
+    expect(resolveShortcut(key("ArrowLeft"))).toBe("previous");
+    expect(resolveShortcut(key("ArrowRight"))).toBe("next");
+    expect(resolveShortcut(key("ArrowRight", { shiftKey: true }))).toBeNull();
+    expect(resolveShortcut(key("ArrowRight", { ctrlKey: true }))).toBeNull();
+    const field = document.createElement("input");
+    expect(resolveShortcut(key("ArrowLeft", {}, field))).toBeNull();
+    const list = document.createElement("div");
+    list.setAttribute("role", "listbox");
+    const option = document.createElement("div");
+    list.append(option);
+    expect(resolveShortcut(key("ArrowLeft", {}, option))).toBeNull();
   });
 
   it("maps Ctrl+F to search even inside inputs", () => {

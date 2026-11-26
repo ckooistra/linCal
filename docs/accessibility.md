@@ -6,7 +6,7 @@ The target is WCAG 2.2 level AA for everything the app draws itself. Keyboard us
 
 - **Everything is reachable with Tab,** including events in the month, week and day grids. Each event is a button: **Enter** or **Space** opens it in the editor, and closing the editor returns focus to the event.
 - **Agenda and search results:** ↑/↓ move between events, and Enter opens one. In the search box, Enter or ↓ jumps to the results and Esc closes the search.
-- **Shortcuts** (T, J/K, M/W/D/A, H, N, Ctrl+F) don't fire while typing in a field. **?** (or the **?** button in the toolbar) lists them all.
+- **Shortcuts** (T, J/K or ←/→, M/W/D/A, H, N, Ctrl+F) don't fire while typing in a field. ← and → also give way to widgets that move with the arrow keys themselves (lists, tabs, menus). **?** (or the **?** button in the toolbar) lists them all.
 - **Dialogs** trap focus, close with Esc, and return focus to where it was.
 - **Settings** is a dialog with tabs. Arrow keys, Home and End move between tabs. In the group editor, Esc first leaves the editor, then the dialog, and focus stays on the group just edited.
 - **The command palette** (Ctrl+K) is a combobox: typing filters, ↑/↓ choose (announced via `aria-activedescendant`), Enter runs, Esc closes.

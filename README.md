@@ -144,7 +144,7 @@ ucal sync
   | `T` | Today |
   | `N` | New event |
   | `M` / `W` / `D` / `A` | Month / week / day / agenda view |
-  | `J` / `K` | Next / previous |
+  | `J` / `K`, `←` / `→` | Previous / next (in the order of the toolbar arrows) |
   | `H` | Week/day: toggle working hours (08–18) / full day |
   | `Ctrl+F` | Search |
   | `Esc` | Close dialog |

@@ -22,6 +22,16 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   return el.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']") !== null;
 }
 
+/** True inside a widget that moves with the arrow keys itself (lists, tabs, menus, sliders). */
+function usesArrowKeys(target: EventTarget | null): boolean {
+  if (!target || typeof (target as Element).closest !== "function") return false;
+  return (
+    (target as Element).closest(
+      "[role='listbox'], [role='tablist'], [role='tab'], [role='grid'], [role='radiogroup'], [role='radio'], [role='slider'], [role='menu'], [role='menubar'], [role='tree'], [aria-activedescendant]",
+    ) !== null
+  );
+}
+
 type KeyInput = Pick<
   KeyboardEvent,
   "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "target" | "isComposing"
@@ -41,6 +51,10 @@ export function resolveShortcut(e: KeyInput): ShortcutAction | null {
   if (primary && !e.altKey && !e.shiftKey && key === ",") return "settings";
   if (primary && e.shiftKey && !e.altKey && key === "p") return "toggle-perf";
   if (primary || e.altKey || isEditableTarget(e.target)) return null;
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    if (e.shiftKey || usesArrowKeys(e.target)) return null;
+    return e.key === "ArrowLeft" ? "previous" : "next";
+  }
   switch (key) {
     case "t":
       return "today";
@@ -54,10 +68,11 @@ export function resolveShortcut(e: KeyInput): ShortcutAction | null {
       return "view-day";
     case "a":
       return "view-agenda";
+    // J is left of K, as Previous is left of Next in the toolbar.
     case "j":
-      return "next";
-    case "k":
       return "previous";
+    case "k":
+      return "next";
     case "h":
       return "toggle-hours";
     case "?":
@@ -70,8 +85,8 @@ export function resolveShortcut(e: KeyInput): ShortcutAction | null {
 /** The keyboard shortcuts, as shown in the help dialog (`?`). */
 export const SHORTCUT_HELP: readonly { keys: string[]; action: string; either?: boolean }[] = [
   { keys: ["T"], action: "Go to today" },
-  { keys: ["J"], action: "Next day, week or month" },
-  { keys: ["K"], action: "Previous day, week or month" },
+  { keys: ["J", "←"], either: true, action: "Previous day, week or month" },
+  { keys: ["K", "→"], either: true, action: "Next day, week or month" },
   { keys: ["M"], action: "Month view" },
   { keys: ["W"], action: "Week view" },
   { keys: ["D"], action: "Day view" },

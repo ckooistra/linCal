@@ -47,8 +47,8 @@
 <header class="toolbar">
   <div class="group">
     <button type="button" onclick={() => onnavigate("today")} title="Today (T)">Today</button>
-    <button type="button" class="icon" onclick={() => onnavigate("previous")} aria-label="Previous" title="Previous (K)">‹</button>
-    <button type="button" class="icon" onclick={() => onnavigate("next")} aria-label="Next" title="Next (J)">›</button>
+    <button type="button" class="icon" onclick={() => onnavigate("previous")} aria-label="Previous" title="Previous (J or ←)">‹</button>
+    <button type="button" class="icon" onclick={() => onnavigate("next")} aria-label="Next" title="Next (K or →)">›</button>
     <h1 aria-live="polite">{label}</h1>
     {#if loading}<span class="loading" role="status">Loading…</span>{/if}
   </div>
