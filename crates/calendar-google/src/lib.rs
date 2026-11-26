@@ -133,6 +133,21 @@ fn calendar_id_of(href: &str) -> Option<String> {
         .map(|(_, id)| id.into_owned())
 }
 
+/// Which request a refusal answered, for the error message: the method,
+/// what follows the calendar in the URL, and the id of an event sent in
+/// the body. No calendar ids (they are e-mail addresses) or tokens.
+fn request_label(method: &Method, url: &str, body: Option<&Value>) -> String {
+    let path = url.split('?').next().unwrap_or_default();
+    let what = path.split_once("/events").map_or_else(
+        || path.rsplit('/').next().unwrap_or_default().to_owned(),
+        |(_, rest)| format!("events{rest}"),
+    );
+    match body.and_then(|b| b["id"].as_str()) {
+        Some(id) if *method == Method::POST => format!("{method} {what}, id {id}"),
+        _ => format!("{method} {what}"),
+    }
+}
+
 /// A floating time (`YYYYMMDDTHHMMSS`) in the calendar's zone, in UTC as
 /// Google's instance ids have it.
 fn floating_instant(local: Option<&str>, zone: &str) -> ProviderResult<String> {
@@ -268,10 +283,14 @@ impl GoogleProvider {
                 s => {
                     let message = json["error"]["message"].as_str().unwrap_or_default();
                     let text = format!("HTTP {s} {reason}");
-                    ProviderError::InvalidResponse(match message {
+                    let text = match message {
                         "" => text,
                         m => format!("{text}: {}", m.chars().take(300).collect::<String>()),
-                    })
+                    };
+                    ProviderError::InvalidResponse(format!(
+                        "{text} ({})",
+                        request_label(&method, url, body)
+                    ))
                 }
             });
         }

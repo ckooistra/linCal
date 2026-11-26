@@ -335,7 +335,13 @@ async fn refusals_say_what_google_refused() {
         .unwrap_err();
     assert_eq!(
         refused.to_string(),
-        "unexpected response from the server: HTTP 400 invalid: Invalid value for: Reminders override minutes"
+        format!(
+            "unexpected response from the server: HTTP 400 invalid: Invalid value for: Reminders override minutes (POST events, id uc{})",
+            "new"
+                .bytes()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        )
     );
 }
 

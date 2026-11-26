@@ -7,9 +7,12 @@ use calendar_core::timing::resolve_local;
 use calendar_core::{EventDraft, EventTiming, ProviderKind, TimeRange};
 use calendar_google::testing::FakeGoogle;
 use calendar_google::{GoogleProvider, oauth_client};
-use calendar_provider_api::CalendarProvider;
-use calendar_storage::Store;
-use calendar_sync::{BrowserOpener, MemoryCredentials, SyncEngine};
+use calendar_provider_api::{
+    CalendarProvider, Capabilities, ChangeSet, Precondition, ProviderResult, RemoteCalendar,
+    RemoteObject, WriteResult,
+};
+use calendar_storage::{RemoteCalendarSpec, Store};
+use calendar_sync::{BrowserOpener, CredentialStore, MemoryCredentials, SyncEngine};
 use chrono::NaiveDate;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -68,15 +71,109 @@ async fn titles(store: &Store) -> Vec<String> {
     v
 }
 
+/// A CalDAV calendar in memory: href → (etag, iCalendar).
+#[derive(Default)]
+struct Dav(std::sync::Mutex<std::collections::HashMap<String, (String, String)>>);
+
+const DAV_CAL: &str = "https://dav.example/cal/alice/personal/";
+
+#[async_trait::async_trait]
+impl CalendarProvider for Dav {
+    fn codec(&self) -> Arc<dyn calendar_provider_api::ObjectCodec> {
+        Arc::new(calendar_caldav::ICalendarCodec)
+    }
+    async fn list_calendars(&self) -> ProviderResult<Vec<RemoteCalendar>> {
+        Ok(vec![RemoteCalendar {
+            href: DAV_CAL.into(),
+            name: "Personal".into(),
+            color: None,
+            read_only: false,
+            ctag: None,
+            capabilities: Capabilities {
+                incremental_sync: false,
+                conditional_writes: true,
+            },
+        }])
+    }
+    async fn fetch_changes(
+        &self,
+        _: &RemoteCalendar,
+        _: Option<&str>,
+        known: &[(String, Option<String>)],
+    ) -> ProviderResult<ChangeSet> {
+        let objects = self.0.lock().unwrap();
+        Ok(ChangeSet {
+            upserted: objects
+                .iter()
+                .filter(|(h, (e, _))| !known.iter().any(|(k, v)| k == *h && v.as_ref() == Some(e)))
+                .map(|(h, (e, d))| RemoteObject {
+                    href: h.clone(),
+                    etag: Some(e.clone()),
+                    data: d.clone(),
+                })
+                .collect(),
+            deleted: known
+                .iter()
+                .filter(|(k, _)| !objects.contains_key(k))
+                .map(|(k, _)| k.clone())
+                .collect(),
+            cursor: None,
+        })
+    }
+    async fn put_object(
+        &self,
+        href: &str,
+        data: &str,
+        _: &Precondition,
+    ) -> ProviderResult<WriteResult> {
+        let etag = format!("\"{}\"", data.len());
+        self.0
+            .lock()
+            .unwrap()
+            .insert(href.into(), (etag.clone(), data.into()));
+        Ok(WriteResult {
+            href: href.into(),
+            etag: Some(etag),
+            data: None,
+        })
+    }
+    async fn get_object(&self, href: &str) -> ProviderResult<Option<RemoteObject>> {
+        Ok(self.0.lock().unwrap().get(href).map(|(e, d)| RemoteObject {
+            href: href.into(),
+            etag: Some(e.clone()),
+            data: d.clone(),
+        }))
+    }
+    async fn delete_object(&self, href: &str, _: Option<&str>) -> ProviderResult<()> {
+        self.0.lock().unwrap().remove(href);
+        Ok(())
+    }
+}
+
 /// A store and engine with the fake's Google account signed in.
 async fn signed_in(fake: &FakeGoogle) -> (Store, SyncEngine, String) {
+    let (store, engine, id, _) = signed_in_with_dav(fake).await;
+    (store, engine, id)
+}
+
+/// The same, with a CalDAV account "dav" beside it.
+async fn signed_in_with_dav(fake: &FakeGoogle) -> (Store, SyncEngine, String, Arc<Dav>) {
     let store = Store::open_in_memory().await.unwrap();
     let api = fake.api();
     let factory_api = api.clone();
+    let dav = Arc::new(Dav::default());
+    let factory_dav = Arc::clone(&dav);
+    let credentials = Arc::new(MemoryCredentials::default());
+    credentials.set("dav", "secret").unwrap();
     let engine = SyncEngine::new(
         store.clone(),
-        Arc::new(MemoryCredentials::default()),
+        credentials,
         Arc::new(move |account, secret| {
+            if account.account.provider == ProviderKind::Caldav {
+                return Ok(
+                    Box::new(DavHandle(Arc::clone(&factory_dav))) as Box<dyn CalendarProvider>
+                );
+            }
             let config: calendar_sync::OAuthConfig =
                 serde_json::from_value(account.config.clone()).unwrap();
             Ok(Box::new(GoogleProvider::connect(
@@ -103,7 +200,124 @@ async fn signed_in(fake: &FakeGoogle) -> (Store, SyncEngine, String) {
         )
         .await
         .unwrap();
-    (store, engine, id)
+    store
+        .create_remote_account(
+            &calendar_core::Account {
+                id: "dav".into(),
+                name: "Nextcloud".into(),
+                provider: ProviderKind::Caldav,
+            },
+            &json!({}),
+            &[RemoteCalendarSpec {
+                remote_url: DAV_CAL.into(),
+                name: "Personal".into(),
+                color: None,
+                read_only: false,
+                supports_sync: false,
+                ctag: None,
+            }],
+        )
+        .await
+        .unwrap();
+    (store, engine, id, dav)
+}
+
+/// The provider the engine gets for the CalDAV account (shares the data).
+struct DavHandle(Arc<Dav>);
+
+#[async_trait::async_trait]
+impl CalendarProvider for DavHandle {
+    fn codec(&self) -> Arc<dyn calendar_provider_api::ObjectCodec> {
+        self.0.codec()
+    }
+    async fn list_calendars(&self) -> ProviderResult<Vec<RemoteCalendar>> {
+        self.0.list_calendars().await
+    }
+    async fn fetch_changes(
+        &self,
+        c: &RemoteCalendar,
+        cursor: Option<&str>,
+        known: &[(String, Option<String>)],
+    ) -> ProviderResult<ChangeSet> {
+        self.0.fetch_changes(c, cursor, known).await
+    }
+    async fn put_object(
+        &self,
+        href: &str,
+        data: &str,
+        p: &Precondition,
+    ) -> ProviderResult<WriteResult> {
+        self.0.put_object(href, data, p).await
+    }
+    async fn get_object(&self, href: &str) -> ProviderResult<Option<RemoteObject>> {
+        self.0.get_object(href).await
+    }
+    async fn delete_object(&self, href: &str, v: Option<&str>) -> ProviderResult<()> {
+        self.0.delete_object(href, v).await
+    }
+}
+
+#[tokio::test]
+async fn events_move_to_nextcloud_and_back() {
+    let fake = FakeGoogle::start().await;
+    fake.state.lock().unwrap().put(
+        "alice@example.com",
+        json!({"id": "marci0123", "iCalUID": "marci0123@google.com", "summary": "Marci",
+               "start": {"dateTime": "2026-06-12T21:00:00-04:00", "timeZone": "America/Toronto"},
+               "end": {"dateTime": "2026-06-12T22:00:00-04:00", "timeZone": "America/Toronto"}}),
+    );
+    let (store, engine, google, dav) = signed_in_with_dav(&fake).await;
+    engine.sync_account(&google).await.unwrap();
+    engine.sync_account("dav").await.unwrap();
+    let google_cal = store.calendars_of(&google).await.unwrap()[0].id.clone();
+    let dav_cal = store.calendars_of("dav").await.unwrap()[0].id.clone();
+
+    // To Nextcloud: the copy arrives, then the original goes.
+    let shown = store.query_range(june(), TZ).await.unwrap();
+    let moved = store
+        .move_event(
+            &shown[0].id,
+            "local-17b2cabd-0134-42a0-86c3-59f217bf86d0",
+            &dav_cal,
+        )
+        .await
+        .unwrap();
+    engine.sync_account("dav").await.unwrap();
+    engine.sync_account(&google).await.unwrap();
+    let problems = engine.problems().await.unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(dav.0.lock().unwrap().len(), 1);
+    assert_eq!(
+        fake.state.lock().unwrap().events["alice@example.com"]["marci0123"].1["status"],
+        "cancelled"
+    );
+
+    // And back to Google.
+    store
+        .move_event(
+            &moved.id,
+            "local-5e1d0c3a-9f7b-4c2e-8a61-0b9e2d4f7a13",
+            &google_cal,
+        )
+        .await
+        .unwrap();
+    engine.sync_account(&google).await.unwrap();
+    engine.sync_account("dav").await.unwrap();
+    let problems = engine.problems().await.unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    assert!(dav.0.lock().unwrap().is_empty(), "gone from Nextcloud");
+    let shown = store.query_range(june(), TZ).await.unwrap();
+    assert_eq!(
+        shown
+            .iter()
+            .map(|o| (o.title.as_str(), o.calendar_id.as_str(), o.sync_status))
+            .collect::<Vec<_>>(),
+        [(
+            "Marci",
+            google_cal.as_str(),
+            calendar_core::SyncStatus::Synced
+        )]
+    );
 }
 
 #[tokio::test]

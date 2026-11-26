@@ -115,6 +115,32 @@ impl Respond for Handler {
             .map(decode)
             .collect();
         let path: Vec<&str> = path.iter().map(String::as_str).collect();
+        // Event ids are base32hex (instance ids add `_<time>`); Google
+        // refuses others. (It also wants 5–1024 characters, which the
+        // tests' short sample ids don't have.)
+        let valid_id = |id: &str| {
+            let master = id.split_once('_').map_or(id, |(m, _)| m);
+            !master.is_empty()
+                && master
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'v'))
+        };
+        let event_id = match path.as_slice() {
+            ["calendars", _, "events", id, ..] => Some((*id).to_owned()),
+            _ if req.method.as_str() == "POST" => serde_json::from_slice::<Value>(&req.body)
+                .ok()
+                .and_then(|b| b["id"].as_str().map(str::to_owned)),
+            _ => None,
+        };
+        if let Some(id) = event_id
+            && !valid_id(&id)
+        {
+            return json_response(
+                400,
+                json!({"error": {"code": 400, "message": "Invalid resource id value.",
+                       "errors": [{"reason": "invalid", "message": "Invalid resource id value."}]}}),
+            );
+        }
         match (req.method.as_str(), path.as_slice()) {
             ("GET", ["users", "me", "calendarList"]) => {
                 let mut items = json!([
