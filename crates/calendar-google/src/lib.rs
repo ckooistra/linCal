@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 pub use codec::GoogleCodec;
-use codec::{MASTER, is_cancelled, is_exception};
+use codec::{CALENDAR_ZONE, FLOATING_INSTANT, MASTER, is_cancelled, is_exception};
 
 pub const API_BASE: &str = "https://www.googleapis.com/calendar/v3/";
 pub const SCOPE: &str = "https://www.googleapis.com/auth/calendar";
@@ -131,6 +131,18 @@ fn calendar_id_of(href: &str) -> Option<String> {
     url::form_urlencoded::parse(query.as_bytes())
         .next()
         .map(|(_, id)| id.into_owned())
+}
+
+/// A floating time (`YYYYMMDDTHHMMSS`) in the calendar's zone, in UTC as
+/// Google's instance ids have it.
+fn floating_instant(local: Option<&str>, zone: &str) -> ProviderResult<String> {
+    let local = local
+        .and_then(|t| chrono::NaiveDateTime::parse_from_str(t, "%Y%m%dT%H%M%S").ok())
+        .ok_or_else(|| invalid("bad write plan"))?;
+    let tz: chrono_tz::Tz = zone.parse().unwrap_or(chrono_tz::UTC);
+    Ok(calendar_ical::values::format_utc(
+        calendar_core::timing::resolve_local(&tz, local),
+    ))
 }
 
 /// (calendar href, Google event id or `None` for a not-yet-created object).
@@ -367,6 +379,19 @@ impl GoogleProvider {
 
     /// The default reminders of a calendar (by href).
     async fn defaults_for(&self, calendar_href: &str) -> ProviderResult<Value> {
+        let entry = self.calendar_entry(calendar_href).await?;
+        Ok(entry.get("defaultReminders").cloned().unwrap_or(json!([])))
+    }
+
+    /// The time zone of a calendar (by href), if Google says.
+    async fn zone_for(&self, calendar_href: &str) -> ProviderResult<Option<String>> {
+        let entry = self.calendar_entry(calendar_href).await?;
+        Ok(entry["timeZone"].as_str().map(str::to_owned))
+    }
+
+    /// A calendar's entry in the user's calendar list (empty if it isn't
+    /// there), fetched once.
+    async fn calendar_entry(&self, calendar_href: &str) -> ProviderResult<Value> {
         let cached = self
             .defaults
             .lock()
@@ -389,16 +414,16 @@ impl GoogleProvider {
         let (status, body) = self
             .send(Method::GET, &url, None, None, &[StatusCode::NOT_FOUND])
             .await?;
-        let defaults = if status == StatusCode::NOT_FOUND {
-            json!([])
+        let entry = if status == StatusCode::NOT_FOUND {
+            json!({})
         } else {
-            body.get("defaultReminders").cloned().unwrap_or(json!([]))
+            body
         };
         self.defaults
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(calendar_href.to_owned(), defaults.clone());
-        Ok(defaults)
+            .insert(calendar_href.to_owned(), entry.clone());
+        Ok(entry)
     }
 
     /// The account's e-mail address (the id of the primary calendar).
@@ -456,10 +481,7 @@ impl CalendarProvider for GoogleProvider {
                     self.defaults
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(
-                            self.calendar_href(id),
-                            c.get("defaultReminders").cloned().unwrap_or(json!([])),
-                        );
+                        .insert(self.calendar_href(id), c.clone());
                     out.push(RemoteCalendar {
                         href: self.calendar_href(id),
                         name: c["summaryOverride"]
@@ -600,14 +622,28 @@ impl CalendarProvider for GoogleProvider {
         precondition: &Precondition,
     ) -> ProviderResult<WriteResult> {
         let (calendar, existing_id, master_id) = split_href(href)?;
-        let plan: Value = serde_json::from_str(payload).map_err(|_| invalid("bad write plan"))?;
+        // Floating times of a new object go in the calendar's zone.
+        let zone = if payload.contains(CALENDAR_ZONE) || payload.contains(FLOATING_INSTANT) {
+            self.zone_for(&calendar).await?
+        } else {
+            None
+        };
+        let zone_name = zone.as_deref().unwrap_or("UTC");
+        let payload = payload.replace(CALENDAR_ZONE, zone_name);
+        let plan: Value = serde_json::from_str(&payload).map_err(|_| invalid("bad write plan"))?;
         let uid = plan["uid"].as_str().unwrap_or(&master_id).to_owned();
         let conditional = !matches!(precondition, Precondition::Overwrite);
         for op in plan["ops"].as_array().into_iter().flatten() {
-            let event_id = op["eventId"]
+            let mut event_id = op["eventId"]
                 .as_str()
                 .unwrap_or(MASTER)
                 .replace(MASTER, &master_id);
+            if event_id.contains(FLOATING_INSTANT) {
+                event_id = event_id.replace(
+                    FLOATING_INSTANT,
+                    &floating_instant(op["floating"].as_str(), zone_name)?,
+                );
+            }
             let mut body = op["body"].clone();
             match op["method"].as_str() {
                 Some("INSERT") => {

@@ -23,8 +23,31 @@ pub struct State {
     pub team_calendar: bool,
 }
 
+/// Google answers times with their offset, also when they were written as
+/// a wall-clock time with a `timeZone`.
+fn with_offsets(event: &mut Value) {
+    for field in ["start", "end", "originalStartTime"] {
+        let Some(t) = event.get_mut(field) else {
+            continue;
+        };
+        let (Some(local), Some(zone)) = (
+            t["dateTime"]
+                .as_str()
+                .and_then(|d| chrono::NaiveDateTime::parse_from_str(d, "%Y-%m-%dT%H:%M:%S").ok()),
+            t["timeZone"]
+                .as_str()
+                .and_then(|z| z.parse::<chrono_tz::Tz>().ok()),
+        ) else {
+            continue;
+        };
+        let at = calendar_core::timing::resolve_local(&zone, local).with_timezone(&zone);
+        t["dateTime"] = json!(at.to_rfc3339());
+    }
+}
+
 impl State {
     pub fn put(&mut self, calendar: &str, mut event: Value) {
+        with_offsets(&mut event);
         self.seq += 1;
         let id = event["id"].as_str().unwrap().to_owned();
         event["etag"] = json!(format!("\"{}\"", self.seq));
@@ -95,7 +118,7 @@ impl Respond for Handler {
         match (req.method.as_str(), path.as_slice()) {
             ("GET", ["users", "me", "calendarList"]) => {
                 let mut items = json!([
-                    {"id": "alice@example.com", "summary": "Alice", "accessRole": "owner", "primary": true, "backgroundColor": "#9FC6E7", "etag": "\"c1\"",
+                    {"id": "alice@example.com", "summary": "Alice", "accessRole": "owner", "primary": true, "backgroundColor": "#9FC6E7", "etag": "\"c1\"", "timeZone": "Europe/Berlin",
                      "defaultReminders": [{"method": "popup", "minutes": 10}, {"method": "email", "minutes": 60}]},
                     {"id": "holidays@group", "summary": "Holidays", "accessRole": "reader"},
                     {"id": "busy@group", "summary": "Busy", "accessRole": "freeBusyReader"}
@@ -113,7 +136,7 @@ impl Respond for Handler {
                 }
                 "alice@example.com" => json_response(
                     200,
-                    json!({"id": cal, "defaultReminders": [{"method": "popup", "minutes": 10}]}),
+                    json!({"id": cal, "timeZone": "Europe/Berlin", "defaultReminders": [{"method": "popup", "minutes": 10}]}),
                 ),
                 _ => error(404, "notFound"),
             },

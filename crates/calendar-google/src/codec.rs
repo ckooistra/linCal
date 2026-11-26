@@ -24,6 +24,16 @@ use serde_json::{Map, Value, json};
 /// (new objects get their id from the href).
 pub const MASTER: &str = "{master}";
 
+/// Placeholder for the calendar's time zone, which a new object's plan
+/// doesn't know: floating times are written in it (Google has no floating
+/// times). Filled in by the provider.
+pub const CALENDAR_ZONE: &str = "{calendar-zone}";
+
+/// Placeholder in an instance id for the occurrence's time in UTC, when it
+/// depends on the calendar's zone (floating times): the op then has
+/// `"floating": <local time, YYYYMMDDTHHMMSS>`. Filled in by the provider.
+pub const FLOATING_INSTANT: &str = "{floating}";
+
 pub struct GoogleCodec;
 
 fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -193,13 +203,36 @@ fn original_key(e: &Value) -> Option<OccurrenceKey> {
         .map(|t| OccurrenceKey::Instant(t.with_timezone(&Utc)))
 }
 
-/// Google's id suffix for an occurrence: `<master>_<suffix>`.
-pub fn instance_suffix(key: &OccurrenceKey) -> String {
+/// Google's id suffix for an occurrence: `<master>_<suffix>`, with the
+/// start in UTC. A floating start is in the calendar's zone `calendar_tz`;
+/// without it the suffix is [`FLOATING_INSTANT`].
+pub fn instance_suffix(key: &OccurrenceKey, calendar_tz: Option<&str>) -> String {
     match key {
         OccurrenceKey::Instant(t) => format_utc(*t),
-        OccurrenceKey::Floating(t) => format_utc(t.and_utc()),
+        OccurrenceKey::Floating(t) => match calendar_tz.and_then(|z| z.parse::<Tz>().ok()) {
+            Some(tz) => format_utc(calendar_core::timing::resolve_local(&tz, *t)),
+            None => FLOATING_INSTANT.to_owned(),
+        },
         OccurrenceKey::Date(d) => format_date(*d),
     }
+}
+
+/// A PATCH of the occurrence `key` of the series (which creates the
+/// exception if there is none).
+fn instance_patch(
+    key: &OccurrenceKey,
+    calendar_tz: Option<&str>,
+    body: Map<String, Value>,
+) -> Value {
+    let mut op = json!({
+        "method": "PATCH",
+        "eventId": format!("{MASTER}_{}", instance_suffix(key, calendar_tz)),
+        "body": Value::Object(body),
+    });
+    if let OccurrenceKey::Floating(t) = key {
+        op["floating"] = json!(format_local(*t));
+    }
+    op
 }
 
 fn time_value(timing: &EventTiming, start: bool, calendar_tz: Option<&str>) -> Value {
@@ -219,7 +252,7 @@ fn time_value(timing: &EventTiming, start: bool, calendar_tz: Option<&str>) -> V
         // Google has no floating times: use the calendar's zone.
         EventTiming::Floating { start: s, end: e } => json!({
             "dateTime": (if start { s } else { e }).format("%Y-%m-%dT%H:%M:%S").to_string(),
-            "timeZone": calendar_tz.unwrap_or("UTC"),
+            "timeZone": calendar_tz.unwrap_or(CALENDAR_ZONE),
             "date": Value::Null,
         }),
         EventTiming::AllDay {
@@ -362,11 +395,7 @@ impl ObjectCodec for GoogleCodec {
                 }
                 for o in &content.overrides {
                     if let Some(key) = &o.recurrence_id {
-                        ops.push(json!({
-                            "method": "PATCH",
-                            "eventId": format!("{MASTER}_{}", instance_suffix(key)),
-                            "body": Value::Object(patch(o, None, false, None)),
-                        }));
+                        ops.push(instance_patch(key, None, patch(o, None, false, None)));
                     }
                 }
             }
@@ -399,27 +428,21 @@ impl ObjectCodec for GoogleCodec {
                         .overrides
                         .iter()
                         .find(|b| b.recurrence_id == Some(key));
-                    let (event_id, etag, body) = match (existing, base_key == key) {
-                        (Some(e), true) => (
-                            str_field(e, "id").map(str::to_owned),
-                            str_field(e, "etag"),
-                            patch(o, base_override, false, tz),
-                        ),
+                    match (existing, base_key == key) {
+                        (Some(e), true) => {
+                            let body = patch(o, base_override, false, tz);
+                            if !body.is_empty() {
+                                ops.push(json!({
+                                    "method": "PATCH",
+                                    "eventId": str_field(e, "id"),
+                                    "etag": str_field(e, "etag"),
+                                    "body": Value::Object(body),
+                                }));
+                            }
+                        }
                         // No exception yet (or the series moved): patching
                         // the instance id creates one.
-                        _ => (
-                            Some(format!("{MASTER}_{}", instance_suffix(&key))),
-                            None,
-                            patch(o, None, false, tz),
-                        ),
-                    };
-                    if !body.is_empty() {
-                        ops.push(json!({
-                            "method": "PATCH",
-                            "eventId": event_id,
-                            "etag": etag,
-                            "body": Value::Object(body),
-                        }));
+                        _ => ops.push(instance_patch(&key, tz, patch(o, None, false, tz))),
                     }
                 }
                 // Exceptions the series no longer generates (it was cut

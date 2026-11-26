@@ -108,7 +108,8 @@ The `Sent` state exists because a network failure can happen *after* the server 
 **Otherwise**, `copy_to` makes it a deletion plus a creation:
 1. the rows are copied into the new calendar under `new_id` (exception ids are rebuilt from it with `occurrence_id`);
 2. the originals are deleted with the same helpers as `delete_event`, which queue the server deletion;
-3. in a synchronized calendar, `attach_new_object` queues the copy's upload.
+3. in a synchronized calendar, `attach_new_object` queues the copy's upload;
+4. `delete_after_copy` makes the server deletion wait for that upload (`after_calendar`, `after_href`). `due_operations` leaves out operations whose upload they wait for is still queued (the `not_waiting!` SQL fragment). `complete_put` lets them go (`copy_uploaded`). Giving the copy up (`resolve_operation` with `UseServer`, or `remove_account`) drops them and lists the original's calendar afresh (`keep_originals`), so a refused copy never costs the original.
 
 Here a new id is essential: if the old server copy came back (a conflict resolved by keeping the server's version), it would otherwise collide with the moved event.
 

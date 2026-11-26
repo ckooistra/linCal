@@ -887,13 +887,26 @@ impl SyncEngine {
         // 1. Upload first, so server changes never silently replace queued edits.
         //    A move can leave more to send (an edit made with it, or the
         //    copy that replaces a move the server refused): sent right after.
-        let mut queue: std::collections::VecDeque<PendingOp> = self
-            .store
-            .due_operations(account_id, now_ms())
-            .await?
-            .into();
-        while let Some(op) = queue.pop_front() {
-            queue.extend(self.push(provider, &op, &mut report).await?);
+        //    An upload can also let a deletion go that waited for it (the
+        //    original of a copy): those are due once the queue is empty.
+        let mut sent = std::collections::HashSet::new();
+        loop {
+            let mut queue: std::collections::VecDeque<PendingOp> = self
+                .store
+                .due_operations(account_id, now_ms())
+                .await?
+                .into_iter()
+                .filter(|op| {
+                    !sent.contains(&(op.calendar_id.clone(), op.href.clone(), op.generation))
+                })
+                .collect();
+            if queue.is_empty() {
+                break;
+            }
+            while let Some(op) = queue.pop_front() {
+                sent.insert((op.calendar_id.clone(), op.href.clone(), op.generation));
+                queue.extend(self.push(provider, &op, &mut report).await?);
+            }
         }
 
         // 2. Calendar list (new, renamed, removed, permissions).

@@ -40,7 +40,7 @@ for attempt in 0..2 {
 
 **Rust concepts:**
 - **`Arc<TokenSource>`:** the token source is shared with whoever created the provider ([concepts §13](concepts.md#13-smart-pointers-and-sharing-box-arc-mutex)).
-- **`std::sync::Mutex<HashMap<…>>`** caches each calendar's default reminders.
+- **`std::sync::Mutex<HashMap<…>>`** caches each calendar's calendar-list entry: its default reminders and its time zone.
 - **`serde_json::Value`:** working with JSON whose exact shape we don't want to fix in a struct, because Google adds fields all the time.
 - **Named constructors:** `new` takes a token source (used by tests); `connect` builds everything from the stored secret (used by the app).
 
@@ -49,6 +49,10 @@ for attempt in 0..2 {
 **Reading:** rather than reimplementing recurrence for Google, the codec **converts Google's JSON into iCalendar text** and hands it to `calendar-ical`. Google already writes repeat rules as iCalendar lines (`RRULE:…`), so this is a natural fit, and all the recurrence logic stays in one place.
 
 **Writing:** produces a *plan*, a list of small patches, one per series member, each containing **only the fields this app changed**, and each conditional on that member's ETag. Attendees, Meet links and anything else stay untouched on the server.
+
+**Floating times** (a wall-clock time without a zone, common in events from CalDAV servers) don't exist on Google, so they're written in the calendar's time zone. A new object's plan doesn't know that zone yet, so it leaves placeholders, which `put_object` fills in from the calendar's calendar-list entry:
+- `CALENDAR_ZONE` stands for the zone of floating `start`/`end` times.
+- `FLOATING_INSTANT` stands for the UTC part of an exception's instance id (`<master>_<YYYYMMDDTHHMMSSZ>`). The op carries the local time as `"floating"`.
 
 ```rust
 fn popup_minutes(list: Option<&Value>) -> Vec<u32> {

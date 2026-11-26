@@ -15,16 +15,19 @@
 //! calendar under a new id, and the originals are deleted the usual way.
 //! In one transaction:
 //!
+//! * the copy, in a synchronized calendar, is queued for upload as a new
+//!   object;
 //! * the old server copy, if there is one, is queued for deletion (with
 //!   its version, so a change made there meanwhile becomes a conflict
-//!   instead of being deleted);
-//! * the copy, in a synchronized calendar, is queued for upload as a new
-//!   object.
+//!   instead of being deleted). The deletion waits until the copy has
+//!   been uploaded: while the new server refuses the copy, the original
+//!   stays on its server. If the user gives the copy up ("Discard my
+//!   change", or removes its account), the deletion is dropped and the
+//!   original comes back with the next sync.
 //!
 //! The local rows are the source of truth throughout, so a failed upload
 //! or deletion is retried and nothing is lost. The new id keeps the copy
-//! apart from the old server copy, should that come back (a conflict
-//! resolved by keeping the server's version).
+//! apart from the old server copy, should that come back.
 //!
 //! What the app doesn't model (attendees, conferencing) is not copied, as
 //! with "this and following" splits: the server sees a new event.
@@ -379,8 +382,8 @@ impl Store {
         // The originals go the usual way: this queues the server deletion,
         // or forgets an object that was never sent.
         Self::delete_row(tx, &master.id).await?; // overrides cascade
-        if let Some(href) = href {
-            Self::object_changed_or_removed(tx, &master.calendar_id, &href).await?;
+        if let Some(href) = &href {
+            Self::object_changed_or_removed(tx, &master.calendar_id, href).await?;
         }
 
         let at = now();
@@ -404,9 +407,23 @@ impl Store {
             let id = occurrence_id(new_id, &link.recurrence_id);
             Self::insert(tx, &copy(event, id, Some(series))).await?;
         }
-        if let Some(url) = Self::calendar_remote(tx, calendar_id).await? {
-            Self::attach_new_object(tx, calendar_id, &url, new_id).await?;
-            moved.sync_status = SyncStatus::PendingSync;
+        let copied = match Self::calendar_remote(tx, calendar_id).await? {
+            Some(url) => {
+                Self::attach_new_object(tx, calendar_id, &url, new_id).await?;
+                moved.sync_status = SyncStatus::PendingSync;
+                Self::event_href(tx, new_id).await?
+            }
+            None => None,
+        };
+        // The original is deleted on its server only once the copy is on
+        // the new one, so a copy the server refuses loses nothing.
+        if let Some(href) = &href {
+            Self::delete_after_copy(
+                tx,
+                (&master.calendar_id, href),
+                copied.as_deref().map(|h| (calendar_id, h)),
+            )
+            .await?;
         }
         Ok(moved)
     }

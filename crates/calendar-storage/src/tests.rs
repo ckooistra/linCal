@@ -2584,9 +2584,108 @@ mod sync {
             .await
             .unwrap();
         assert_eq!(moved.id, "copy");
-        let mut kinds: Vec<_> = queued(&store).await.into_iter().map(|o| o.kind).collect();
-        kinds.sort_by_key(|k| *k == OpKind::Put);
-        assert_eq!(kinds, [OpKind::Delete, OpKind::Put]);
+        // The copy is sent first; the original is deleted once it arrived.
+        let ops = queued(&store).await;
+        assert_eq!(
+            ops.iter()
+                .map(|o| (o.kind, o.calendar_id.as_str()))
+                .collect::<Vec<_>>(),
+            [(OpKind::Put, home.as_str())]
+        );
+        assert_eq!(store.next_retry_ms("acct-dav").await.unwrap(), Some(0));
+        store
+            .fail_operation(&ops[0], "refused", OpFailure::Permanent)
+            .await
+            .unwrap();
+        assert!(queued(&store).await.is_empty(), "the original stays");
+        assert_eq!(store.next_retry_ms("acct-dav").await.unwrap(), None);
+        store
+            .resolve_operation(&home, &ops[0].href, Resolution::Retry)
+            .await
+            .unwrap();
+        let put = queued(&store).await.remove(0);
+        store
+            .complete_put(&put, Some("\"c1\""), "ICS copy")
+            .await
+            .unwrap();
+        let ops = queued(&store).await;
+        assert_eq!(
+            ops.iter()
+                .map(|o| (o.kind, o.calendar_id.as_str(), o.href.as_str()))
+                .collect::<Vec<_>>(),
+            [(OpKind::Delete, work.as_str(), a_ics().as_str())]
+        );
+    }
+
+    #[tokio::test]
+    async fn giving_up_a_copy_keeps_the_original() {
+        let (store, [work, home, _]) = moving_store(false).await;
+        store
+            .move_event(&format!("{work}/a"), "copy", &home)
+            .await
+            .unwrap();
+        let put = queued(&store).await.remove(0);
+        store
+            .fail_operation(&put, "refused", OpFailure::Permanent)
+            .await
+            .unwrap();
+        store
+            .resolve_operation(&home, &put.href, Resolution::UseServer)
+            .await
+            .unwrap();
+        assert!(queued(&store).await.is_empty(), "no deletion is sent");
+        assert!(
+            store
+                .problem_operations("acct-dav")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Work is listed afresh, and the original comes back there.
+        let work_state = store
+            .remote_calendars("acct-dav")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.calendar_id == work)
+            .unwrap();
+        assert_eq!(work_state.sync_token, None);
+        store
+            .apply_remote_changes(
+                &work,
+                &[incoming("a.ics", "\"1\"", content("a", "Review", None))],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            shown_in(&store).await,
+            [("Review".into(), work.clone(), SyncStatus::Synced)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_moved_on_before_it_arrived_still_holds_the_deletion() {
+        let (store, [work, home, team]) = moving_store(false).await;
+        store
+            .move_event(&format!("{work}/a"), "copy", &home)
+            .await
+            .unwrap();
+        store.move_event("copy", "copy2", &team).await.unwrap();
+        let ops = queued(&store).await;
+        assert_eq!(
+            ops.iter()
+                .map(|o| (o.kind, o.calendar_id.as_str()))
+                .collect::<Vec<_>>(),
+            [(OpKind::Put, team.as_str())],
+            "the first copy was never sent, and the original waits for the second"
+        );
+        store
+            .complete_put(&ops[0], Some("\"c\""), "ICS")
+            .await
+            .unwrap();
+        assert_eq!(queued(&store).await[0].kind, OpKind::Delete);
     }
 
     #[tokio::test]
@@ -2698,21 +2797,15 @@ mod sync {
         let id = format!("{work}/a");
         store.move_event(&id, "unused", &home).await.unwrap();
         let op = queued(&store).await.remove(0);
-        let mut ops = store.copy_instead_of_move(&op).await.unwrap();
-        ops.sort_by_key(|o| o.kind == OpKind::Put);
+        // The copy is sent now; the deletion once it arrived.
+        let ops = store.copy_instead_of_move(&op).await.unwrap();
         assert_eq!(
-            (
-                ops[0].kind,
-                ops[0].calendar_id.as_str(),
-                ops[0].href.as_str()
-            ),
-            (OpKind::Delete, work.as_str(), a_ics().as_str())
+            ops.iter()
+                .map(|o| (o.kind, o.calendar_id.as_str()))
+                .collect::<Vec<_>>(),
+            [(OpKind::Put, home.as_str())]
         );
-        assert_eq!(
-            (ops[1].kind, ops[1].calendar_id.as_str()),
-            (OpKind::Put, home.as_str())
-        );
-        assert!(ops[1].href.starts_with(HOME_URL));
+        assert!(ops[0].href.starts_with(HOME_URL));
         // The deletion is checked against the version the server had.
         let push = store
             .object_for_push(&work, &a_ics())

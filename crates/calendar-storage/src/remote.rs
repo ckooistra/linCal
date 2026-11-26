@@ -120,6 +120,15 @@ macro_rules! op_columns {
     };
 }
 
+/// Leaves out operations waiting for another one: the deletion of an event
+/// moved to another account waits until its copy has been uploaded.
+macro_rules! not_waiting {
+    () => {
+        " AND NOT EXISTS (SELECT 1 FROM pending_operations w \
+         WHERE w.calendar_id = p.after_calendar AND w.href = p.after_href) "
+    };
+}
+
 fn pending_op(r: &sqlx::sqlite::SqliteRow) -> PendingOp {
     let moving = match (
         r.get::<Option<String>, _>("move_from"),
@@ -430,6 +439,83 @@ impl Store {
         Ok(())
     }
 
+    /// After an event moved to another account was copied to `copy`
+    /// (calendar, href; `None` for a local calendar): the deletion of the
+    /// original at `original`, and deletions already waiting for the
+    /// original (it was itself a copy not yet uploaded), wait for the copy
+    /// to be uploaded. A local copy waits for nothing.
+    pub(crate) async fn delete_after_copy(
+        tx: &mut Transaction<'_, Sqlite>,
+        original: (&str, &str),
+        copy: Option<(&str, &str)>,
+    ) -> Result<()> {
+        let (calendar, href) = copy.unzip();
+        sqlx::query(
+            "UPDATE pending_operations SET after_calendar = ?1, after_href = ?2 \
+             WHERE (calendar_id = ?3 AND href = ?4 AND kind = 'delete') \
+             OR (after_calendar = ?3 AND after_href = ?4)",
+        )
+        .bind(calendar)
+        .bind(href)
+        .bind(original.0)
+        .bind(original.1)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    /// The copy at (`calendar_id`, `href`) is on its server: deletions of
+    /// originals waiting for it may go.
+    async fn copy_uploaded(
+        tx: &mut Transaction<'_, Sqlite>,
+        calendar_id: &str,
+        href: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE pending_operations SET after_calendar = NULL, after_href = NULL \
+             WHERE after_calendar = ? AND after_href = ?",
+        )
+        .bind(calendar_id)
+        .bind(href)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    /// The copy at (`calendar_id`, `href`) is given up before it reached its
+    /// server: the originals waiting for it are not deleted, and their
+    /// calendars are listed afresh, which brings them back.
+    async fn keep_originals(
+        tx: &mut Transaction<'_, Sqlite>,
+        calendar_id: &str,
+        href: &str,
+    ) -> Result<()> {
+        let originals: Vec<(String, String)> = sqlx::query_as(
+            "SELECT calendar_id, href FROM pending_operations WHERE after_calendar = ? AND after_href = ?",
+        )
+        .bind(calendar_id)
+        .bind(href)
+        .fetch_all(&mut **tx)
+        .await?;
+        for (calendar, original) in originals {
+            for sql in [
+                "DELETE FROM pending_operations WHERE calendar_id = ? AND href = ?",
+                "DELETE FROM remote_objects WHERE calendar_id = ? AND href = ?",
+            ] {
+                sqlx::query(sql)
+                    .bind(&calendar)
+                    .bind(&original)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+            sqlx::query("UPDATE calendars SET sync_token = NULL WHERE id = ?")
+                .bind(&calendar)
+                .execute(&mut **tx)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Runs the one-time fix-ups queued by migrations (`pending_fixups`).
     pub(crate) async fn run_fixups(&self) -> Result<()> {
         let pending: Vec<String> = sqlx::query_scalar("SELECT name FROM pending_fixups")
@@ -694,13 +780,27 @@ impl Store {
 
     /// Removes an account with its calendars, events and queued changes.
     pub async fn remove_account(&self, account_id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        // Copies of events moved here from other accounts that never
+        // arrived: their originals stay where they were.
+        let copies: Vec<(String, String)> = sqlx::query_as(
+            "SELECT DISTINCT p.after_calendar, p.after_href FROM pending_operations p \
+             JOIN calendars c ON c.id = p.after_calendar WHERE c.account_id = ? AND p.after_href IS NOT NULL",
+        )
+        .bind(account_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (calendar_id, href) in &copies {
+            Self::keep_originals(&mut tx, calendar_id, href).await?;
+        }
         let done = sqlx::query("DELETE FROM accounts WHERE id = ?")
             .bind(account_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         if done.rows_affected() == 0 {
             return Err(StorageError::NotFound(account_id.to_owned()));
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1010,8 +1110,9 @@ impl Store {
     pub async fn due_operations(&self, account_id: &str, now_ms: i64) -> Result<Vec<PendingOp>> {
         let rows = sqlx::query(concat!(
             op_columns!(),
-            "WHERE c.account_id = ? AND p.state = 'pending' \
-             AND p.next_attempt_ms <= ? ORDER BY p.created_at"
+            "WHERE c.account_id = ? AND p.state = 'pending' AND p.next_attempt_ms <= ?",
+            not_waiting!(),
+            "ORDER BY p.created_at"
         ))
         .bind(account_id)
         .bind(now_ms)
@@ -1028,7 +1129,8 @@ impl Store {
     ) -> Result<Option<PendingOp>> {
         let row = sqlx::query(concat!(
             op_columns!(),
-            "WHERE p.calendar_id = ? AND p.href = ? AND p.state = 'pending'"
+            "WHERE p.calendar_id = ? AND p.href = ? AND p.state = 'pending'",
+            not_waiting!()
         ))
         .bind(calendar_id)
         .bind(href)
@@ -1047,10 +1149,11 @@ impl Store {
 
     /// Earliest retry time of queued operations for an account, if any.
     pub async fn next_retry_ms(&self, account_id: &str) -> Result<Option<i64>> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar(concat!(
             "SELECT MIN(p.next_attempt_ms) FROM pending_operations p JOIN calendars c ON c.id = p.calendar_id \
              WHERE c.account_id = ? AND p.state = 'pending'",
-        )
+            not_waiting!()
+        ))
         .bind(account_id)
         .fetch_one(&self.pool)
         .await?)
@@ -1186,6 +1289,7 @@ impl Store {
         for sql in [
             "UPDATE remote_objects SET href = ? WHERE calendar_id = ? AND href = ?",
             "UPDATE pending_operations SET href = ? WHERE calendar_id = ? AND href = ?",
+            "UPDATE pending_operations SET after_href = ? WHERE after_calendar = ? AND after_href = ?",
             "UPDATE events SET remote_href = ? WHERE calendar_id = ? AND remote_href = ?",
         ] {
             sqlx::query(sql)
@@ -1271,6 +1375,7 @@ impl Store {
         if done.rows_affected() == 0 {
             return Ok(false);
         }
+        Self::copy_uploaded(&mut tx, &op.calendar_id, &op.href).await?;
         let incoming = IncomingObject {
             href: op.href.clone(),
             etag: etag.map(str::to_owned),
@@ -1302,6 +1407,7 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         if done.rows_affected() > 0 {
+            Self::copy_uploaded(&mut tx, &op.calendar_id, &op.href).await?;
             sqlx::query(
                 "UPDATE remote_objects SET etag = ?, ical = ?, presence = 'present', import_error = NULL, \
                  conflict_etag = NULL, conflict_ical = NULL WHERE calendar_id = ? AND href = ?",
@@ -1565,6 +1671,9 @@ impl Store {
                     .await?;
             }
             Resolution::UseServer => {
+                // A copy (of an event moved from another account) given up:
+                // the original stays.
+                Self::keep_originals(&mut tx, calendar_id, href).await?;
                 let origin: Option<String> = sqlx::query_scalar(
                     "SELECT move_from FROM pending_operations WHERE calendar_id = ? AND href = ?",
                 )

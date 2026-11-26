@@ -338,3 +338,67 @@ async fn refusals_say_what_google_refused() {
         "unexpected response from the server: HTTP 400 invalid: Invalid value for: Reminders override minutes"
     );
 }
+
+#[tokio::test]
+async fn floating_times_are_written_in_the_calendars_zone() {
+    // From a CalDAV server, say: a series without a time zone, with one
+    // occurrence moved by an hour. Google has no floating times.
+    let fake = FakeGoogle::start().await;
+    let p = provider(&fake, "token-1", FAR);
+    let cal = primary(&p).await;
+    let at = |d: u32, h: u32, m: u32| {
+        chrono::NaiveDate::from_ymd_opt(2026, 6, d)
+            .unwrap()
+            .and_hms_opt(h, m, 0)
+            .unwrap()
+    };
+    let mut content = GoogleCodec
+        .read(&json!({"events": [standup()]}).to_string())
+        .unwrap()
+        .content;
+    let master = content.master.as_mut().unwrap();
+    master.timing = EventTiming::Floating {
+        start: at(1, 9, 0),
+        end: at(1, 9, 15),
+    };
+    let mut moved = master.clone();
+    moved.recurrence = None;
+    moved.recurrence_id = Some(OccurrenceKey::Floating(at(2, 9, 0)));
+    moved.timing = EventTiming::Floating {
+        start: at(2, 10, 0),
+        end: at(2, 10, 15),
+    };
+    content.overrides.push(moved);
+
+    let payload = GoogleCodec.write(None, "floating", &content, &[]);
+    let created = p
+        .put_object(
+            &format!("{}floating.ics", cal.href),
+            &payload,
+            &Precondition::Create,
+        )
+        .await
+        .unwrap();
+    let master_id = created.href.rsplit('/').next().unwrap().to_owned();
+    {
+        let state = fake.state.lock().unwrap();
+        let events = &state.events["alice@example.com"];
+        let master = &events[&master_id].1;
+        assert_eq!(
+            master["start"],
+            json!({"dateTime": "2026-06-01T09:00:00+02:00", "timeZone": "Europe/Berlin", "date": null})
+        );
+        // 09:00 in Berlin is 07:00 UTC, which Google's instance ids use.
+        let exception = &events[&format!("{master_id}_20260602T070000Z")].1;
+        assert_eq!(exception["start"]["timeZone"], "Europe/Berlin");
+    }
+    let read = GoogleCodec.read(&created.data.unwrap()).unwrap().content;
+    assert_eq!(
+        read.overrides[0].recurrence_id,
+        Some(OccurrenceKey::Instant(
+            chrono::DateTime::parse_from_rfc3339("2026-06-02T07:00:00Z")
+                .unwrap()
+                .into()
+        ))
+    );
+}

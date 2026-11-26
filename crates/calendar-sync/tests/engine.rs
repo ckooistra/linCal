@@ -36,6 +36,8 @@ struct Server {
     no_moves: Mutex<bool>,
     /// Requests made, as "MOVE <href>" (moves only).
     moves: Mutex<Vec<String>>,
+    /// Refuse writes under this prefix (as Google refuses some events).
+    refuse_under: Mutex<Option<String>>,
 }
 
 impl Server {
@@ -126,6 +128,11 @@ impl CalendarProvider for Fake {
         pre: &Precondition,
     ) -> ProviderResult<WriteResult> {
         self.0.check()?;
+        if let Some(prefix) = self.0.refuse_under.lock().unwrap().as_deref()
+            && href.starts_with(prefix)
+        {
+            return Err(ProviderError::InvalidResponse("HTTP 400 invalid".into()));
+        }
         let gate = self.0.gate.lock().unwrap().clone();
         if let Some((entered, release)) = gate {
             entered.notify_one();
@@ -1077,6 +1084,85 @@ async fn a_server_that_cannot_move_gets_a_copy_and_a_deletion() {
         (shown[0].calendar_id.as_str(), shown[0].sync_status),
         (home.as_str(), SyncStatus::Synced)
     );
+}
+
+#[tokio::test]
+async fn a_copy_the_server_refuses_leaves_the_original_where_it_was() {
+    let e = env().await;
+    *e.server.home.lock().unwrap() = true;
+    *e.server.no_moves.lock().unwrap() = true;
+    *e.server.refuse_under.lock().unwrap() = Some(HOME.into());
+    let href = format!("{CAL}remote.ics");
+    e.server.put_raw(&href, &ics("remote", "Planning"));
+    e.engine.sync_account("acct").await.unwrap();
+    let home = calendar_named(&e.store, "Home").await;
+    e.store
+        .move_event(&format!("{}/remote", e.calendar_id), "moved", &home)
+        .await
+        .unwrap();
+
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!((report.uploaded, report.failed_uploads), (0, 1));
+    assert!(
+        e.server.objects.lock().unwrap().contains_key(&href),
+        "not deleted while the copy is refused"
+    );
+    let problems = e.engine.problems().await.unwrap();
+    assert_eq!(problems.len(), 1, "only the copy: {problems:?}");
+    assert!(!problems[0].deletion);
+    // Another pass doesn't delete it either.
+    e.engine.sync_account("acct").await.unwrap();
+    assert!(e.server.objects.lock().unwrap().contains_key(&href));
+
+    // Giving the copy up brings the original back, unchanged on the server.
+    e.engine
+        .resolve(
+            &problems[0].calendar_id,
+            &problems[0].href,
+            Resolution::UseServer,
+        )
+        .await
+        .unwrap();
+    e.engine.sync_account("acct").await.unwrap();
+    let shown = e.store.query_range(june(), TZ).await.unwrap();
+    assert_eq!(
+        shown
+            .iter()
+            .map(|o| (o.title.as_str(), o.calendar_id.as_str(), o.sync_status))
+            .collect::<Vec<_>>(),
+        [("Planning", e.calendar_id.as_str(), SyncStatus::Synced)]
+    );
+    assert_eq!(e.server.objects.lock().unwrap().len(), 1);
+    assert!(e.engine.problems().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn once_a_refused_copy_is_accepted_the_original_is_deleted() {
+    let e = env().await;
+    *e.server.home.lock().unwrap() = true;
+    *e.server.no_moves.lock().unwrap() = true;
+    *e.server.refuse_under.lock().unwrap() = Some(HOME.into());
+    let href = format!("{CAL}remote.ics");
+    e.server.put_raw(&href, &ics("remote", "Planning"));
+    e.engine.sync_account("acct").await.unwrap();
+    let home = calendar_named(&e.store, "Home").await;
+    e.store
+        .move_event(&format!("{}/remote", e.calendar_id), "moved", &home)
+        .await
+        .unwrap();
+    e.engine.sync_account("acct").await.unwrap();
+
+    *e.server.refuse_under.lock().unwrap() = None;
+    let problem = e.engine.problems().await.unwrap().remove(0);
+    e.engine
+        .resolve(&problem.calendar_id, &problem.href, Resolution::Retry)
+        .await
+        .unwrap();
+    let report = e.engine.sync_account("acct").await.unwrap();
+    assert_eq!(report.uploaded, 2, "the copy, then the deletion");
+    let objects = e.server.objects.lock().unwrap();
+    assert!(!objects.contains_key(&href));
+    assert!(objects.keys().all(|h| h.starts_with(HOME)));
 }
 
 #[tokio::test]

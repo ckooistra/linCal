@@ -157,8 +157,9 @@ Between two calendars of one Google or CalDAV account, the server moves the even
 Between accounts, to or from a local calendar, and with Outlook, `Store::move_event` makes the move as a deletion plus a creation, in one transaction:
 
 - The rows are copied into the new calendar under a **new id**. The originals are deleted the usual way.
-- **The old server copy** is queued for deletion with the version we knew. A change someone made there meanwhile becomes a conflict, shown under *Review…*, instead of being deleted. Keeping the server's version brings it back beside the moved copy, and the new id keeps the two apart. An object that was never uploaded is simply forgotten.
 - **The copy**, in a synchronized calendar, is queued for upload as a new object, with a new UID.
+- **The old server copy** is queued for deletion with the version we knew. A change someone made there meanwhile becomes a conflict, shown under *Review…*, instead of being deleted. Keeping the server's version brings it back beside the moved copy, and the new id keeps the two apart. An object that was never uploaded is simply forgotten.
+- **The deletion waits for the copy.** It names the copy's queued upload (`after_calendar`, `after_href`, migration 9) and isn't sent while that upload is queued, retrying or refused. Only once the new server has the copy is the original deleted, in the same pass within an account and in the next one (about a second later) for another account. If the new server refuses the copy, the original stays on its server. *Discard my change* on the refused copy, or removing the copy's account, drops the waiting deletion, and the original comes back with the next sync. A copy moved on again before it was uploaded passes the wait on to the next copy.
 - The local rows are the source of truth throughout: if the deletion or the upload fails, it is retried, and nothing is lost.
 - **Not carried over:** what the app doesn't model (attendees, conferencing, links to invitations). The server sees a new event.
 
